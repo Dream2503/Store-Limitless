@@ -76,7 +76,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
     /** @type {[File[], import("react").Dispatch<import("react").SetStateAction<File[]>>]} */
     const [files, setFiles] = useState(() => Array.from(initialFiles || []));
     const [link, setLink] = useState("");
-    const links = link.trim() ? [link.trim()] : [];
+    // One non-empty line is one import; the current upload loop processes them in order.
+    const links = link.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
     /** @type {["file" | "link", import("react").Dispatch<import("react").SetStateAction<"file" | "link">>]} */
     const [uploadMode, setUploadMode] = useState("file");
 
@@ -537,13 +538,11 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             // contains every selected file/link, even though transfers run one at a time.
             if (modal) onClose?.(); else navigate(directoryToRoute(directory));
 
-            if (torrentLinks.length > 0) {
-                if (torrentLinks.length !== links.length) {
-                    throw new Error("Please submit torrent magnets separately from regular links so each import can be selected safely.");
-                }
-
-                // Inspection runs after the modal closes. The upload tray owns the task while
-                // metadata resolves, so the rest of the website remains usable.
+            if (torrentLinks.length > 0 && torrentSelectionReady && torrentLinks.length === links.length) {
+                // The file choices are already saved; continue with the sequential worker below.
+            } else if (torrentLinks.length > 0) {
+                // Inspect all torrents together, then queue every link in its original order.
+                // Mixed URL/magnet imports remain sequential in the existing worker.
                 void (async () => {
                     try {
                         await publishBatch({
@@ -594,6 +593,15 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                 })),
                             };
                         }));
+                        setTorrentSelectionQueue(previews.map((torrent) => ({
+                            ...torrent,
+                            selected: torrent.files.map((item) => Number(item.index)),
+                        })));
+                        setTorrentSelectionIndex(0);
+                        setTorrentSelectionReady(false);
+                        setTorrentSelectionModal(true);
+                        setStatus("idle");
+                        setTorrentPreviewLoading(false);
                         await publishBatch({
                             status: "queued",
                             message: "Torrent metadata ready. Select files to begin.",
@@ -1293,7 +1301,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                         Import from Link
                                     </p>
                                     <p className="text-xs text-[#898989]">
-                                        Import one HTTP(S) URL, public Telegram file-message link, or torrent magnet per task.
+                                        Paste multiple URLs or torrent magnets, one per line.
                                     </p>
                                 </div>
                             </div>
@@ -1303,21 +1311,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             <span className="material-symbols-outlined absolute left-3 top-3 text-[18px] text-[#707070]">
                                 link
                             </span>
-                                <input
-                                    type="text"
-                                    inputMode="url"
+                                <textarea
+                                    rows={Math.min(6, Math.max(3, links.length))}
                                     autoComplete="off"
                                     spellCheck={false}
                                     value={link}
                                     disabled={status === "uploading"}
-                                    onPaste={(event) => {
-                                        const pasted = event.clipboardData.getData("text/plain").trim();
-                                        if (/[\r\n]/.test(pasted)) {
-                                            event.preventDefault();
-                                            setMessage("Only one link can be imported per task. Paste a single URL or torrent magnet.");
-                                            setStatus("error");
-                                        }
-                                    }}
                                     onChange={(event) => {
                                         setLink(event.target.value);
                                         setMessage("");
@@ -1328,25 +1327,19 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                         setTorrentSelectionReady(false);
                                         setTorrentSelectionModal(false);
                                     }}
-                                    placeholder="https://example.com/file.zip, https://t.me/channel/123 or magnet:?xt=urn:btih:..."
-                                    className={["w-full h-11 rounded-md border border-[#363636]", "bg-white/[0.026] pl-10 pr-3 py-2 text-sm text-[#fafafa]", "placeholder:text-[#707070] outline-none transition-colors", "focus:border-[#707070] focus:ring-2 focus:ring-[#4d4d4d]/50", "disabled:opacity-60",].join(" ")}
+                                    placeholder={"Paste one link per line\nhttps://example.com/file.zip\nhttps://t.me/channel/123\nmagnet:?xt=urn:btih:..."}
+                                    aria-label="Links to import, one per line"
+                                    className={["w-full min-h-[88px] resize-y rounded-md border border-[#363636]", "bg-white/[0.026] pl-10 pr-3 py-2 text-sm text-[#fafafa]", "placeholder:text-[#707070] outline-none transition-colors", "focus:border-[#707070] focus:ring-2 focus:ring-[#4d4d4d]/50", "disabled:opacity-60",].join(" ")}
                                 />
                             </div>
 
                             {/* LINK DETECTED */}
-                            {links.length > 0 && (<div className="flex items-center gap-1.5 mt-3 text-[#3ecf8e]">
-                            <span className="material-symbols-outlined text-[16px]">
-                                check_circle
-                            </span>
-                                <p className="text-xs">
-                                    Link ready to import
-                                </p>
+                            {links.length > 0 && (<div className="mt-3 flex items-center gap-1.5 text-[#3ecf8e]">
+                                <span className="material-symbols-outlined text-[16px]" aria-hidden="true">check_circle</span>
+                                <p className="text-xs">{links.length} link{links.length === 1 ? "" : "s"} ready to import sequentially</p>
                             </div>)}
-                            <p className="text-xs text-[#707070] mt-3 leading-relaxed">
-                                Enter one publicly accessible HTTP(S) URL, one public Telegram file-message link, or one valid torrent magnet URI.
-                                Telegram links must point to a public post with a downloadable attachment. Private /c/ links, invite-only chats,
-                                and messages without a file attachment are rejected with a specific error. Multiple links in a single task are
-                                disabled. Torrent contents are downloaded completely before their files are uploaded, and torrent folder paths are preserved.
+                            <p className="mt-3 text-xs leading-relaxed text-[#707070]">
+                                Each non-empty line is added to the queue and imported one at a time, in order. Telegram links must point to a public post with a downloadable attachment. Private /c/ links, invite-only chats, and messages without a file attachment are rejected with a specific error. Torrent magnets can be queued together with other links; choose torrent files when prompted.
                             </p>
                         </div>
                     </div>)}
@@ -1370,7 +1363,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         <span className="material-symbols-outlined text-[16px]">
                             cloud_upload
                         </span>
-                            {uploadMode === "link" ? `${torrentSelectionReady ? "Start importing" : "Import link"}` : `Upload ${files.length} File${files.length === 1 ? "" : "s"}`}
+                            {uploadMode === "link" ? (torrentSelectionReady ? "Start importing" : `Import ${links.length} link${links.length === 1 ? "" : "s"}`) : `Upload ${files.length} File${files.length === 1 ? "" : "s"}`}
                         </>)}
                     </button>
 

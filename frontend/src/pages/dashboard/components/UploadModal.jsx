@@ -376,7 +376,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             size: 0,
         }));
         const queueTotal = queueItems.length;
-        // Keep the complete queue in frontend state; only the active item is shared with the server.
+        // The browser owns queue order and actual submission; server-side tray records hold lightweight task metadata.
         let activeQueueIndex = 0;
         setQueueProgress({current: 0, total: queueTotal});
         let batchIds = [];
@@ -392,9 +392,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             const createdTasks = [];
             try {
                 for (const [index, item] of queueItems.entries()) {
-                    const taskName = queueItems.length === 1
-                        ? batchName
-                        : uploadMode === "file" ? item.name : `Link ${index + 1}`;
+                    const taskName = queueItems.length === 1 ? batchName : item.name;
                     const batchResponse = await fetch(`${API_URL}/auth/upload-batches`, {
                         method: "POST",
                         headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},

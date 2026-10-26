@@ -555,8 +555,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 }
             };
 
-            // The tray record is persisted before any transfer begins, so it immediately
-            // contains every selected file/link, even though transfers run one at a time.
+            // Only the first item is registered initially. Later items stay in the local
+            // queue and replace the active tray item when their turn begins.
             if (modal) onClose?.(); else navigate(directoryToRoute(directory));
 
             if (torrentLinks.length === 1 && links.length === 1) {
@@ -806,8 +806,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     await publishBatch({
                         items: [{...queueItems[index], status: "queued", message: "Queued in browser"}],
                         total_items: 1,
-                        current_index: 0,
-                        completed_items: 0,
                         status: "uploading",
                         current_index: index,
                         completed_items: successfulItems,

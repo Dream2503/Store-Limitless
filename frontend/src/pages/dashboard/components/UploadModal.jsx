@@ -372,6 +372,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             name: relativePath, size: file.size
         })) : links.map((value) => ({name: isTelegramMessageUrl(value) ? "Telegram message" : value, size: 0}));
         const queueTotal = queueItems.length;
+        // Keep the complete queue in frontend state; only the active item is shared with the server.
+        let activeQueueIndex = 0;
         setQueueProgress({current: 0, total: queueTotal});
         let batchId = "";
         let batchTransfer = null;
@@ -381,7 +383,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             const batchName = uploadMode === "link" ? "Link import" : folderRoots.length === 1 && filesWithPaths.some(({relativePath}) => relativePath.includes("/")) ? `${folderRoots[0]} (${filesWithPaths.length} file${filesWithPaths.length === 1 ? "" : "s"})` : `${filesWithPaths.length} file${filesWithPaths.length === 1 ? "" : "s"}`;
             const batchResponse = await fetch(`${API_URL}/auth/upload-batches`, {
                 method: "POST", headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"}, body: JSON.stringify({
-                    name: batchName, kind: uploadMode, directory, data_center: dataCenter, items: queueItems,
+                    name: batchName, kind: uploadMode, directory, data_center: dataCenter, items: [queueItems[0]],
                 }),
             });
             if (!batchResponse.ok) {
@@ -403,15 +405,34 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             if (!window.__storeLimitlessUploadTransfers) window.__storeLimitlessUploadTransfers = new Map();
             window.__storeLimitlessUploadTransfers.set(batchId, batchTransfer);
 
-            /** Publish queue progress to the task entry shown in the dashboard tray. */
+            /**
+             * Publish progress for the active item only. Later queue entries stay in
+             * frontend memory until the current transfer has finished.
+             */
             const publishBatch = async (updates) => {
                 if (!batchId) return;
+                const batchUpdates = {...updates};
+                if (queueItems.length > 1) {
+                    if (batchUpdates.item_index != null) batchUpdates.item_index = 0;
+                    if (batchUpdates.current_index != null) {
+                        batchUpdates.current_index = batchUpdates.status === "completed" ? 1 : 0;
+                    }
+                    if (batchUpdates.completed_items != null) {
+                        batchUpdates.completed_items = batchUpdates.item_status === "completed" || batchUpdates.status === "completed" ? 1 : 0;
+                    }
+                    if (Array.isArray(batchUpdates.items)) {
+                        batchUpdates.items = [{
+                            ...(queueItems[activeQueueIndex] || queueItems[0]),
+                            ...batchUpdates.items[0],
+                        }];
+                    }
+                }
                 const currentToken = localStorage.getItem("token");
                 if (!currentToken) throw new Error("Your session has expired.");
                 const response = await fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(batchId)}`, {
                     method: "PATCH",
                     headers: {Authorization: `Bearer ${currentToken}`, "Content-Type": "application/json"},
-                    body: JSON.stringify(updates),
+                    body: JSON.stringify(batchUpdates),
                 });
                 if (!response.ok) {
                     let detail = `Could not update upload task (${response.status})`;
@@ -424,7 +445,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     throw new Error(detail);
                 }
                 const result = await response.json().catch(() => ({}));
-                if (result.status === "cancelled" && updates.status !== "cancelled") {
+                if (result.status === "cancelled" && batchUpdates.status !== "cancelled") {
                     cancelToken.cancelled = true;
                     throw new Error("Upload task was cancelled.");
                 }
@@ -459,7 +480,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         kind: uploadMode,
                         directory,
                         data_center: dataCenter,
-                        items: queueItems,
+                        items: [queueItems[activeQueueIndex] || queueItems[0]],
                     }),
                 });
                 const payload = await response.json().catch(() => ({}));
@@ -536,9 +557,11 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
             // The tray record is persisted before any transfer begins, so it immediately
             // contains every selected file/link, even though transfers run one at a time.
-            if (torrentLinks.length > 0 && !(torrentSelectionReady && torrentLinks.length === links.length)) {
-                // Inspect all torrents together, then queue every link in its original order.
-                // Mixed URL/magnet imports remain sequential in the existing worker.
+            if (modal) onClose?.(); else navigate(directoryToRoute(directory));
+
+            if (torrentLinks.length === 1 && links.length === 1) {
+                // Keep the existing single-torrent selection flow. Multi-link queues use
+                // the frontend's sequential worker below, including torrent magnets.
                 void (async () => {
                     try {
                         await publishBatch({
@@ -589,15 +612,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                 })),
                             };
                         }));
-                        setTorrentSelectionQueue(previews.map((torrent) => ({
-                            ...torrent,
-                            selected: torrent.files.map((item) => Number(item.index)),
-                        })));
-                        setTorrentSelectionIndex(0);
-                        setTorrentSelectionReady(false);
-                        setTorrentSelectionModal(true);
-                        setStatus("idle");
-                        setTorrentPreviewLoading(false);
                         await publishBatch({
                             status: "queued",
                             message: "Torrent metadata ready. Select files to begin.",
@@ -612,10 +626,11 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         });
                     } catch (error) {
                         const message = error instanceof Error ? error.message : "Could not inspect torrent metadata.";
-                        setTorrentPreviewLoading(false);
-                        setMessage(message);
-                        setStatus("error");
-                        console.error("Could not inspect torrent metadata:", error);
+                        try {
+                            await publishInspectionFailure(message);
+                        } catch (publishError) {
+                            console.error("Could not preserve failed torrent inspection task:", publishError);
+                        }
                     } finally {
                         window.__storeLimitlessUploadTransfers?.delete(batchId);
                         uploadRunRef.current = false;
@@ -623,10 +638,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 })();
                 return;
             }
-
-            // Keep the upload modal visible while torrent choices are being inspected,
-            // then close it and return to the directory once the user confirms imports.
-            if (modal) onClose?.(); else navigate(directoryToRoute(directory));
 
             /** Create one child upload job, and fully finish it before starting the next item. */
             const createJob = async (selectedFile, selectedLink = "", destinationDirectory = directory, displayName = selectedFile?.name || selectedLink, itemNumber = 1) => {
@@ -790,8 +801,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
                 for (const [index, {file: selectedFile, relativePath}] of filesWithPaths.entries()) {
                     if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
+                    activeQueueIndex = index;
                     setQueueProgress({current: index + 1, total: filesWithPaths.length});
                     await publishBatch({
+                        items: [{...queueItems[index], status: "queued", message: "Queued in browser"}],
+                        total_items: 1,
+                        current_index: 0,
+                        completed_items: 0,
                         status: "uploading",
                         current_index: index,
                         completed_items: successfulItems,
@@ -839,8 +855,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             } else {
                 for (const [index, selectedLink] of links.entries()) {
                     if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
+                    activeQueueIndex = index;
                     setQueueProgress({current: index + 1, total: links.length});
                     await publishBatch({
+                        items: [{...queueItems[index], status: "queued", message: "Queued in browser"}],
+                        total_items: 1,
+                        current_index: 0,
+                        completed_items: 0,
                         status: "uploading",
                         current_index: index,
                         completed_items: successfulItems,

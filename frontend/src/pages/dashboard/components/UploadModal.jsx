@@ -536,11 +536,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
             // The tray record is persisted before any transfer begins, so it immediately
             // contains every selected file/link, even though transfers run one at a time.
-            if (modal) onClose?.(); else navigate(directoryToRoute(directory));
-
-            if (torrentLinks.length > 0 && torrentSelectionReady && torrentLinks.length === links.length) {
-                // The file choices are already saved; continue with the sequential worker below.
-            } else if (torrentLinks.length > 0) {
+            if (torrentLinks.length > 0 && !(torrentSelectionReady && torrentLinks.length === links.length)) {
                 // Inspect all torrents together, then queue every link in its original order.
                 // Mixed URL/magnet imports remain sequential in the existing worker.
                 void (async () => {
@@ -627,6 +623,10 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 })();
                 return;
             }
+
+            // Keep the upload modal visible while torrent choices are being inspected,
+            // then close it and return to the directory once the user confirms imports.
+            if (modal) onClose?.(); else navigate(directoryToRoute(directory));
 
             /** Create one child upload job, and fully finish it before starting the next item. */
             const createJob = async (selectedFile, selectedLink = "", destinationDirectory = directory, displayName = selectedFile?.name || selectedLink, itemNumber = 1) => {

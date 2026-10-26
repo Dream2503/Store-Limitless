@@ -858,8 +858,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     await publishBatch({
                         items: [{...queueItems[index], status: "queued", message: "Queued in browser"}],
                         total_items: 1,
-                        current_index: 0,
-                        completed_items: 0,
                         status: "uploading",
                         current_index: index,
                         completed_items: successfulItems,

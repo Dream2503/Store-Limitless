@@ -446,8 +446,9 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             cancelToken = batchTransfer.cancelToken;
 
             /**
-             * Publish progress for the active item only. Later queue entries stay in
-             * frontend memory until the current transfer has finished.
+             * Publish progress for the active item only. The browser retains file objects
+             * and processing order; pending links are represented by safe placeholder names
+             * until their individual turns begin.
              */
             const publishBatch = async (updates) => {
                 if (!batchId) return;
@@ -807,9 +808,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 }
 
                 if (folderPaths.size) {
-                    await publishBatch({
-                        status: "uploading", current_index: 0, current_job_id: "", current_name: "", message: "Preparing folder structure"
-                    });
                     const treeResponse = await fetch(`${API_URL}/auth/tree`, {headers: {Authorization: `Bearer ${token}`}});
                     if (!treeResponse.ok) throw new Error(`Could not load existing folders (${treeResponse.status})`);
                     const tree = await treeResponse.json();

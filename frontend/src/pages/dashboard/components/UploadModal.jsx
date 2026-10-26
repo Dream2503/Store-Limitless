@@ -616,13 +616,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         });
                     } catch (error) {
                         const message = error instanceof Error ? error.message : "Could not inspect torrent metadata.";
-                        try {
-                            await publishInspectionFailure(message);
-                        } catch (publishError) {
-                            console.error("Could not preserve failed torrent inspection task:", publishError);
-                        }
+                        setTorrentPreviewLoading(false);
+                        setMessage(message);
+                        setStatus("error");
+                        console.error("Could not inspect torrent metadata:", error);
                     } finally {
                         window.__storeLimitlessUploadTransfers?.delete(batchId);
+                        uploadRunRef.current = false;
                     }
                 })();
                 return;

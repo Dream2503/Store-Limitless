@@ -789,7 +789,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             };
 
             let successfulItems = 0;
-            const failedItems = [];
 
             if (uploadMode === "file") {
                 // Preserve the nested folder layout, but cancel checks prevent the next
@@ -877,7 +876,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     } catch (error) {
                         if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) throw new Error("Upload task was cancelled.");
                         const failureMessage = error instanceof Error ? error.message : "Upload failed";
-                        failedItems.push({name: relativePath, message: failureMessage});
                         await publishBatch({
                             status: "error",
                             current_index: 0,
@@ -931,7 +929,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     } catch (error) {
                         if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) throw new Error("Upload task was cancelled.");
                         const failureMessage = error instanceof Error ? error.message : "Import failed";
-                        failedItems.push({name: selectedLink, message: failureMessage});
                         await publishBatch({
                             status: "error",
                             current_index: 0,

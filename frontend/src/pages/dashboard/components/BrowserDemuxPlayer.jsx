@@ -236,6 +236,15 @@ function subtitleText(stream, packet) {
     return text;
 }
 
+function isMediaTimeBuffered(media, time) {
+    if (!media?.buffered || !Number.isFinite(time)) return false;
+    for (let index = 0; index < media.buffered.length; index += 1) {
+        if (time >= media.buffered.start(index) - 0.15 &&
+            time <= media.buffered.end(index) + 0.15) return true;
+    }
+    return false;
+}
+
 function activeSubtitleText(cues, time) {
     if (!Array.isArray(cues) || !cues.length || !Number.isFinite(time)) return "";
 
@@ -1255,6 +1264,20 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         if (readySession && !readySession.cancelled) {
             const targetTime = Math.max(0, Number(video?.currentTime) || 0);
             const audio = readySession.audio;
+
+            // "Ready" means the first fragment arrived, not necessarily that this
+            // track has buffered the current playhead. Restart it at the playhead
+            // rather than making it append the entire earlier section of the file.
+            if (!isMediaTimeBuffered(audio, targetTime)) {
+                const wasPlaying = Boolean(video && !video.paused);
+                requestedAudioRef.current = track.id;
+                setSelectedAudio(track.id);
+                setStatus("Preparing selected audio at the current position · video keeps playing");
+                readySession.dispose?.();
+                void startAudioPipeline(track, targetTime, wasPlaying, true);
+                return;
+            }
+
             if (Math.abs(audio.currentTime - targetTime) > 0.2) {
                 try { audio.currentTime = targetTime; } catch { /* the next sync tick retries */ }
             }

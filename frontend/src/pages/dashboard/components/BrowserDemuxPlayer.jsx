@@ -224,6 +224,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const audioSessionsRef = useRef(new Map());
     const pendingAudioSessionsRef = useRef(new Map());
     const subtitleDemuxerRef = useRef(null);
+    const subtitleCueCacheRef = useRef(new Map());
+    const subtitlePreloadPromiseRef = useRef(Promise.resolve());
     const subtitleTaskRef = useRef(0);
     const subtitleTrackRef = useRef(null);
     const seekTimerRef = useRef(null);
@@ -244,8 +246,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
     const clearSubtitle = useCallback(() => {
         subtitleTaskRef.current += 1;
-        subtitleDemuxerRef.current?.destroy?.();
-        subtitleDemuxerRef.current = null;
 
         const activeTrack = subtitleTrackRef.current;
         if (activeTrack) {
@@ -258,6 +258,58 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             subtitleTrackRef.current = null;
         }
     }, []);
+
+    const preloadSubtitleTracks = useCallback(async (streams) => {
+        if (!streams.length) return;
+
+        let demuxer = null;
+        try {
+            const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
+            demuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
+            subtitleDemuxerRef.current = demuxer;
+            await demuxer.load(source);
+            await demuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
+
+            for (const stream of streams) {
+                const cues = [];
+                try {
+                    const reader = demuxer.readAVPacket(
+                        0,
+                        0,
+                        AVMediaType.AVMEDIA_TYPE_SUBTITLE,
+                        stream.index,
+                    ).getReader();
+
+                    try {
+                        while (true) {
+                            const next = await reader.read();
+                            if (next.done) break;
+
+                            const packet = next.value;
+                            const text = subtitleText(stream, packet);
+                            if (!text) continue;
+
+                            const start = Math.max(0, Number(packet.timestamp) || 0);
+                            const duration = Number(packet.duration);
+                            const end = start + (Number.isFinite(duration) && duration > 0 ? duration : 3);
+                            if (end > start) cues.push({start, end, text});
+                        }
+                    } finally {
+                        try { reader.releaseLock?.(); } catch { /* already closed */ }
+                    }
+                } catch (error) {
+                    console.warn("Could not preload subtitle track " + trackLabel(stream), error);
+                }
+
+                subtitleCueCacheRef.current.set(String(stream.index), cues);
+            }
+        } catch (error) {
+            console.warn("Subtitle track preload failed.", error);
+        } finally {
+            demuxer?.destroy?.();
+            if (subtitleDemuxerRef.current === demuxer) subtitleDemuxerRef.current = null;
+        }
+    }, [source]);
 
     const loadSubtitle = useCallback(async (stream) => {
         clearSubtitle();
@@ -277,55 +329,28 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         );
         textTrack.mode = "showing";
         subtitleTrackRef.current = textTrack;
-        setStatus("Loading subtitle cues…");
+        setStatus("Loading cached subtitle cues…");
 
-        let demuxer = null;
-        let cueCount = 0;
         try {
-            const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
-            demuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
-            subtitleDemuxerRef.current = demuxer;
-            await demuxer.load(source);
-            await demuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
+            await subtitlePreloadPromiseRef.current;
             if (taskId !== subtitleTaskRef.current) return;
 
-            const reader = demuxer.readAVPacket(
-                0,
-                0,
-                AVMediaType.AVMEDIA_TYPE_SUBTITLE,
-                stream.index,
-            ).getReader();
-
-            try {
-                while (taskId === subtitleTaskRef.current) {
-                    const next = await reader.read();
-                    if (next.done) break;
-
-                    const packet = next.value;
-                    const text = subtitleText(stream, packet);
-                    if (!text) continue;
-
-                    // Web-Demuxer packet timestamps and durations are already in seconds.
-                    const start = Math.max(0, Number(packet.timestamp) || 0);
-                    const duration = Number(packet.duration);
-                    const end = start + (Number.isFinite(duration) && duration > 0 ? duration : 3);
-                    if (end <= start) continue;
-
-                    try {
-                        textTrack.addCue(new VTTCue(start, end, text));
-                        cueCount += 1;
-                    } catch (error) {
-                        console.warn("Skipping an invalid subtitle cue.", error);
-                    }
+            const cues = subtitleCueCacheRef.current.get(String(stream.index)) || [];
+            let cueCount = 0;
+            for (const cue of cues) {
+                if (taskId !== subtitleTaskRef.current) return;
+                try {
+                    textTrack.addCue(new VTTCue(cue.start, cue.end, cue.text));
+                    cueCount += 1;
+                } catch (error) {
+                    console.warn("Skipping an invalid subtitle cue.", error);
                 }
-            } finally {
-                try { reader.releaseLock?.(); } catch { /* already closed */ }
             }
 
             if (taskId === subtitleTaskRef.current) {
                 if (cueCount > 0) {
                     textTrack.mode = "showing";
-                    setStatus("Subtitles active · " + cueCount + " cues");
+                    setStatus("Subtitles active · " + cueCount + " cached cues");
                 } else {
                     textTrack.mode = "disabled";
                     setStatus("No readable subtitle cues were found in this track.");
@@ -334,14 +359,11 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         } catch (error) {
             if (taskId === subtitleTaskRef.current) {
                 textTrack.mode = "disabled";
-                console.warn("Subtitle extraction failed.", error);
-                setStatus(error?.message || "Could not read this subtitle track.");
+                console.warn("Subtitle cue activation failed.", error);
+                setStatus(error?.message || "Could not render this subtitle track.");
             }
-        } finally {
-            demuxer?.destroy?.();
-            if (subtitleDemuxerRef.current === demuxer) subtitleDemuxerRef.current = null;
         }
-    }, [clearSubtitle, source]);
+    }, [clearSubtitle]);
 
     const startPipeline = useCallback(async (audioIndex, startAt = 0, shouldPlay = false, preparedVideoDemuxer = null, knownStreams = null) => {
         const video = videoRef.current;
@@ -1111,8 +1133,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     }));
 
                 audioTracksRef.current = audio;
+                subtitleCueCacheRef.current.clear();
                 setAudioTracks(audio);
                 setSubtitleTracks(subtitles);
+                subtitlePreloadPromiseRef.current = preloadSubtitleTracks(
+                    subtitles.map((item) => item.stream),
+                );
 
                 const defaultAudio = audio.find((item) => item.supported) || null;
                 if (audio.length > 0 && !defaultAudio) {
@@ -1158,10 +1184,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             audioSessionsRef.current.clear();
             audioSessionRef.current = null;
             selectedAudioRef.current = "";
+            subtitleDemuxerRef.current?.destroy?.();
+            subtitleDemuxerRef.current = null;
+            subtitleCueCacheRef.current.clear();
+            subtitlePreloadPromiseRef.current = Promise.resolve();
             metadataDemuxer?.destroy?.();
             clearSubtitle();
         };
-    }, [clearSubtitle, fallback, source, startAudioPipeline, startPipeline]);
+    }, [clearSubtitle, fallback, preloadSubtitleTracks, source, startAudioPipeline, startPipeline]);
 
     const onAudioChange = (event) => {
         const track = audioTracksRef.current.find((item) => item.id === event.target.value);

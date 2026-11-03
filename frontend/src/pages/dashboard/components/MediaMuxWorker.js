@@ -13,6 +13,9 @@ let audioSource = null;
 let trackChains = {video: Promise.resolve(), audio: Promise.resolve()};
 let packetSequence = {video: 0, audio: 0};
 let pendingWrites = new Map();
+let pendingWriteBytes = 0;
+const MAX_PENDING_OUTPUT_BYTES = 64 * 1024 * 1024;
+const outputCapacityWaiters = [];
 let nextWriteId = 1;
 let closedTracks = new Set();
 let expectedTracks = 0;
@@ -24,8 +27,10 @@ function reportError(error) {
     failed = true;
     const message = error instanceof Error ? error.message : String(error);
     self.postMessage({type: "error", message});
-    for (const pending of pendingWrites.values()) pending.reject(new Error(message));
+    for (const waiter of outputCapacityWaiters) waiter.reject(new Error(message));
+    outputCapacityWaiters.length = 0;
     pendingWrites.clear();
+    pendingWriteBytes = 0;
 
     try {
         const canceled = output?.cancel?.();
@@ -45,9 +50,16 @@ async function initialize(message) {
             write(data) {
                 const copy = data.slice();
                 const id = nextWriteId++;
+                pendingWriteBytes += copy.byteLength;
+                pendingWrites.set(id, {byteLength: copy.byteLength});
+                self.postMessage({type: "data", id, buffer: copy.buffer}, [copy.buffer]);
+
+                // Keep remuxing while MSE appends previous fragments. Backpressure
+                // only when the bounded output queue reaches its memory budget.
+                if (pendingWriteBytes < MAX_PENDING_OUTPUT_BYTES) return;
+
                 return new Promise((resolve, reject) => {
-                    pendingWrites.set(id, {resolve, reject});
-                    self.postMessage({type: "data", id, buffer: copy.buffer}, [copy.buffer]);
+                    outputCapacityWaiters.push({resolve, reject});
                 });
             },
         }));
@@ -132,12 +144,19 @@ self.addEventListener("message", (event) => {
         const pending = pendingWrites.get(message.id);
         if (pending) {
             pendingWrites.delete(message.id);
-            pending.resolve();
+            pendingWriteBytes = Math.max(0, pendingWriteBytes - pending.byteLength);
+
+            if (pendingWriteBytes < MAX_PENDING_OUTPUT_BYTES && outputCapacityWaiters.length) {
+                const waiters = outputCapacityWaiters.splice(0);
+                for (const waiter of waiters) waiter.resolve();
+            }
         }
     } else if (message.type === "cancel") {
         failed = true;
-        for (const pending of pendingWrites.values()) pending.reject(new DOMException("Mux cancelled", "AbortError"));
+        for (const waiter of outputCapacityWaiters) waiter.reject(new DOMException("Mux cancelled", "AbortError"));
+        outputCapacityWaiters.length = 0;
         pendingWrites.clear();
+        pendingWriteBytes = 0;
         try {
             const canceled = output?.cancel?.();
             if (canceled?.catch) void canceled.catch(() => {});

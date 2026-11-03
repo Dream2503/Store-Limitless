@@ -3,6 +3,10 @@ import MediaMuxWorker from "./MediaMuxWorker.js?worker";
 
 const DEMUX_WASM_URL = "https://cdn.jsdelivr.net/npm/web-demuxer@4.0.0/dist/wasm-files/web-demuxer.wasm";
 const MAX_FORWARD_BUFFER_SECONDS = 35;
+const MAX_IN_FLIGHT_BATCHES = Math.max(
+    3,
+    Math.min(10, Math.floor((typeof navigator !== "undefined" ? navigator.hardwareConcurrency : 8) * 0.75)),
+);
 const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"]);
 
 function videoCodecName(codec) {
@@ -474,10 +478,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 const reader = demuxer.readAVPacket(session.startAt, 0, mediaType, streamIndex).getReader();
                 session.readers.push(reader);
                 const batch = [];
+                const inFlightBatches = new Set();
                 let batchBytes = 0;
+                let batchError = null;
 
                 const flushBatch = async () => {
                     if (!batch.length) return;
+                    if (batchError) throw batchError;
+
                     const id = session.nextPacketId++;
                     const items = batch.splice(0);
                     batchBytes = 0;
@@ -505,11 +513,29 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                         session.packetAcks.delete(id);
                         throw error;
                     }
-                    await ack;
+
+                    // Keep a bounded number of packet batches moving through the
+                    // muxer instead of waiting after every batch for an MSE append.
+                    let completion;
+                    completion = ack.then(
+                        () => null,
+                        (error) => {
+                            batchError ||= error;
+                            return error;
+                        },
+                    );
+                    inFlightBatches.add(completion);
+                    void completion.then(() => inFlightBatches.delete(completion));
+
+                    if (inFlightBatches.size >= MAX_IN_FLIGHT_BATCHES) {
+                        const error = await Promise.race(inFlightBatches);
+                        if (error) throw error;
+                    }
                 };
 
                 try {
                     while (!session.cancelled && sessionRef.current === session) {
+                        if (batchError) throw batchError;
                         const result = await reader.read();
                         if (result.done) break;
                         const packet = result.value;
@@ -523,11 +549,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     }
 
                     await flushBatch();
+                    if (inFlightBatches.size) await Promise.all(inFlightBatches);
+                    if (batchError) throw batchError;
+
                     if (!session.cancelled && sessionRef.current === session) {
                         worker.postMessage({type: "end-track", track});
                     }
                 } finally {
-                    try { reader.releaseLock?.(); } catch { /* closed */ }
+                    try { reader.releaseLock?.(); } catch { /* already closed */ }
                 }
             };
 
@@ -546,8 +575,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             session.listeners.push(["timeupdate", wakeAppend], ["playing", wakeAppend]);
 
             setStatus(audioStream
-                ? "Video and audio demux workers active · native browser decoding"
-                : "Video demux worker active · native browser decoding");
+                ? `Video/audio demux workers active · up to ${MAX_IN_FLIGHT_BATCHES} in-flight batches per track`
+                : `Video demux worker active · up to ${MAX_IN_FLIGHT_BATCHES} in-flight batches`);
         } catch (error) {
             if (!session.cancelled) session.fail(error);
         }
@@ -692,7 +721,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         <div className="relative flex h-full min-h-0 w-full flex-col bg-black">
             <div className="absolute left-3 top-3 z-20 flex flex-wrap items-center gap-2">
                 <span className="rounded-md border border-[#3ecf8e]/40 bg-[#062a1d]/90 px-2.5 py-1.5 text-[11px] font-medium text-[#8af0bd] shadow-lg backdrop-blur">
-                    {workerCount} parallel workers
+                    {workerCount} workers · {MAX_IN_FLIGHT_BATCHES} batches/track
                 </span>
                 {audioTracks.length > 0 && (
                     <label className="flex items-center gap-1.5 rounded-md border border-white/15 bg-black/75 px-2 py-1 text-[11px] text-white shadow-lg backdrop-blur">

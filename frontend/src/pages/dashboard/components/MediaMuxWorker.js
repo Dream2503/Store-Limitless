@@ -21,12 +21,12 @@ let audioDecoderConfig = null;
 let audioMode = "passthrough";
 let audioInput = null;
 let audioIterator = null;
-let firstAudioSample = null;
+
 let trackChains = {video: Promise.resolve(), audio: Promise.resolve()};
 let packetSequence = {video: 0, audio: 0};
 let pendingWrites = new Map();
 let pendingWriteBytes = 0;
-const MAX_PENDING_OUTPUT_BYTES = 64 * 1024 * 1024;
+const MAX_PENDING_OUTPUT_BYTES = 8 * 1024 * 1024;
 const outputCapacityWaiters = [];
 let nextWriteId = 1;
 let closedTracks = new Set();
@@ -46,7 +46,12 @@ async function prepareAc3Audio(message) {
 
     audioInput = new Input({
         formats: ALL_FORMATS,
-        source: new UrlSource(message.source),
+        source: new UrlSource(message.source, {
+            // Keep the AC-3 reader on a small rolling range cache instead of
+            // allowing the default 64 MiB cache to run ahead of playback.
+            maxCacheSize: 4 * 1024 * 1024,
+            parallelism: 2,
+        }),
     });
 
     const tracks = await audioInput.getAudioTracks();
@@ -63,25 +68,10 @@ async function prepareAc3Audio(message) {
     }
 
     const sink = new AudioSampleSink(track);
+    // Creating the iterator is lazy. Do not wait for a decoded sample before
+    // starting the video muxer; the audio pump will decode and encode as ranges
+    // arrive while video packets are already being demuxed.
     audioIterator = sink.samples(Number(message.startAt) || 0)[Symbol.asyncIterator]();
-    const first = await audioIterator.next();
-    if (failed) {
-        first.value?.close?.();
-        return;
-    }
-    if (first.done || !first.value) {
-        throw new Error("The selected AC-3 track did not produce any decodable audio samples.");
-    }
-    firstAudioSample = first.value;
-
-    audioSource = new AudioSampleSource({
-        codec: "aac",
-        quality: new Quality({bitrate: 160000}),
-        transform: {
-            numberOfChannels: 2,
-            sampleRate: 48000,
-        },
-    });
 }
 
 async function pumpAc3Audio() {
@@ -123,9 +113,6 @@ function reportError(error) {
 
     try { audioInput?.dispose(); } catch { /* input already closed */ }
     audioInput = null;
-    try { firstAudioSample?.close(); } catch { /* sample already closed */ }
-    firstAudioSample = null;
-
     try {
         const canceled = output?.cancel?.();
         if (canceled?.catch) void canceled.catch(() => {});
@@ -145,8 +132,17 @@ async function initialize(message) {
             audioPrimed = false;
 
             if (audioMode === "ac3-to-aac") {
-                await prepareAc3Audio(message.audio);
-                if (failed) return;
+                // AAC's codec string is known up front. Register the output
+                // track immediately and load/decode AC-3 independently below.
+                audioSource = new AudioSampleSource({
+                    codec: "aac",
+                    fullCodecString: "mp4a.40.2",
+                    quality: new Quality({bitrate: 160000}),
+                    transform: {
+                        numberOfChannels: 2,
+                        sampleRate: 48000,
+                    },
+                });
             } else {
                 audioSource = new EncodedAudioPacketSource(audioCodec);
             }
@@ -171,7 +167,7 @@ async function initialize(message) {
         }));
 
         output = new Output({
-            format: new Mp4OutputFormat({fastStart: "fragmented", minimumFragmentDuration: 0.5}),
+            format: new Mp4OutputFormat({fastStart: "fragmented", minimumFragmentDuration: 0.25}),
             target,
         });
         output.addVideoTrack(videoSource, {
@@ -209,19 +205,20 @@ async function initialize(message) {
         }
 
         await output.start();
-        if (audioMode === "ac3-to-aac") {
-            if (!firstAudioSample) throw new Error("AC-3 decoder did not yield its initial sample.");
-            await audioSource.add(firstAudioSample);
-            firstAudioSample.close();
-            firstAudioSample = null;
-        }
         self.postMessage({type: "started"});
         void output.getMimeType().then((mimeType) => {
             self.postMessage({type: "ready", mimeType});
         }).catch(reportError);
 
         if (audioMode === "ac3-to-aac") {
-            void pumpAc3Audio();
+            // Do not block video demuxing on AC-3 decoder/WASM initialization.
+            // The audio source is already registered; audio samples join the
+            // same fragmented MP4 stream as soon as decoding starts.
+            void prepareAc3Audio(message.audio)
+                .then(() => {
+                    if (!failed) void pumpAc3Audio();
+                })
+                .catch(reportError);
         }
     } catch (error) {
         reportError(error);
@@ -323,8 +320,6 @@ self.addEventListener("message", (event) => {
         pendingWriteBytes = 0;
         try { audioInput?.dispose(); } catch { /* input already closed */ }
         audioInput = null;
-        try { firstAudioSample?.close(); } catch { /* sample already closed */ }
-        firstAudioSample = null;
         try { void audioIterator?.return?.(); } catch { /* iterator already closed */ }
         audioIterator = null;
         try {

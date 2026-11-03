@@ -8,6 +8,7 @@ import {
     EncodedVideoPacketSource,
     Input,
     Mp4OutputFormat,
+    Output,
     Quality,
     UrlSource,
 } from "mediabunny";

@@ -785,6 +785,11 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     appendNext();
                 } else if (message.type === "done") {
                     session.pendingEnd = true;
+                    if (!session.targetBuffered && !session.queue.length &&
+                        !session.sourceBuffer?.updating && session.writingId === null) {
+                        session.fail(new Error("The video stream ended before the requested seek position was buffered."));
+                        return;
+                    }
                     finishIfReady();
                 } else if (message.type === "error") {
                     session.fail(new Error(message.message || "Remux worker failed."));
@@ -826,29 +831,19 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             // The output MIME type depends on the first packet for codecs such
             // as AC-3/E-AC-3. Start feeding packets after the worker is running,
             // then wait for its MIME type once the priming packet is available.
-            await Promise.all([sourceOpen, workerStarted]);
-            if (session.cancelled) return;
-
-            await workerReady;
-            if (session.cancelled) return;
-
             const wakeAppend = () => appendNext();
-            const onProgrammaticSeeked = () => {
-                if (!session.programmaticSeek) return;
-                const target = session.programmaticSeekTarget;
-                if (target == null || Math.abs(video.currentTime - target) < 0.75) {
-                    session.programmaticSeek = false;
-                    session.programmaticSeekTarget = null;
-                }
-            };
             video.addEventListener("timeupdate", wakeAppend);
             video.addEventListener("playing", wakeAppend);
-            video.addEventListener("seeked", onProgrammaticSeeked);
-            session.listeners.push(
-                ["timeupdate", wakeAppend],
-                ["playing", wakeAppend],
-                ["seeked", onProgrammaticSeeked],
-            );
+            session.listeners.push(["timeupdate", wakeAppend], ["playing", wakeAppend]);
+
+            await Promise.all([sourceOpen, workerStarted, workerReady, targetBufferedPromise]);
+            if (session.cancelled) return;
+
+            if (session.shouldPlay) {
+                await video.play().catch((error) => {
+                    console.warn("Playback could not resume automatically after seeking.", error);
+                });
+            }
 
             setStatus(audioStream
                 ? transcodeAudio

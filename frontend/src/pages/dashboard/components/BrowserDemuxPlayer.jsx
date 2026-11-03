@@ -353,7 +353,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                             const text = subtitleText(stream, packet);
                             if (!text) continue;
 
-                                            const packetStart = subtitlePacketSeconds(packet, stream, "timestamp");
+                            const packetStart = subtitlePacketSeconds(packet, stream, "timestamp");
                             const packetDuration = subtitlePacketSeconds(packet, stream, "duration");
                             if (!Number.isFinite(packetStart)) continue;
 

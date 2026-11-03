@@ -702,6 +702,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         const session = {
             cancelled: false,
             ready: false,
+            activateWhenReady: Boolean(activate),
+            requestedTime: Math.max(0, Number(startAt) || 0),
             track,
             audio: new Audio(),
             worker: new MediaAudioWorker(),
@@ -1000,7 +1002,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             await Promise.all([sourceOpen, workerStarted, workerReady, firstBuffered]);
             if (session.cancelled || pendingAudioSessionsRef.current.get(track.id) !== session) return null;
 
-            try { audio.currentTime = session.startAt; } catch { /* first range establishes the timeline */ }
+            try {
+                audio.currentTime = session.requestedTime;
+                session.wakeAppend?.();
+            } catch { /* first range establishes the timeline */ }
             audio.volume = video.volume;
             audio.playbackRate = video.playbackRate;
 
@@ -1009,7 +1014,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             pendingAudioSessionsRef.current.delete(track.id);
             session.ready = true;
 
-            const shouldActivate = activate && requestedAudioRef.current === track.id;
+            const shouldActivate = session.activateWhenReady && requestedAudioRef.current === track.id;
             if (shouldActivate) {
                 if (!video.paused) {
                     audio.muted = true;
@@ -1172,6 +1177,20 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 session.audio.pause();
             }
             setStatus("Audio off");
+            return;
+        }
+
+        const pendingSession = pendingAudioSessionsRef.current.get(track.id);
+        if (pendingSession && !pendingSession.cancelled) {
+            requestedAudioRef.current = track.id;
+            pendingSession.activateWhenReady = true;
+            pendingSession.requestedTime = video?.currentTime || 0;
+            setSelectedAudio(track.id);
+            try {
+                pendingSession.audio.currentTime = pendingSession.requestedTime;
+                pendingSession.wakeAppend?.();
+            } catch { /* audio source buffer is still opening */ }
+            setStatus("Preparing selected audio · reusing its existing stream");
             return;
         }
 

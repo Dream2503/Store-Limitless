@@ -219,7 +219,7 @@ async function initialize(message) {
         }));
 
         output = new Output({
-            format: new Mp4OutputFormat({fastStart: "fragmented", minimumFragmentDuration: 0.12}),
+            format: new Mp4OutputFormat({fastStart: "fragmented", minimumFragmentDuration: 0.04}),
             target,
         });
         output.addVideoTrack(videoSource, {

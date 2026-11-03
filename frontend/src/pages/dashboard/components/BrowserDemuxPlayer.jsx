@@ -403,6 +403,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 resolveOpen = resolve;
                 rejectOpen = reject;
             });
+            let resolveStarted;
+            let rejectStarted;
+            const workerStarted = new Promise((resolve, reject) => {
+                resolveStarted = resolve;
+                rejectStarted = reject;
+            });
             let resolveReady;
             let rejectReady;
             const workerReady = new Promise((resolve, reject) => {
@@ -411,6 +417,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             });
             session.rejectStartup = (error) => {
                 rejectOpen(error);
+                rejectStarted(error);
                 rejectReady(error);
             };
 
@@ -518,9 +525,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             worker.addEventListener("message", (event) => {
                 const message = event.data;
                 if (session.cancelled) return;
-                if (message.type === "ready") {
+                if (message.type === "started") {
+                    resolveStarted();
+                } else if (message.type === "ready") {
                     session.mimeType = message.mimeType;
                     createSourceBuffer();
+                    resolveReady();
                 } else if (message.type === "batch-ack") {
                     const waiter = session.packetAcks.get(message.id);
                     if (waiter) {
@@ -571,7 +581,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             video.src = session.objectUrl;
             video.load();
 
-            await Promise.all([sourceOpen, workerReady]);
+            // The output MIME type depends on the first packet for codecs such
+            // as AC-3/E-AC-3. Start feeding packets after the worker is running,
+            // then wait for its MIME type once the priming packet is available.
+            await Promise.all([sourceOpen, workerStarted]);
             if (session.cancelled) return;
 
             const pump = async (demuxer, track, streamIndex, mediaType) => {
@@ -668,6 +681,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             void Promise.all([videoPump, audioPump]).catch((error) => {
                 if (!session.cancelled) session.fail(error);
             });
+
+            await workerReady;
+            if (session.cancelled) return;
 
             const wakeAppend = () => appendNext();
             video.addEventListener("timeupdate", wakeAppend);

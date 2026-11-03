@@ -11,6 +11,7 @@ let output = null;
 let videoSource = null;
 let audioSource = null;
 let audioCodec = null;
+let audioDecoderConfig = null;
 let trackChains = {video: Promise.resolve(), audio: Promise.resolve()};
 let packetSequence = {video: 0, audio: 0};
 let pendingWrites = new Map();
@@ -48,6 +49,7 @@ async function initialize(message) {
         videoSource = new EncodedVideoPacketSource(message.video.codec);
         if (message.audio) {
             audioCodec = message.audio.codec;
+            audioDecoderConfig = message.audio.decoderConfig;
             audioPrimed = false;
             audioSource = new EncodedAudioPacketSource(audioCodec);
         }
@@ -80,10 +82,20 @@ async function initialize(message) {
             flip: Boolean(message.video.flip),
         });
         if (audioSource && message.audio) {
-            // Do not register decoderConfig at track creation time. AC-3/E-AC-3
-            // need the first encoded packet as the MP4 priming packet, so their
-            // track metadata must be created by the first source.add(packet, meta).
+            const priming = message.audio.primingPacket;
+            if (!priming?.buffer || !Number.isFinite(priming.timestamp)) {
+                throw new Error("The audio track did not receive a valid priming packet.");
+            }
+            const primingPacket = new EncodedPacket(
+                new Uint8Array(priming.buffer),
+                "key",
+                priming.timestamp,
+                Number.isFinite(priming.duration) && priming.duration > 0 ? priming.duration : 0.02,
+                0,
+            );
             output.addAudioTrack(audioSource, {
+                decoderConfig: audioDecoderConfig,
+                primingPacket,
                 languageCode: message.audio.languageCode || "und",
                 name: message.audio.name || "",
             });
@@ -137,7 +149,7 @@ function addPacketBatch(message) {
                 // Passing metadata with the first packet lets Mediabunny use
                 // that packet as the priming packet required by AC-3/E-AC-3
                 // and DTS sample-entry generation.
-                await source.add(packet, {decoderConfig: message.audio.decoderConfig});
+                await source.add(packet, {decoderConfig: audioDecoderConfig});
                 audioPrimed = true;
             } else {
                 await source.add(packet);

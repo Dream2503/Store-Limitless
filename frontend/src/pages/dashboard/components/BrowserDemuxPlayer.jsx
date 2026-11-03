@@ -365,8 +365,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                             const text = subtitleText(stream, packet);
                             if (!text) continue;
 
-                            const packetStart = subtitlePacketSeconds(packet, stream, "timestamp");
-                            const packetDuration = subtitlePacketSeconds(packet, stream, "duration");
+                            const packetStart = Number(packet.timestamp);
+                            const packetDuration = Number(packet.duration);
                             if (!Number.isFinite(packetStart)) continue;
 
                             const start = Math.max(0, packetStart);
@@ -400,12 +400,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         clearSubtitle();
         if (!stream) return;
 
-        const video = videoRef.current;
-        if (!video) {
-            setStatus("The video surface is not ready for subtitles.");
-            return;
-        }
-
         const taskId = subtitleTaskRef.current;
         setStatus("Loading cached subtitle cues…");
 
@@ -415,18 +409,21 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             const cues = subtitleCueCacheRef.current.get(String(stream.index)) || [];
             if (cues.length > 0) {
-                subtitleCuesRef.current = cues;
-                setVisibleSubtitle(activeSubtitleText(cues, video.currentTime));
-                setStatus("Subtitles active · " + cues.length + " cached cues");
+                const vtt = buildWebVtt(cues);
+                const url = URL.createObjectURL(new Blob([vtt], {
+                    type: "text/vtt;charset=utf-8",
+                }));
+                setSubtitleLabel(trackLabel(stream));
+                setSubtitleLanguage(languageCode(stream.tags?.language));
+                setSubtitleUrl(url);
+                setStatus("WebVTT subtitles active · " + cues.length + " cues");
             } else {
-                subtitleCuesRef.current = [];
-                setVisibleSubtitle("");
+                setSubtitleUrl("");
                 setStatus("No readable subtitle cues were found in this track.");
             }
         } catch (error) {
             if (taskId === subtitleTaskRef.current) {
-                subtitleCuesRef.current = [];
-                setVisibleSubtitle("");
+                setSubtitleUrl("");
                 console.warn("Subtitle cue activation failed.", error);
                 setStatus(error?.message || "Could not render this subtitle track.");
             }

@@ -378,26 +378,31 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         };
         const attach = () => {
             detach();
-            trackElement = document.createElement("track");
-            trackElement.kind = "subtitles";
-            trackElement.label = subtitleLabel || "Subtitles";
-            trackElement.srclang = subtitleLanguage || "und";
-            trackElement.src = subtitleUrl;
-            trackElement.default = true;
-            trackElement.addEventListener("load", () => {
-                if (!trackElement) return;
-                trackElement.track.mode = "showing";
-                setStatus("Native WebVTT renderer loaded · " + (trackElement.track.cues?.length || 0) + " cues");
+            const currentTrackElement = document.createElement("track");
+            trackElement = currentTrackElement;
+            currentTrackElement.kind = "subtitles";
+            currentTrackElement.label = subtitleLabel || "Subtitles";
+            currentTrackElement.srclang = subtitleLanguage || "und";
+            currentTrackElement.src = subtitleUrl;
+            currentTrackElement.default = true;
+            currentTrackElement.addEventListener("load", () => {
+                if (trackElement !== currentTrackElement) return;
+                currentTrackElement.track.mode = "showing";
+                setStatus(
+                    "Native WebVTT renderer loaded · " +
+                    (currentTrackElement.track.cues?.length || 0) + " cues",
+                );
             }, {once: true});
-            trackElement.addEventListener("error", () => {
+            currentTrackElement.addEventListener("error", () => {
+                if (trackElement !== currentTrackElement) return;
                 setStatus("The browser rejected the generated WebVTT file.");
                 console.error("Native WebVTT track failed to load.", {
-                    readyState: trackElement?.readyState,
+                    readyState: currentTrackElement.readyState,
                     src: subtitleUrl,
                 });
             }, {once: true});
-            video.appendChild(trackElement);
-            try { trackElement.track.mode = "showing"; } catch { /* activated by load event */ }
+            video.appendChild(currentTrackElement);
+            try { currentTrackElement.track.mode = "showing"; } catch { /* activated by load event */ }
         };
 
         attach();

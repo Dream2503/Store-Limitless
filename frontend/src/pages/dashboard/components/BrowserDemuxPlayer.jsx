@@ -3,7 +3,7 @@ import MediaMuxWorker from "./MediaMuxWorker.js?worker";
 import MediaAudioWorker from "./MediaAudioWorker.js?worker";
 
 const DEMUX_WASM_URL = "https://cdn.jsdelivr.net/npm/web-demuxer@4.0.0/dist/wasm-files/web-demuxer.wasm";
-const MAX_FORWARD_BUFFER_SECONDS = 8;
+const MAX_FORWARD_BUFFER_SECONDS = 8; // Bounded MediaSource lookahead
 const RETAIN_VIDEO_BUFFER_SECONDS = 20;
 const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"]);
 

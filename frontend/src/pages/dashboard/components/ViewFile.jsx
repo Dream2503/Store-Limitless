@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import {useLocation, useNavigate} from "react-router-dom";
 import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
+import BrowserDemuxPlayer from "./BrowserDemuxPlayer.jsx";
 import UploadJobsTray from "./UploadJobsTray.jsx";
 import {AUTH_SESSION_END_EVENT, createUniqueId, endAuthSession, getFileKind, getToken} from "../utils.js";
 import {cancelQueuedDownloadTask, enqueueDownloadTask, listResumableDownloadChunks, removeResumableDownloadChunks, removeResumableDownloadChunksFrom, saveResumableDownloadChunk} from "../utils/resumableDownloads.js";
@@ -80,6 +81,7 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
     const [centerFeedback, setCenterFeedback] = useState(null);
     const [seekFeedback, setSeekFeedback] = useState(null);
     const [activeSource, setActiveSource] = useState(streamUrl);
+    const [browserDemuxEnabled, setBrowserDemuxEnabled] = useState(() => readSavedBoolean("storelimitless-player-browser-demux", true));
 
     const qualityOptions = (Array.isArray(sources) ? sources : [])
         .map((source, index) => ({
@@ -512,6 +514,18 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
         setShowSettings(false);
     };
 
+    const changeBrowserDemux = useCallback((enabled) => {
+        setBrowserDemuxEnabled(enabled);
+        setShowSettings(false);
+        try {
+            window.localStorage.setItem("storelimitless-player-browser-demux", String(enabled));
+        } catch {
+            // Playback mode still works when browser storage is unavailable.
+        }
+    }, []);
+    const enableBrowserDemux = useCallback(() => changeBrowserDemux(true), [changeBrowserDemux]);
+    const disableBrowserDemux = useCallback(() => changeBrowserDemux(false), [changeBrowserDemux]);
+
     return (
         <div
             ref={wrapRef}
@@ -533,6 +547,16 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
             onTouchStart={revealControls}
             onKeyDown={revealControls}
         >
+            {browserDemuxEnabled ? (
+                <BrowserDemuxPlayer
+                    source={activeSource}
+                    title={file?.name || "Video"}
+                    active={active}
+                    onUseStandardPlayer={disableBrowserDemux}
+                    onUnavailable={disableBrowserDemux}
+                />
+            ) : (
+                <>
             <style>{PLAYER_STYLES + ".ytp-video::cue{font-size:" + captionFontSize + "px;}"}</style>
             <video
                 ref={videoRef}
@@ -615,6 +639,16 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
                         <button type="button" className="ytp-button" aria-label="Settings" aria-expanded={showSettings} title="Settings" onClick={() => { setShowSettings((value) => !value); setControlsVisible(true); }}>{icon("settings")}</button>
                         {showSettings && <div className="ytp-settings-menu" role="dialog" aria-label="Player settings">
                             <div className="ytp-menu-section">
+                                <div className="ytp-menu-heading">Media tracks</div>
+                                <button type="button" className="ytp-quality" onClick={enableBrowserDemux}>
+                                    <span>Browser audio & subtitle tracks</span>
+                                    <span>{icon("captions", 14)}</span>
+                                </button>
+                                <div style={{fontSize:11,color:"#9ca3a0",lineHeight:1.5,marginTop:5}}>
+                                    Demux the original container in your browser when supported.
+                                </div>
+                            </div>
+                            <div className="ytp-menu-section">
                                 <div className="ytp-menu-heading">Playback speed</div>
                                 <div className="ytp-speed-grid">{PLAYER_SPEED_OPTIONS.map((rate) => <button key={rate} type="button" className="ytp-speed" aria-label={"Playback speed " + rate + "x"} aria-pressed={playbackRate === rate} onClick={() => { setPlaybackRate(rate); if (videoRef.current) videoRef.current.playbackRate = rate; setShowSettings(false); showCenterFeedback("speed", rate + "×"); }}>{rate === 1 ? "Normal" : rate + "×"}{playbackRate === rate && <span>{icon("check", 13)}</span>}</button>)}</div>
                             </div>
@@ -634,6 +668,8 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
                     ].map((entry) => <div className="ytp-shortcut" key={entry[1]}><span>{entry[1]}</span><span className="ytp-keys">{entry[0].map((part) => <kbd key={part}>{part}</kbd>)}</span></div>)}</div>
                 </div>
             </div>}
+                </>
+            )}
         </div>
     );
 }

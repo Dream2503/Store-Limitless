@@ -233,32 +233,46 @@ function decoderConfig(demuxer, stream, type) {
 
 function subtitleText(stream, packet) {
     const codec = String(stream?.codec_name || "").toLowerCase();
-    let bytes = packet.data;
+    let text = "";
 
-    if (codec === "mov_text" && bytes?.length >= 2) {
-        const length = (bytes[0] << 8) | bytes[1];
-        if (length > 0 && length <= bytes.length - 2) bytes = bytes.subarray(2, 2 + length);
+    if (typeof packet?.data === "string") {
+        text = packet.data;
+    } else {
+        let bytes = packet?.data;
+        if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
+        if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array();
+
+        if (codec === "mov_text" && bytes.length >= 2) {
+            const length = (bytes[0] << 8) | bytes[1];
+            if (length > 0 && length <= bytes.length - 2) {
+                bytes = bytes.subarray(2, 2 + length);
+            }
+        }
+
+        text = new TextDecoder("utf-8", {fatal: false}).decode(bytes);
     }
 
-    let text = new TextDecoder("utf-8").decode(bytes || new Uint8Array())
-        .replace(/\u0000/g, "")
-        .trim();
+    text = text.replace(/^\uFEFF/, "").replace(/\u0000/g, "").trim();
     if (!text) return "";
 
     if (codec === "ass" || codec === "ssa") {
-        const dialogue = text.match(/Dialogue:\s*(.*)/i);
-        const fields = (dialogue ? dialogue[1] : text).split(",");
-        if (fields.length >= 10) text = fields.slice(9).join(",");
+        const dialogue = text.match(/(?:^|\r?\n)Dialogue:\s*([^\r\n]*)/i);
+        if (dialogue) {
+            const fields = dialogue[1].split(",");
+            if (fields.length >= 10) text = fields.slice(9).join(",");
+        }
         text = text.replace(/\{[^}]*\}/g, "").replace(/\\[Nn]/g, "\n").replace(/\\h/g, " ");
     } else if (["srt", "subrip", "webvtt"].includes(codec)) {
-        const lines = text.split(/\r?\n/);
+        const lines = text.replace(/^WEBVTT[^\r\n]*\r?\n/i, "").split(/\r?\n/);
         const timing = lines.findIndex((line) => line.includes("-->"));
         text = timing >= 0
             ? lines.slice(timing + 1).join("\n").trim()
-            : lines.filter((line) => !/^\d+$/.test(line.trim())).join("\n").trim();
+            : lines.filter((line) =>
+                !/^\d+$/.test(line.trim()) && !/^\d{2}:\d{2}:\d{2}[,.]\d{3}/.test(line.trim()),
+            ).join("\n").trim();
     }
 
-    return text;
+    return text.trim();
 }
 
 function isMediaTimeBuffered(media, time) {
@@ -315,10 +329,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const pendingAudioSessionsRef = useRef(new Map());
     const subtitleDemuxerRef = useRef(null);
     const subtitleCueCacheRef = useRef(new Map());
-    const subtitlePreloadPromiseRef = useRef(Promise.resolve());
-    const subtitlePreloadTaskRef = useRef(0);
     const subtitleTaskRef = useRef(0);
-    const subtitleTrackElementRef = useRef(null);
     const seekTimerRef = useRef(null);
     const fallbackRef = useRef(false);
 
@@ -340,6 +351,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
     const clearSubtitle = useCallback(() => {
         subtitleTaskRef.current += 1;
+        const demuxer = subtitleDemuxerRef.current;
+        subtitleDemuxerRef.current = null;
+        try { demuxer?.destroy?.(); } catch { /* already closed */ }
         setSubtitleUrl("");
         setSubtitleLabel("");
         setSubtitleLanguage("und");
@@ -351,116 +365,143 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     }, [subtitleUrl]);
 
     useEffect(() => {
-        const applySubtitleMode = () => {
-            const track = subtitleTrackElementRef.current?.track;
-            if (track) track.mode = subtitleUrl ? "showing" : "disabled";
-        };
         const video = videoRef.current;
-        applySubtitleMode();
-        video?.addEventListener("loadedmetadata", applySubtitleMode);
-        video?.addEventListener("loadstart", applySubtitleMode);
-        return () => {
-            video?.removeEventListener("loadedmetadata", applySubtitleMode);
-            video?.removeEventListener("loadstart", applySubtitleMode);
-        };
-    }, [subtitleUrl]);
+        if (!video || !subtitleUrl) return undefined;
 
-    const preloadSubtitleTracks = useCallback(async (streams, taskId) => {
-        if (!streams.length || taskId !== subtitlePreloadTaskRef.current) return;
-
-        let demuxer = null;
-        try {
-            const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
-            demuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
-            subtitleDemuxerRef.current = demuxer;
-            await demuxer.load(source);
-            await demuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
-            if (taskId !== subtitlePreloadTaskRef.current) return;
-
-            for (const stream of streams) {
-                if (taskId !== subtitlePreloadTaskRef.current) return;
-                const cues = [];
-                try {
-                    const reader = demuxer.readAVPacket(
-                        0,
-                        0,
-                        AVMediaType.AVMEDIA_TYPE_SUBTITLE,
-                        stream.index,
-                    ).getReader();
-
-                    try {
-                        while (true) {
-                            const next = await reader.read();
-                            if (next.done) break;
-
-                            const packet = next.value;
-                            const text = subtitleText(stream, packet);
-                            if (!text) continue;
-
-                            const packetStart = Number(packet.timestamp);
-                            const packetDuration = Number(packet.duration);
-                            if (!Number.isFinite(packetStart)) continue;
-
-                            const start = Math.max(0, packetStart);
-                            const duration = Number.isFinite(packetDuration) && packetDuration > 0
-                                ? packetDuration
-                                : 3;
-                            const end = start + duration;
-                            if (end > start) cues.push({start, end, text});
-                        }
-                    } finally {
-                        try { reader.releaseLock?.(); } catch { /* already closed */ }
-                    }
-                } catch (error) {
-                    console.warn("Could not preload subtitle track " + trackLabel(stream), error);
-                }
-
-                if (taskId === subtitlePreloadTaskRef.current) {
-                    cues.sort((a, b) => a.start - b.start);
-                    subtitleCueCacheRef.current.set(String(stream.index), cues);
-                }
+        let trackElement = null;
+        const detach = () => {
+            if (trackElement) {
+                try { trackElement.track.mode = "disabled"; } catch { /* track not initialized */ }
+                trackElement.remove();
+                trackElement = null;
             }
-        } catch (error) {
-            console.warn("Subtitle track preload failed.", error);
-        } finally {
-            demuxer?.destroy?.();
-            if (subtitleDemuxerRef.current === demuxer) subtitleDemuxerRef.current = null;
-        }
-    }, [source]);
+        };
+        const attach = () => {
+            detach();
+            trackElement = document.createElement("track");
+            trackElement.kind = "subtitles";
+            trackElement.label = subtitleLabel || "Subtitles";
+            trackElement.srclang = subtitleLanguage || "und";
+            trackElement.src = subtitleUrl;
+            trackElement.default = true;
+            trackElement.addEventListener("load", () => {
+                if (!trackElement) return;
+                trackElement.track.mode = "showing";
+                setStatus("Native WebVTT renderer loaded · " + (trackElement.track.cues?.length || 0) + " cues");
+            }, {once: true});
+            trackElement.addEventListener("error", () => {
+                setStatus("The browser rejected the generated WebVTT file.");
+                console.error("Native WebVTT track failed to load.", {
+                    readyState: trackElement?.readyState,
+                    src: subtitleUrl,
+                });
+            }, {once: true});
+            video.appendChild(trackElement);
+            try { trackElement.track.mode = "showing"; } catch { /* activated by load event */ }
+        };
+
+        attach();
+        const onLoadStart = () => attach();
+        video.addEventListener("loadstart", onLoadStart);
+        return () => {
+            video.removeEventListener("loadstart", onLoadStart);
+            detach();
+        };
+    }, [subtitleUrl, subtitleLabel, subtitleLanguage]);
 
     const loadSubtitle = useCallback(async (stream) => {
         clearSubtitle();
         if (!stream) return;
 
         const taskId = subtitleTaskRef.current;
-        setStatus("Loading cached subtitle cues…");
+        let demuxer = null;
+        let reader = null;
+        setStatus("Demuxing selected subtitle track…");
 
         try {
-            await subtitlePreloadPromiseRef.current;
-            if (taskId !== subtitleTaskRef.current) return;
+            let cues = subtitleCueCacheRef.current.get(String(stream.index));
+            if (!cues) {
+                const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
+                demuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
+                subtitleDemuxerRef.current = demuxer;
+                await demuxer.load(source);
+                await demuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
+                if (taskId !== subtitleTaskRef.current) return;
 
-            const cues = subtitleCueCacheRef.current.get(String(stream.index)) || [];
-            if (cues.length > 0) {
-                const vtt = buildWebVtt(cues);
-                const url = URL.createObjectURL(new Blob([vtt], {
-                    type: "text/vtt;charset=utf-8",
-                }));
-                setSubtitleLabel(trackLabel(stream));
-                setSubtitleLanguage(languageCode(stream.tags?.language));
-                setSubtitleUrl(url);
-                setStatus("WebVTT subtitles active · " + cues.length + " cues");
-            } else {
-                setSubtitleUrl("");
-                setStatus("No readable subtitle cues were found in this track.");
+                reader = demuxer.readAVPacket(
+                    0,
+                    0,
+                    AVMediaType.AVMEDIA_TYPE_SUBTITLE,
+                    stream.index,
+                ).getReader();
+
+                const rawCues = [];
+                while (true) {
+                    const next = await reader.read();
+                    if (next.done) break;
+                    if (taskId !== subtitleTaskRef.current) return;
+
+                    const packet = next.value;
+                    const text = subtitleText(stream, packet);
+                    const start = Number(packet?.timestamp);
+                    const duration = Number(packet?.duration);
+                    if (!text || !Number.isFinite(start)) continue;
+
+                    rawCues.push({
+                        start: Math.max(0, start),
+                        duration: Number.isFinite(duration) && duration > 0 ? duration : 0,
+                        text,
+                    });
+                }
+
+                rawCues.sort((a, b) => a.start - b.start);
+                cues = rawCues.map((cue, index) => {
+                    const nextStart = rawCues[index + 1]?.start;
+                    const fallbackEnd = Number.isFinite(nextStart) && nextStart > cue.start
+                        ? nextStart
+                        : cue.start + 3;
+                    const end = cue.duration > 0
+                        ? cue.start + cue.duration
+                        : fallbackEnd;
+                    return {
+                        start: cue.start,
+                        end: Math.max(cue.start + 0.05, end),
+                        text: cue.text,
+                    };
+                });
+                subtitleCueCacheRef.current.set(String(stream.index), cues);
             }
+
+            if (taskId !== subtitleTaskRef.current) return;
+            if (!cues.length) {
+                setStatus("This subtitle stream contains no readable text cues. Bitmap subtitles need a different renderer.");
+                return;
+            }
+
+            const vtt = buildWebVtt(cues);
+            if (!vtt.startsWith("WEBVTT\n") || !vtt.includes(" --> ")) {
+                throw new Error("The selected subtitle stream did not produce valid WebVTT cues.");
+            }
+
+            const url = URL.createObjectURL(new Blob([vtt], {
+                type: "text/vtt;charset=utf-8",
+            }));
+            setSubtitleLabel(trackLabel(stream));
+            setSubtitleLanguage(languageCode(stream.tags?.language));
+            setSubtitleUrl(url);
+            setStatus("Generated WebVTT · " + cues.length + " cues · attaching native subtitle track");
         } catch (error) {
             if (taskId === subtitleTaskRef.current) {
-                setSubtitleUrl("");
-                console.warn("Subtitle cue activation failed.", error);
-                setStatus(error?.message || "Could not render this subtitle track.");
+                console.error("Could not demux the selected subtitle track.", error);
+                setStatus(error?.message || "Could not load this subtitle track.");
             }
+        } finally {
+            try { await reader?.cancel?.(); } catch { /* stream already completed */ }
+            try { reader?.releaseLock?.(); } catch { /* reader already released */ }
+            demuxer?.destroy?.();
+            if (subtitleDemuxerRef.current === demuxer) subtitleDemuxerRef.current = null;
         }
-    }, [clearSubtitle]);
+    }, [clearSubtitle, source]);
 
     const startPipeline = useCallback(async (
         audioIndex,
@@ -1344,12 +1385,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 subtitleCueCacheRef.current.clear();
                 setAudioTracks(audio);
                 setSubtitleTracks(subtitles);
-                const subtitlePreloadTask = ++subtitlePreloadTaskRef.current;
-                subtitlePreloadPromiseRef.current = preloadSubtitleTracks(
-                    subtitles.map((item) => item.stream),
-                    subtitlePreloadTask,
-                );
-
                 // Video is independent of audio. If the browser cannot play any
                 // embedded audio codec, keep the video running silently instead
                 // of falling back and reloading the entire media element.
@@ -1489,15 +1524,13 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             audioSessionRef.current = null;
             selectedAudioRef.current = "";
             requestedAudioRef.current = "";
-            subtitlePreloadTaskRef.current += 1;
             subtitleDemuxerRef.current?.destroy?.();
             subtitleDemuxerRef.current = null;
             subtitleCueCacheRef.current.clear();
-            subtitlePreloadPromiseRef.current = Promise.resolve();
             metadataDemuxer?.destroy?.();
             clearSubtitle();
         };
-    }, [clearSubtitle, fallback, preloadSubtitleTracks, source, startAudioPipeline, startPipeline]);
+    }, [clearSubtitle, fallback, source, startAudioPipeline, startPipeline]);
 
     const onAudioChange = (event) => {
         const track = audioTracksRef.current.find((item) => item.id === event.target.value);
@@ -1834,21 +1867,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 )}
             </div>
 
-            <video ref={videoRef} controls playsInline preload="auto" className="h-full min-h-[240px] w-full bg-black object-contain" aria-label={title || "Video"}>
-                {subtitleUrl && (
-                    <track
-                        ref={subtitleTrackElementRef}
-                        kind="subtitles"
-                        src={subtitleUrl}
-                        srcLang={subtitleLanguage}
-                        label={subtitleLabel || "Subtitles"}
-                        default
-                        onLoad={(event) => {
-                            event.currentTarget.track.mode = "showing";
-                        }}
-                    />
-                )}
-            </video>
+            <video ref={videoRef} controls playsInline preload="auto" className="h-full min-h-[240px] w-full bg-black object-contain" aria-label={title || "Video"} />
 
             <div className="pointer-events-none absolute bottom-14 left-3 rounded bg-black/65 px-2 py-1 text-[11px] text-white/75">{status}</div>
 

@@ -332,7 +332,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         const session = {
             cancelled: false,
             demuxers: [],
-            readers: [],
             worker: null,
             mediaSource: null,
             sourceBuffer: null,
@@ -380,7 +379,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         sessionRef.current = session;
 
         try {
-            const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
+            const {WebDemuxer, AVLogLevel} = await import("web-demuxer");
             if (session.cancelled) return;
 
             let videoDemuxer = preparedVideoDemuxer;
@@ -600,12 +599,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             worker.addEventListener("error", (event) => session.fail(new Error(event.message || "Remux worker crashed.")));
             const initMessage = {
                 type: "init",
-                video: {
-                    codec: videoCodec,
-                    decoderConfig: videoConfig,
-                    rotation: videoStream.rotation || 0,
-                    flip: Boolean(videoStream.flip),
-                },
                 source,
                 startAt: session.startAt,
                 video: {
@@ -822,7 +815,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         <div className="relative flex h-full min-h-0 w-full flex-col bg-black">
             <div className="absolute left-3 top-3 z-20 flex flex-wrap items-center gap-2">
                 <span className="rounded-md border border-[#3ecf8e]/40 bg-[#062a1d]/90 px-2.5 py-1.5 text-[11px] font-medium text-[#8af0bd] shadow-lg backdrop-blur">
-                    {workerCount} workers · range streaming
+                    {workerCount} workers · progressive range playback
                 </span>
                 {audioTracks.length > 0 && (
                     <label className="flex items-center gap-1.5 rounded-md border border-white/15 bg-black/75 px-2 py-1 text-[11px] text-white shadow-lg backdrop-blur">

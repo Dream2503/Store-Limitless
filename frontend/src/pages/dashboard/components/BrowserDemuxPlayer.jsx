@@ -1057,7 +1057,11 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 audioSessionRef.current = session;
             } else {
                 audio.muted = true;
-                if (!video.paused) audio.play().catch(() => {});
+                if (!video.paused && selectedAudioRef.current) {
+                    audio.play().catch(() => {});
+                } else {
+                    audio.pause();
+                }
             }
 
             for (const [id, item] of audioSessionsRef.current) {
@@ -1191,6 +1195,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             audioSessionsRef.current.clear();
             audioSessionRef.current = null;
             selectedAudioRef.current = "";
+            requestedAudioRef.current = "";
             subtitlePreloadTaskRef.current += 1;
             subtitleDemuxerRef.current?.destroy?.();
             subtitleDemuxerRef.current = null;
@@ -1341,16 +1346,18 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const time = video.currentTime;
             const wasPlaying = !video.paused;
 
-            for (const audioSession of audioSessionsRef.current.values()) {
-                if (audioSession.cancelled) continue;
-                try {
-                    audioSession.audio.currentTime = time;
-                    audioSession.wakeAppend?.();
-                    if (wasPlaying && audioSession.audio.paused && audioSession.audio.readyState >= 2) {
-                        audioSession.audio.play().catch(() => {});
+            if (selectedAudioRef.current) {
+                for (const audioSession of audioSessionsRef.current.values()) {
+                    if (audioSession.cancelled) continue;
+                    try {
+                        audioSession.audio.currentTime = time;
+                        audioSession.wakeAppend?.();
+                        if (wasPlaying && audioSession.audio.paused && audioSession.audio.readyState >= 2) {
+                            audioSession.audio.play().catch(() => {});
+                        }
+                    } catch {
+                        // MediaSource may be updating; the next sync tick retries.
                     }
-                } catch {
-                    // MediaSource may be updating; the next sync tick retries.
                 }
             }
 

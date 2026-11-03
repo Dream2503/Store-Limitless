@@ -1389,6 +1389,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     }, [fallback, source]);
 
     const warmAudioTracks = useCallback((time, selectedId) => {
+        if (!selectedId) return;
         const target = Math.max(0, Number(time) || 0);
         for (const track of audioTracksRef.current) {
             if (!track.supported || track.id === selectedId) continue;
@@ -1800,6 +1801,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             }
 
             const shouldPlay = !video.paused && !video.ended;
+            const hasSelectedAudio = Boolean(selectedAudioRef.current);
             for (const [id, session] of audioSessionsRef.current) {
                 if (session.cancelled) continue;
                 const audio = session.audio;
@@ -1807,7 +1809,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 audio.muted = video.muted || id !== selectedAudioRef.current;
                 audio.playbackRate = video.playbackRate;
 
-                if (!shouldPlay) {
+                if (!shouldPlay || !hasSelectedAudio) {
                     audio.pause();
                     continue;
                 }

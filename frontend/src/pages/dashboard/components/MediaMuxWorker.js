@@ -135,7 +135,7 @@ async function initialize(message) {
             formats: ALL_FORMATS,
             source: new UrlSource(message.source, {
                 maxCacheSize: 8 * 1024 * 1024,
-                parallelism: 4,
+                parallelism: 6,
             }),
         });
 

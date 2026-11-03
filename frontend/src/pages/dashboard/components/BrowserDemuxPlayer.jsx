@@ -1399,9 +1399,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 requestedAudioRef.current = audioId;
                 setSelectedAudio(audioId);
 
-                await startPipeline(null, 0, false, metadataDemuxer, streams);
+                const videoPreparation = startPipeline(null, 0, false, metadataDemuxer, streams);
+                const audioPreparation = defaultAudio
+                    ? startAudioPipeline(defaultAudio, 0, false, true)
+                    : Promise.resolve(null);
+                await Promise.all([videoPreparation, audioPreparation]);
                 metadataDemuxer = null;
-                if (defaultAudio) void startAudioPipeline(defaultAudio, 0, false, true);
             } catch (error) {
                 if (!cancelled) fallback(error instanceof Error ? error : new Error(String(error)));
             }

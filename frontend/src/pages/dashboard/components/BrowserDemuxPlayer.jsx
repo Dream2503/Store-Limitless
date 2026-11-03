@@ -81,7 +81,17 @@ function audioCodecName(codec) {
 }
 
 function needsAudioTranscoding(codec) {
-    return ["ac3", "eac3"].includes(String(codec || "").toLowerCase());
+    const value = String(codec || "").toLowerCase();
+    const mimeCodec = value === "ac3" ? "ac-3" : value === "eac3" ? "ec-3" : null;
+    if (!mimeCodec) return false;
+
+    // Preserve the original encoded packets whenever this browser's MSE
+    // implementation accepts the source codec. AAC conversion is only a
+    // compatibility fallback for browsers that cannot play it directly.
+    if (typeof MediaSource === "undefined" || typeof MediaSource.isTypeSupported !== "function") {
+        return true;
+    }
+    return !MediaSource.isTypeSupported('audio/mp4; codecs="' + mimeCodec + '"');
 }
 
 function aacDecoderCodecString(stream, config) {
@@ -317,6 +327,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 }
 
                 if (taskId === subtitlePreloadTaskRef.current) {
+                    cues.sort((a, b) => a.start - b.start);
                     subtitleCueCacheRef.current.set(String(stream.index), cues);
                 }
             }

@@ -941,7 +941,13 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         }
     }, [fallback, source]);
 
-    const startAudioPipeline = useCallback(async (track, startAt = 0, shouldPlay = false, activate = true) => {
+    const startAudioPipeline = useCallback(async (
+        track,
+        startAt = 0,
+        shouldPlay = false,
+        activate = true,
+        preserveSelectionOnFailure = false,
+    ) => {
         const video = videoRef.current;
         if (!video || !track) return null;
 
@@ -1184,6 +1190,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 appendNext();
             } else if (message.type === "done") {
                 session.pendingEnd = true;
+                if (!isMediaTimeBuffered(audio, session.requestedTime)) {
+                    session.fail(new Error("The audio stream ended before the requested seek position was buffered."));
+                    return;
+                }
                 finishIfReady();
             } else if (message.type === "error") {
                 session.fail(new Error(message.message || "Audio mux worker failed."));
@@ -1207,12 +1217,13 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             session.dispose();
 
             if (wasRequested) {
-                requestedAudioRef.current = activeId;
-                selectedAudioRef.current = activeId;
-                setSelectedAudio(activeId);
+                const restoreId = preserveSelectionOnFailure ? track.id : activeId;
+                requestedAudioRef.current = restoreId;
+                selectedAudioRef.current = restoreId;
+                setSelectedAudio(restoreId);
                 // Audio-track failures must never tear down the independent video
                 // MediaSource or force the whole player into its standard fallback.
-                setStatus(error?.message || "Could not switch to the selected audio track. Video playback continues.");
+                setStatus(error?.message || "Could not prepare the selected audio track.");
             } else {
                 console.warn("Could not preload audio track " + track.label, error);
             }
@@ -1441,7 +1452,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     let audioPreparation = Promise.resolve(null);
                     if (selectedTrack?.supported) {
                         requestedAudioRef.current = selectedTrack.id;
-                        audioPreparation = startAudioPipeline(selectedTrack, target, false, true);
+                        audioPreparation = startAudioPipeline(selectedTrack, target, false, true, true);
                     }
 
                     const [videoReady, readyAudio] = await Promise.all([
@@ -1731,7 +1742,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 selectedSession?.dispose?.();
                 setStatus("Seeking · loading selected audio at the new position…");
                 requestedAudioRef.current = selectedId;
-                selectedSession = await startAudioPipeline(selectedTrack, time, false, true);
+                selectedSession = await startAudioPipeline(selectedTrack, time, false, true, true);
             }
 
             if (!selectedSession || selectedSession.cancelled) {

@@ -20,9 +20,51 @@ function videoCodecName(codec) {
     return null;
 }
 
+const AUDIO_SOURCE_CODECS = {
+    aac: "aac",
+    mp3: "mp3",
+    opus: "opus",
+    vorbis: "vorbis",
+    flac: "flac",
+    pcm_u8: "pcm-u8",
+    pcm_s16le: "pcm-s16",
+    pcm_s24le: "pcm-s24",
+    pcm_s32le: "pcm-s32",
+    pcm_f32le: "pcm-f32",
+    pcm_mulaw: "ulaw",
+    pcm_alaw: "alaw",
+};
+
 function audioCodecName(codec) {
-    const value = String(codec || "").toLowerCase();
-    return ["aac", "mp3", "opus", "vorbis", "flac", "ac3", "eac3", "dts", "truehd"].includes(value) ? value : null;
+    return AUDIO_SOURCE_CODECS[String(codec || "").toLowerCase()] || null;
+}
+
+function aacDecoderCodecString(stream, config) {
+    const candidates = [config?.codec, stream?.codec_string]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+
+    for (const candidate of candidates) {
+        if (/^mp4a\.(?:40\.\d+|67)$/i.test(candidate)) return candidate;
+    }
+
+    // web-demuxer can emit the incomplete "mp4a.40" value when the Matroska
+    // stream does not expose enough AudioSpecificConfig bytes during probing.
+    // Mediabunny requires a fully-qualified AAC string; AAC-LC is the safe
+    // baseline when the stream metadata does not specify an object type.
+    const description = config?.description || stream?.extradata;
+    if (description && description.length >= 2) {
+        const first = description[0];
+        let objectType = (first >> 3) & 0x1f;
+        if (objectType === 31) {
+            objectType = 32 + (((first & 0x07) << 3) | (description[1] >> 5));
+        }
+        if ([2, 5, 29, 42].includes(objectType)) {
+            return "mp4a.40." + objectType;
+        }
+    }
+
+    return "mp4a.40.2";
 }
 
 function languageCode(language) {
@@ -52,10 +94,19 @@ function decoderConfig(demuxer, stream, type) {
             description: config.description,
         };
     }
+
+    const sourceCodec = audioCodecName(stream?.codec_name);
+    if (!sourceCodec) {
+        throw new Error("Unsupported audio codec: " + (stream?.codec_name || "unknown"));
+    }
+
     return {
-        codec: config.codec,
-        sampleRate: config.sampleRate,
-        numberOfChannels: config.numberOfChannels,
+        // EncodedAudioPacketSource uses the short Mediabunny codec ID
+        // (e.g. "aac"), while decoderConfig.codec must be the full
+        // WebCodecs/Mediabunny codec string (e.g. "mp4a.40.2").
+        codec: sourceCodec === "aac" ? aacDecoderCodecString(stream, config) : sourceCodec,
+        sampleRate: config.sampleRate || stream.sample_rate,
+        numberOfChannels: config.numberOfChannels || stream.channels,
         description: config.description,
     };
 }
@@ -159,10 +210,11 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         const taskId = subtitleTaskRef.current;
         setStatus("Extracting subtitle cues in a worker…");
         try {
-            const {WebDemuxer, AVMediaType} = await import("web-demuxer");
+            const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
             const demuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
             subtitleDemuxerRef.current = demuxer;
             await demuxer.load(source);
+            await demuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
             if (taskId !== subtitleTaskRef.current) {
                 demuxer.destroy();
                 return;
@@ -266,7 +318,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         sessionRef.current = session;
 
         try {
-            const {WebDemuxer, AVMediaType} = await import("web-demuxer");
+            const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
             if (session.cancelled) return;
 
             let videoDemuxer = preparedVideoDemuxer;
@@ -275,6 +327,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 videoDemuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
                 session.demuxers.push(videoDemuxer);
                 await videoDemuxer.load(source);
+                await videoDemuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
                 streams = await videoDemuxer.getAVStreams();
             } else {
                 session.demuxers.push(videoDemuxer);
@@ -300,6 +353,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 audioDemuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
                 session.demuxers.push(audioDemuxer);
                 await audioDemuxer.load(source);
+                await audioDemuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
             }
             if (session.cancelled) return;
 
@@ -625,14 +679,19 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                         stream: item,
                         supported: Boolean(audioCodecName(item.codec_name)),
                     }));
+                // Keep only text subtitle formats. PGS/DVD/VobSub are bitmap
+                // streams and cannot be rendered by the WebVTT text-track path.
                 const subtitles = streams
-                    .filter((item) => item.codec_type_string === "subtitle")
+                    .filter((item) =>
+                        item.codec_type_string === "subtitle" &&
+                        TEXT_SUBTITLE_CODECS.has(String(item.codec_name || "").toLowerCase()),
+                    )
                     .map((item) => ({
                         id: String(item.index),
                         index: item.index,
                         label: trackLabel(item),
                         stream: item,
-                        supported: TEXT_SUBTITLE_CODECS.has(String(item.codec_name || "").toLowerCase()),
+                        supported: true,
                     }));
 
                 audioTracksRef.current = audio;
@@ -640,6 +699,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 setSubtitleTracks(subtitles);
 
                 const defaultAudio = audio.find((item) => item.supported) || null;
+                if (audio.length > 0 && !defaultAudio) {
+                    throw new Error("This file's audio tracks use codecs that the browser remuxer cannot currently package. Switching to the standard player.");
+                }
                 const audioId = defaultAudio?.id || "";
                 selectedAudioRef.current = audioId;
                 setSelectedAudio(audioId);

@@ -220,7 +220,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const audioTracksRef = useRef([]);
     const selectedAudioRef = useRef("");
     const audioSessionRef = useRef(null);
-    const pendingAudioSessionRef = useRef(null);
+    const audioSessionsRef = useRef(new Map());
+    const pendingAudioSessionsRef = useRef(new Map());
     const subtitleDemuxerRef = useRef(null);
     const subtitleTaskRef = useRef(0);
     const subtitleTrackRef = useRef(null);
@@ -672,14 +673,32 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         }
     }, [fallback, source]);
 
-    const startAudioPipeline = useCallback(async (track, startAt = 0, shouldPlay = false) => {
+    const startAudioPipeline = useCallback(async (track, startAt = 0, shouldPlay = false, activate = true) => {
         const video = videoRef.current;
-        if (!video || !track) return;
+        if (!video || !track) return null;
 
-        pendingAudioSessionRef.current?.dispose?.();
+        const existing = audioSessionsRef.current.get(track.id);
+        if (existing && !existing.cancelled) {
+            if (activate) {
+                selectedAudioRef.current = track.id;
+                audioSessionRef.current = existing;
+                setSelectedAudio(track.id);
+                for (const [id, item] of audioSessionsRef.current) {
+                    item.audio.muted = video.muted || id !== track.id;
+                    item.audio.volume = video.volume;
+                    if (!video.paused && item.audio.paused && item.audio.readyState >= 2) {
+                        item.audio.play().catch(() => {});
+                    }
+                }
+            }
+            return existing;
+        }
+
+        pendingAudioSessionsRef.current.get(track.id)?.dispose?.();
 
         const session = {
             cancelled: false,
+            ready: false,
             track,
             audio: new Audio(),
             worker: new MediaAudioWorker(),
@@ -704,14 +723,24 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         const worker = session.worker;
         const mediaSource = session.mediaSource;
         audio.preload = "auto";
-        audio.volume = 0;
-        audio.muted = video.muted;
+        audio.volume = video.volume;
+        audio.muted = true;
         audio.playbackRate = video.playbackRate;
 
         session.objectUrl = URL.createObjectURL(mediaSource);
         session.dispose = () => {
             if (session.cancelled) return;
+            if (!session.ready) {
+                session.rejectStartup?.(new DOMException("Audio pipeline replaced", "AbortError"));
+            }
             session.cancelled = true;
+            if (pendingAudioSessionsRef.current.get(track.id) === session) {
+                pendingAudioSessionsRef.current.delete(track.id);
+            }
+            if (audioSessionsRef.current.get(track.id) === session) {
+                audioSessionsRef.current.delete(track.id);
+            }
+            if (audioSessionRef.current === session) audioSessionRef.current = null;
             for (const [name, handler] of session.listeners) {
                 audio.removeEventListener(name, handler);
             }
@@ -811,10 +840,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (session.cancelled || !session.opened || !session.mimeType || session.sourceBuffer) return;
 
             if (!MediaSource.isTypeSupported(session.mimeType)) {
-                const error = new Error(
+                session.fail(new Error(
                     "The browser cannot play the selected audio codec (" + session.mimeType + ").",
-                );
-                session.fail(error);
+                ));
                 return;
             }
 
@@ -901,13 +929,21 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (session.cancelled) return;
             session.rejectStartup?.(error);
             console.error("Audio track pipeline failed.", error);
+            const wasSelected = selectedAudioRef.current === track.id;
+            const activeId = audioSessionRef.current?.track?.id || "";
             session.dispose();
-            if (pendingAudioSessionRef.current === session) pendingAudioSessionRef.current = null;
-            if (!audioSessionRef.current) fallback(error);
-            else setStatus(error?.message || "Could not switch to the selected audio track.");
+
+            if (wasSelected) {
+                selectedAudioRef.current = activeId;
+                setSelectedAudio(activeId);
+                if (!activeId) fallback(error);
+                else setStatus(error?.message || "Could not switch to the selected audio track.");
+            } else {
+                console.warn("Could not preload audio track " + track.label, error);
+            }
         };
 
-        pendingAudioSessionRef.current = session;
+        pendingAudioSessionsRef.current.set(track.id, session);
         audio.src = session.objectUrl;
         audio.load();
 
@@ -920,18 +956,26 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
         if (!audioCodec || audioTrackNumber < 1) {
             session.fail(new Error("The selected audio stream cannot be mapped to a supported audio track."));
-            return;
+            return null;
         }
 
+        const sampleRate = Number(track.stream.sample_rate);
+        const numberOfChannels = Number(track.stream.channels);
         const audioConfig = transcodeAudio ? null : {
             codec: audioDecoderCodecString(track.stream, audioCodec, {
                 codec: track.stream.codec_string,
                 description: track.stream.extradata,
             }),
-            sampleRate: Number(track.stream.sample_rate),
-            numberOfChannels: Number(track.stream.channels),
+            sampleRate,
+            numberOfChannels,
             description: track.stream.extradata,
         };
+
+        if (!transcodeAudio && (!Number.isFinite(sampleRate) || sampleRate <= 0 ||
+            !Number.isFinite(numberOfChannels) || numberOfChannels <= 0)) {
+            session.fail(new Error("The selected audio track is missing a valid sample rate or channel count."));
+            return null;
+        }
 
         try {
             worker.postMessage({
@@ -950,57 +994,47 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             });
 
             await Promise.all([sourceOpen, workerStarted, workerReady, firstBuffered]);
-            if (session.cancelled || pendingAudioSessionRef.current !== session) return;
+            if (session.cancelled || pendingAudioSessionsRef.current.get(track.id) !== session) return null;
 
             try { audio.currentTime = session.startAt; } catch { /* first range establishes the timeline */ }
-            audio.muted = video.muted;
+            audio.volume = video.volume;
             audio.playbackRate = video.playbackRate;
 
-            const previous = audioSessionRef.current;
-            if (shouldPlay && !video.paused) {
-                audio.volume = 0;
-                await audio.play();
-                if (session.cancelled || pendingAudioSessionRef.current !== session) return;
-            } else {
-                audio.pause();
-                audio.volume = video.volume;
-            }
+            const previousForTrack = audioSessionsRef.current.get(track.id);
+            audioSessionsRef.current.set(track.id, session);
+            pendingAudioSessionsRef.current.delete(track.id);
+            session.ready = true;
 
-            audioSessionRef.current = session;
-            pendingAudioSessionRef.current = null;
-
-            if (shouldPlay && !video.paused) {
-                const targetVolume = video.muted ? 0 : video.volume;
-                const fadeStart = performance.now();
-                const fadeDuration = 120;
-                const fade = (now) => {
-                    if (session.cancelled) return;
-                    const progress = Math.min(1, (now - fadeStart) / fadeDuration);
-                    audio.volume = targetVolume * progress;
-                    if (previous && !previous.cancelled) {
-                        previous.audio.volume = targetVolume * (1 - progress);
-                    }
-                    if (progress < 1) {
-                        requestAnimationFrame(fade);
-                    } else {
-                        previous?.dispose?.();
-                    }
-                };
-                requestAnimationFrame(fade);
-            } else {
-                previous?.dispose?.();
-            }
-
-            setStatus("Audio track active · video stream uninterrupted");
-        } catch (error) {
-            if (!session.cancelled) {
-                session.fail(error);
-                const activeId = audioSessionRef.current?.track?.id || "";
-                if (selectedAudioRef.current === track.id) {
-                    selectedAudioRef.current = activeId;
-                    setSelectedAudio(activeId);
+            if (activate) {
+                if (!video.paused) {
+                    audio.muted = true;
+                    await audio.play();
+                    if (session.cancelled) return null;
+                } else {
+                    audio.pause();
                 }
+
+                selectedAudioRef.current = track.id;
+                setSelectedAudio(track.id);
+                audioSessionRef.current = session;
+            } else {
+                audio.muted = true;
+                if (!video.paused) audio.play().catch(() => {});
             }
+
+            for (const [id, item] of audioSessionsRef.current) {
+                item.audio.muted = video.muted || id !== selectedAudioRef.current;
+                item.audio.volume = video.volume;
+                item.audio.playbackRate = video.playbackRate;
+            }
+
+            if (previousForTrack && previousForTrack !== session) previousForTrack.dispose();
+
+            if (activate) setStatus("Audio switched · video stream uninterrupted");
+            return session;
+        } catch (error) {
+            if (!session.cancelled) session.fail(error);
+            return null;
         }
     }, [fallback, source]);
 
@@ -1084,7 +1118,13 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
                 await startPipeline(null, 0, false, metadataDemuxer, streams);
                 metadataDemuxer = null;
-                if (defaultAudio) void startAudioPipeline(defaultAudio, 0, false);
+                if (defaultAudio) void startAudioPipeline(defaultAudio, 0, false, true);
+                for (const track of audio) {
+                    if (track.id !== defaultAudio?.id && track.supported &&
+                        !needsAudioTranscoding(track.stream.codec_name)) {
+                        void startAudioPipeline(track, 0, false, false);
+                    }
+                }
             } catch (error) {
                 if (!cancelled) fallback(error instanceof Error ? error : new Error(String(error)));
             }
@@ -1102,28 +1142,47 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             metadataDemuxer?.destroy?.();
             clearSubtitle();
         };
-    }, [clearSubtitle, fallback, source, startPipeline]);
+    }, [clearSubtitle, fallback, source, startAudioPipeline, startPipeline]);
 
     const onAudioChange = (event) => {
         const track = audioTracksRef.current.find((item) => item.id === event.target.value);
+        const video = videoRef.current;
+
         if (!track) {
-            pendingAudioSessionRef.current?.dispose?.();
-            pendingAudioSessionRef.current = null;
-            audioSessionRef.current?.dispose?.();
-            audioSessionRef.current = null;
             selectedAudioRef.current = "";
+            audioSessionRef.current = null;
             setSelectedAudio("");
+            for (const session of audioSessionsRef.current.values()) {
+                session.audio.muted = true;
+            }
             setStatus("Audio off");
             return;
         }
 
-        const video = videoRef.current;
+        const readySession = audioSessionsRef.current.get(track.id);
+        if (readySession && !readySession.cancelled) {
+            selectedAudioRef.current = track.id;
+            audioSessionRef.current = readySession;
+            setSelectedAudio(track.id);
+
+            for (const [id, session] of audioSessionsRef.current) {
+                session.audio.muted = video?.muted || id !== track.id;
+                if (video) session.audio.volume = video.volume;
+            }
+            if (video && !video.paused && readySession.audio.paused) {
+                readySession.audio.play().catch((error) => {
+                    console.warn("Could not activate the selected audio stream.", error);
+                });
+            }
+            setStatus("Audio switched instantly · video stream untouched");
+            return;
+        }
+
         const time = video?.currentTime || 0;
         const wasPlaying = Boolean(video && !video.paused);
-        selectedAudioRef.current = track.id;
         setSelectedAudio(track.id);
-        setStatus("Preparing audio track · video keeps playing");
-        void startAudioPipeline(track, time, wasPlaying);
+        setStatus("Preparing this audio track · video keeps playing");
+        void startAudioPipeline(track, time, wasPlaying, true);
     };
 
     const onSubtitleChange = (event) => {
@@ -1143,34 +1202,35 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         if (!video) return undefined;
 
         const syncAudio = () => {
-            const session = audioSessionRef.current;
-            if (!session || session.cancelled) return;
-            const audio = session.audio;
+            const shouldPlay = !video.paused && !video.ended;
+            for (const [id, session] of audioSessionsRef.current) {
+                if (session.cancelled) continue;
+                const audio = session.audio;
+                audio.volume = video.volume;
+                audio.muted = video.muted || id !== selectedAudioRef.current;
+                audio.playbackRate = video.playbackRate;
 
-            audio.muted = video.muted;
-            audio.volume = video.muted ? 0 : video.volume;
-            audio.playbackRate = video.playbackRate;
+                if (!shouldPlay) {
+                    audio.pause();
+                    continue;
+                }
 
-            const drift = Math.abs(audio.currentTime - video.currentTime);
-            if (drift > 0.35 && video.readyState >= 2) {
-                try { audio.currentTime = video.currentTime; } catch { /* audio stream is buffering */ }
-            }
-
-            if (video.paused || video.ended) {
-                audio.pause();
-            } else if (audio.paused && audio.readyState >= 2) {
-                audio.play().catch((error) => {
-                    console.warn("Could not resume the selected audio track.", error);
-                });
+                const drift = Math.abs(audio.currentTime - video.currentTime);
+                if (drift > 0.35 && video.readyState >= 2) {
+                    try { audio.currentTime = video.currentTime; } catch { /* audio stream is buffering */ }
+                }
+                if (audio.paused && audio.readyState >= 2) {
+                    audio.play().catch((error) => {
+                        console.warn("Could not synchronize an audio stream.", error);
+                    });
+                }
             }
         };
 
         const onVolumeChange = () => {
-            const sessions = [audioSessionRef.current, pendingAudioSessionRef.current];
-            for (const session of sessions) {
-                if (!session || session.cancelled) continue;
-                session.audio.muted = video.muted;
-                session.audio.volume = video.muted ? 0 : video.volume;
+            for (const [id, session] of audioSessionsRef.current) {
+                session.audio.volume = video.volume;
+                session.audio.muted = video.muted || id !== selectedAudioRef.current;
             }
         };
 
@@ -1203,22 +1263,28 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const time = video.currentTime;
             const wasPlaying = !video.paused;
 
-            const activeAudio = audioSessionRef.current;
-            if (activeAudio && !activeAudio.cancelled) {
+            const audioSessions = Array.from(audioSessionsRef.current.values());
+            for (const audioSession of audioSessions) {
+                if (audioSession.cancelled) continue;
                 let audioBuffered = false;
-                for (let index = 0; index < activeAudio.audio.buffered.length; index += 1) {
-                    if (time >= activeAudio.audio.buffered.start(index) - 0.15 &&
-                        time <= activeAudio.audio.buffered.end(index) + 0.15) {
+                for (let index = 0; index < audioSession.audio.buffered.length; index += 1) {
+                    if (time >= audioSession.audio.buffered.start(index) - 0.15 &&
+                        time <= audioSession.audio.buffered.end(index) + 0.15) {
                         audioBuffered = true;
                         break;
                     }
                 }
 
                 if (audioBuffered) {
-                    try { activeAudio.audio.currentTime = time; } catch { /* browser is updating the timeline */ }
+                    try { audioSession.audio.currentTime = time; } catch { /* browser is updating the timeline */ }
                 } else {
-                    const selectedTrack = audioTracksRef.current.find((item) => item.id === selectedAudioRef.current);
-                    if (selectedTrack) void startAudioPipeline(selectedTrack, time, wasPlaying);
+                    audioSession.audio.pause();
+                    void startAudioPipeline(
+                        audioSession.track,
+                        time,
+                        wasPlaying,
+                        audioSession.track.id === selectedAudioRef.current,
+                    );
                 }
             }
 
@@ -1237,8 +1303,11 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
     useEffect(() => () => {
         if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
-        pendingAudioSessionRef.current?.dispose?.();
-        audioSessionRef.current?.dispose?.();
+        for (const session of pendingAudioSessionsRef.current.values()) session.dispose?.();
+        for (const session of audioSessionsRef.current.values()) session.dispose?.();
+        pendingAudioSessionsRef.current.clear();
+        audioSessionsRef.current.clear();
+        audioSessionRef.current = null;
     }, []);
 
     return (

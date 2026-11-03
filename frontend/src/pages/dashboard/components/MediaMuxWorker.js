@@ -20,6 +20,7 @@ const outputCapacityWaiters = [];
 let nextWriteId = 1;
 let closedTracks = new Set();
 let expectedTracks = 0;
+let audioPrimed = false;
 let finalizing = false;
 let failed = false;
 
@@ -47,6 +48,7 @@ async function initialize(message) {
         videoSource = new EncodedVideoPacketSource(message.video.codec);
         if (message.audio) {
             audioCodec = message.audio.codec;
+            audioPrimed = false;
             audioSource = new EncodedAudioPacketSource(audioCodec);
         }
 
@@ -78,15 +80,20 @@ async function initialize(message) {
             flip: Boolean(message.video.flip),
         });
         if (audioSource && message.audio) {
+            // Do not register decoderConfig at track creation time. AC-3/E-AC-3
+            // need the first encoded packet as the MP4 priming packet, so their
+            // track metadata must be created by the first source.add(packet, meta).
             output.addAudioTrack(audioSource, {
-                decoderConfig: message.audio.decoderConfig,
                 languageCode: message.audio.languageCode || "und",
                 name: message.audio.name || "",
             });
         }
 
         await output.start();
-        self.postMessage({type: "ready", mimeType: await output.getMimeType()});
+        self.postMessage({type: "started"});
+        void output.getMimeType().then((mimeType) => {
+            self.postMessage({type: "ready", mimeType});
+        }).catch(reportError);
     } catch (error) {
         reportError(error);
     }
@@ -126,7 +133,15 @@ function addPacketBatch(message) {
                 Number.isFinite(duration) && duration > 0 ? duration : (track === "video" ? 1 / 30 : 0.02),
                 packetSequence[track]++,
             );
-            await source.add(packet);
+            if (track === "audio" && !audioPrimed) {
+                // Passing metadata with the first packet lets Mediabunny use
+                // that packet as the priming packet required by AC-3/E-AC-3
+                // and DTS sample-entry generation.
+                await source.add(packet, {decoderConfig: message.audio.decoderConfig});
+                audioPrimed = true;
+            } else {
+                await source.add(packet);
+            }
         }
         self.postMessage({type: "batch-ack", id: message.id});
     }).catch(reportError);

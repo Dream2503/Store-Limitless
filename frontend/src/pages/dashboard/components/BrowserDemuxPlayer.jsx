@@ -143,6 +143,19 @@ function audioDecoderCodecString(stream, sourceCodec, config) {
     return sourceCodec;
 }
 
+function audioTrackSupported(stream) {
+    const sourceCodec = audioCodecName(stream?.codec_name);
+    if (!sourceCodec) return false;
+    if (needsAudioTranscoding(stream.codec_name)) return true;
+    if (typeof MediaSource === "undefined" || typeof MediaSource.isTypeSupported !== "function") return false;
+
+    const codec = audioDecoderCodecString(stream, sourceCodec, {
+        codec: stream.codec_string,
+        description: stream.extradata,
+    });
+    return Boolean(codec && MediaSource.isTypeSupported('audio/mp4; codecs="' + codec + '"'));
+}
+
 function languageCode(language) {
     const value = String(language || "").toLowerCase().split(/[-_]/)[0];
     if (/^[a-z]{3}$/.test(value)) return value;
@@ -1131,7 +1144,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                         index: item.index,
                         label: trackLabel(item),
                         stream: item,
-                        supported: Boolean(audioCodecName(item.codec_name)),
+                        supported: audioTrackSupported(item),
                     }));
                 // Keep only text subtitle formats. PGS/DVD/VobSub are bitmap
                 // streams and cannot be rendered by the WebVTT text-track path.

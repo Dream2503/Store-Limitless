@@ -112,7 +112,7 @@ async function initialize(message) {
             formats: ALL_FORMATS,
             source: new UrlSource(message.source, {
                 maxCacheSize: 8 * 1024 * 1024,
-                parallelism: 4,
+                parallelism: 6,
             }),
         });
 
@@ -152,8 +152,16 @@ async function initialize(message) {
             firstPacket = startAt > 0
                 ? await sink.getPacket(startAt)
                 : await sink.getFirstPacket();
-            if (!firstPacket) firstPacket = await sink.getFirstPacket();
-            if (!firstPacket) throw new Error("The selected audio track contains no readable packets.");
+
+            if (!firstPacket && startAt > 0) {
+                const first = await sink.getFirstPacket();
+                if (first && startAt <= first.timestamp + first.duration + 0.25) {
+                    firstPacket = first;
+                }
+            }
+            if (!firstPacket) {
+                throw new Error("No audio packet exists at or before the requested seek position.");
+            }
             audioSource = new EncodedAudioPacketSource(message.audio.codec);
         }
 

@@ -408,7 +408,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         };
 
         attach();
-        const onLoadStart = () => attach();
+        const onLoadStart = () => {
+            if (!trackElement || trackElement.parentElement !== video) attach();
+            else {
+                try { trackElement.track.mode = "showing"; } catch { /* track may still be parsing */ }
+            }
+        };
         video.addEventListener("loadstart", onLoadStart);
         return () => {
             video.removeEventListener("loadstart", onLoadStart);

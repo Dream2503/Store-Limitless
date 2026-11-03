@@ -226,6 +226,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const subtitleDemuxerRef = useRef(null);
     const subtitleCueCacheRef = useRef(new Map());
     const subtitlePreloadPromiseRef = useRef(Promise.resolve());
+    const subtitlePreloadTaskRef = useRef(0);
     const subtitleTaskRef = useRef(0);
     const subtitleTrackRef = useRef(null);
     const seekTimerRef = useRef(null);
@@ -259,8 +260,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         }
     }, []);
 
-    const preloadSubtitleTracks = useCallback(async (streams) => {
-        if (!streams.length) return;
+    const preloadSubtitleTracks = useCallback(async (streams, taskId) => {
+        if (!streams.length || taskId !== subtitlePreloadTaskRef.current) return;
 
         let demuxer = null;
         try {
@@ -269,8 +270,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             subtitleDemuxerRef.current = demuxer;
             await demuxer.load(source);
             await demuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
+            if (taskId !== subtitlePreloadTaskRef.current) return;
 
             for (const stream of streams) {
+                if (taskId !== subtitlePreloadTaskRef.current) return;
                 const cues = [];
                 try {
                     const reader = demuxer.readAVPacket(
@@ -301,7 +304,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     console.warn("Could not preload subtitle track " + trackLabel(stream), error);
                 }
 
-                subtitleCueCacheRef.current.set(String(stream.index), cues);
+                if (taskId === subtitlePreloadTaskRef.current) {
+                    subtitleCueCacheRef.current.set(String(stream.index), cues);
+                }
             }
         } catch (error) {
             console.warn("Subtitle track preload failed.", error);
@@ -1136,8 +1141,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 subtitleCueCacheRef.current.clear();
                 setAudioTracks(audio);
                 setSubtitleTracks(subtitles);
+                const subtitlePreloadTask = ++subtitlePreloadTaskRef.current;
                 subtitlePreloadPromiseRef.current = preloadSubtitleTracks(
                     subtitles.map((item) => item.stream),
+                    subtitlePreloadTask,
                 );
 
                 const defaultAudio = audio.find((item) => item.supported) || null;
@@ -1184,6 +1191,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             audioSessionsRef.current.clear();
             audioSessionRef.current = null;
             selectedAudioRef.current = "";
+            subtitlePreloadTaskRef.current += 1;
             subtitleDemuxerRef.current?.destroy?.();
             subtitleDemuxerRef.current = null;
             subtitleCueCacheRef.current.clear();

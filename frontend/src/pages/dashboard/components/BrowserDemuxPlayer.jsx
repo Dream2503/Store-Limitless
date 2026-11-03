@@ -213,6 +213,26 @@ function subtitleText(stream, packet) {
     return text;
 }
 
+function activeSubtitleText(cues, time) {
+    if (!Array.isArray(cues) || !cues.length || !Number.isFinite(time)) return "";
+
+    // Find the first cue whose start time is after the playback position.
+    let low = 0;
+    let high = cues.length;
+    while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (cues[middle].start <= time) low = middle + 1;
+        else high = middle;
+    }
+
+    const active = [];
+    for (let index = low - 1; index >= 0; index -= 1) {
+        const cue = cues[index];
+        if (cue.end > time && cue.start <= time && cue.text) active.push(cue.text);
+    }
+    return active.reverse().join("\n");
+}
+
 export default function BrowserDemuxPlayer({source, title, active = true, onUseStandardPlayer, onUnavailable}) {
     const videoRef = useRef(null);
     const sessionRef = useRef(null);
@@ -228,7 +248,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const subtitlePreloadPromiseRef = useRef(Promise.resolve());
     const subtitlePreloadTaskRef = useRef(0);
     const subtitleTaskRef = useRef(0);
-    const subtitleTrackRef = useRef(null);
+    const subtitleCuesRef = useRef([]);
     const seekTimerRef = useRef(null);
     const fallbackRef = useRef(false);
 
@@ -236,6 +256,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const [subtitleTracks, setSubtitleTracks] = useState([]);
     const [selectedAudio, setSelectedAudio] = useState("");
     const [selectedSubtitle, setSelectedSubtitle] = useState("");
+    const [visibleSubtitle, setVisibleSubtitle] = useState("");
     const [status, setStatus] = useState("Preparing parallel workers…");
 
     const fallback = useCallback((error) => {
@@ -247,17 +268,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
     const clearSubtitle = useCallback(() => {
         subtitleTaskRef.current += 1;
-
-        const activeTrack = subtitleTrackRef.current;
-        if (activeTrack) {
-            activeTrack.mode = "disabled";
-            if (activeTrack.cues) {
-                for (let index = activeTrack.cues.length - 1; index >= 0; index -= 1) {
-                    activeTrack.removeCue(activeTrack.cues[index]);
-                }
-            }
-            subtitleTrackRef.current = null;
-        }
+        subtitleCuesRef.current = [];
+        setVisibleSubtitle("");
     }, []);
 
     const preloadSubtitleTracks = useCallback(async (streams, taskId) => {
@@ -321,19 +333,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         if (!stream) return;
 
         const video = videoRef.current;
-        if (!video || typeof video.addTextTrack !== "function" || typeof VTTCue === "undefined") {
-            setStatus("This browser cannot render embedded text subtitles.");
+        if (!video) {
+            setStatus("The video surface is not ready for subtitles.");
             return;
         }
 
         const taskId = subtitleTaskRef.current;
-        const textTrack = video.addTextTrack(
-            "subtitles",
-            trackLabel(stream),
-            languageCode(stream.tags?.language),
-        );
-        textTrack.mode = "showing";
-        subtitleTrackRef.current = textTrack;
         setStatus("Loading cached subtitle cues…");
 
         try {
@@ -341,29 +346,19 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (taskId !== subtitleTaskRef.current) return;
 
             const cues = subtitleCueCacheRef.current.get(String(stream.index)) || [];
-            let cueCount = 0;
-            for (const cue of cues) {
-                if (taskId !== subtitleTaskRef.current) return;
-                try {
-                    textTrack.addCue(new VTTCue(cue.start, cue.end, cue.text));
-                    cueCount += 1;
-                } catch (error) {
-                    console.warn("Skipping an invalid subtitle cue.", error);
-                }
-            }
-
-            if (taskId === subtitleTaskRef.current) {
-                if (cueCount > 0) {
-                    textTrack.mode = "showing";
-                    setStatus("Subtitles active · " + cueCount + " cached cues");
-                } else {
-                    textTrack.mode = "disabled";
-                    setStatus("No readable subtitle cues were found in this track.");
-                }
+            if (cues.length > 0) {
+                subtitleCuesRef.current = cues;
+                setVisibleSubtitle(activeSubtitleText(cues, video.currentTime));
+                setStatus("Subtitles active · " + cues.length + " cached cues");
+            } else {
+                subtitleCuesRef.current = [];
+                setVisibleSubtitle("");
+                setStatus("No readable subtitle cues were found in this track.");
             }
         } catch (error) {
             if (taskId === subtitleTaskRef.current) {
-                textTrack.mode = "disabled";
+                subtitleCuesRef.current = [];
+                setVisibleSubtitle("");
                 console.warn("Subtitle cue activation failed.", error);
                 setStatus(error?.message || "Could not render this subtitle track.");
             }
@@ -969,8 +964,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 requestedAudioRef.current = activeId;
                 selectedAudioRef.current = activeId;
                 setSelectedAudio(activeId);
-                if (!activeId) fallback(error);
-                else setStatus(error?.message || "Could not switch to the selected audio track.");
+                // Audio-track failures must never tear down the independent video
+                // MediaSource or force the whole player into its standard fallback.
+                setStatus(error?.message || "Could not switch to the selected audio track. Video playback continues.");
             } else {
                 console.warn("Could not preload audio track " + track.label, error);
             }
@@ -1151,16 +1147,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     subtitlePreloadTask,
                 );
 
+                // Video is independent of audio. If the browser cannot play any
+                // embedded audio codec, keep the video running silently instead
+                // of falling back and reloading the entire media element.
                 const defaultAudio = audio.find((item) => item.supported) || null;
-                if (audio.length > 0 && !defaultAudio) {
-                    const detectedCodecs = [...new Set(audio.map((track) =>
-                        String(track.stream.codec_name || "unknown"),
-                    ))].join(", ");
-                    throw new Error(
-                        "No supported audio track was found. Detected audio codecs: " + detectedCodecs +
-                        ". The browser player supports AAC, MP3, Opus, Vorbis, FLAC, AC-3, E-AC-3, DTS, TrueHD and PCM; switching to the standard player.",
-                    );
-                }
                 const audioId = defaultAudio?.id || "";
                 selectedAudioRef.current = audioId;
                 requestedAudioRef.current = audioId;
@@ -1225,35 +1215,57 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
         const pendingSession = pendingAudioSessionsRef.current.get(track.id);
         if (pendingSession && !pendingSession.cancelled) {
+            // The background preloader may still be near the beginning of the file.
+            // Restart only this pending audio stream at the current playback time so
+            // it does not have to append every packet between 0 and the playhead.
+            const time = Math.max(0, Number(video?.currentTime) || 0);
+            const wasPlaying = Boolean(video && !video.paused);
             requestedAudioRef.current = track.id;
-            pendingSession.activateWhenReady = true;
-            pendingSession.requestedTime = video?.currentTime || 0;
             setSelectedAudio(track.id);
-            try {
-                pendingSession.audio.currentTime = pendingSession.requestedTime;
-                pendingSession.wakeAppend?.();
-            } catch { /* audio source buffer is still opening */ }
-            setStatus("Preparing selected audio · reusing its existing stream");
+            setStatus("Preparing selected audio at the current position · video keeps playing");
+            void startAudioPipeline(track, time, wasPlaying, true);
             return;
         }
 
         const readySession = audioSessionsRef.current.get(track.id);
         if (readySession && !readySession.cancelled) {
-            selectedAudioRef.current = track.id;
-            requestedAudioRef.current = track.id;
-            audioSessionRef.current = readySession;
-            setSelectedAudio(track.id);
+            const targetTime = Math.max(0, Number(video?.currentTime) || 0);
+            const audio = readySession.audio;
+            if (Math.abs(audio.currentTime - targetTime) > 0.2) {
+                try { audio.currentTime = targetTime; } catch { /* the next sync tick retries */ }
+            }
+            audio.playbackRate = video?.playbackRate || 1;
+            audio.volume = video?.volume ?? 1;
+            audio.muted = true;
 
-            for (const [id, session] of audioSessionsRef.current) {
-                session.audio.muted = video?.muted || id !== track.id;
-                if (video) session.audio.volume = video.volume;
-            }
-            if (video && !video.paused && readySession.audio.paused) {
-                readySession.audio.play().catch((error) => {
+            // Start the new audio element while muted. Only switch the mute states
+            // after play() succeeds, so a failed element never interrupts the old one.
+            const activate = () => {
+                if (readySession.cancelled || requestedAudioRef.current !== track.id) return;
+                selectedAudioRef.current = track.id;
+                audioSessionRef.current = readySession;
+                setSelectedAudio(track.id);
+                for (const [id, session] of audioSessionsRef.current) {
+                    session.audio.muted = Boolean(video?.muted) || id !== track.id;
+                    if (video) {
+                        session.audio.volume = video.volume;
+                        session.audio.playbackRate = video.playbackRate;
+                    }
+                }
+                setStatus("Audio switched · video stream uninterrupted");
+            };
+
+            requestedAudioRef.current = track.id;
+            if (video && !video.paused) {
+                audio.play().then(activate).catch((error) => {
+                    requestedAudioRef.current = selectedAudioRef.current;
+                    setSelectedAudio(selectedAudioRef.current);
                     console.warn("Could not activate the selected audio stream.", error);
+                    setStatus("Could not activate that audio track; the previous audio remains active.");
                 });
+            } else {
+                activate();
             }
-            setStatus("Audio switched instantly · video stream untouched");
             return;
         }
 
@@ -1276,6 +1288,24 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         const track = subtitleTracks.find((item) => item.id === id);
         if (track?.supported) void loadSubtitle(track.stream);
     };
+
+    useEffect(() => {
+        const video = videoRef.current;
+        if (!video) return undefined;
+
+        const updateSubtitle = () => {
+            const next = activeSubtitleText(subtitleCuesRef.current, video.currentTime);
+            setVisibleSubtitle((current) => current === next ? current : next);
+        };
+
+        const events = ["timeupdate", "seeking", "seeked", "loadedmetadata", "playing"];
+        events.forEach((name) => video.addEventListener(name, updateSubtitle));
+        updateSubtitle();
+
+        return () => {
+            events.forEach((name) => video.removeEventListener(name, updateSubtitle));
+        };
+    }, []);
 
     useEffect(() => {
         const video = videoRef.current;
@@ -1419,6 +1449,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             <video ref={videoRef} controls playsInline preload="auto" className="h-full min-h-[240px] w-full bg-black object-contain" aria-label={title || "Video"}>
             </video>
+
+            {visibleSubtitle && (
+                <div className="pointer-events-none absolute inset-x-4 bottom-16 z-10 flex justify-center px-4">
+                    <span className="max-w-[min(92%,60rem)] whitespace-pre-line break-words rounded-md bg-black/80 px-3 py-1.5 text-center text-[clamp(14px,2.7vh,28px)] font-semibold leading-snug text-white shadow-[0_1px_3px_rgba(0,0,0,0.95)]">
+                        {visibleSubtitle}
+                    </span>
+                </div>
+            )}
 
             <div className="pointer-events-none absolute bottom-14 left-3 rounded bg-black/65 px-2 py-1 text-[11px] text-white/75">{status}</div>
 

@@ -668,7 +668,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 const sb = session.sourceBuffer;
                 if (!session.didStart || !sb || sb.updating || session.trimming || !sb.buffered.length) return false;
 
-                const keepBehind = aggressive ? 2 : RETAIN_VIDEO_BUFFER_SECONDS;
+                const keepBehind = aggressive ? 0.5 : RETAIN_VIDEO_BUFFER_SECONDS;
                 const cutoff = Math.max(0, video.currentTime - keepBehind);
                 if (cutoff <= 0) return false;
 
@@ -723,10 +723,13 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                         if (session.writingId !== null) {
                             worker.postMessage({type: "write-ack", id: session.writingId});
                             session.writingId = null;
+                            session.quotaRecoveryAttempts = 0;
+                            session.forwardBufferSeconds = Math.min(
+                                MAX_FORWARD_BUFFER_SECONDS,
+                                session.forwardBufferSeconds + 0.5,
+                            );
                         }
                         if (session.trimming) session.trimming = false;
-
-                        session.quotaRecoveryAttempts = 0;
                         if (!session.didStart && sb.buffered.length) {
                             session.didStart = true;
                             if (session.startAt > 0 &&
@@ -828,9 +831,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     quotaRestartAttemptsRef.current = 0;
                 }
             };
+            video.addEventListener("play", wakeAppend);
             video.addEventListener("timeupdate", wakeAppend);
             video.addEventListener("playing", wakeAppend);
-            session.listeners.push(["timeupdate", wakeAppend], ["playing", wakeAppend]);
+            session.listeners.push(
+                ["play", wakeAppend],
+                ["timeupdate", wakeAppend],
+                ["playing", wakeAppend],
+            );
 
             await Promise.all([sourceOpen, workerStarted, workerReady, targetBufferedPromise]);
             if (session.cancelled) return;

@@ -1223,8 +1223,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 requestedAudioRef.current = restoreId;
                 selectedAudioRef.current = restoreId;
                 setSelectedAudio(restoreId);
-                // Audio-track failures must never tear down the independent video
-                // MediaSource or force the whole player into its standard fallback.
+                // Audio-track failures never tear down the independent video
+                // MediaSource. A pending seek remains gated until another track is ready.
                 setStatus(error?.message || "Could not prepare the selected audio track.");
             } else {
                 console.warn("Could not preload audio track " + track.label, error);
@@ -1403,9 +1403,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 subtitleCueCacheRef.current.clear();
                 setAudioTracks(audio);
                 setSubtitleTracks(subtitles);
-                // Video is independent of audio. If the browser cannot play any
-                // embedded audio codec, keep the video running silently instead
-                // of falling back and reloading the entire media element.
+                // Prepare the default audio track in parallel with video.
+                // Keep playback gated until both pipelines are ready.
                 const defaultAudio = audio.find((item) => item.supported) || null;
                 const audioId = defaultAudio?.id || "";
                 selectedAudioRef.current = audioId;

@@ -1397,12 +1397,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 await startPipeline(null, 0, false, metadataDemuxer, streams);
                 metadataDemuxer = null;
                 if (defaultAudio) void startAudioPipeline(defaultAudio, 0, false, true);
-                for (const track of audio) {
-                    if (track.id !== defaultAudio?.id && track.supported &&
-                        !needsAudioTranscoding(track.stream.codec_name)) {
-                        void startAudioPipeline(track, 0, false, false);
-                    }
-                }
             } catch (error) {
                 if (!cancelled) fallback(error instanceof Error ? error : new Error(String(error)));
             }
@@ -1435,23 +1429,24 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             void (async () => {
                 try {
-                    setStatus("Seeking · preparing video and selected audio together…");
-                    await startPipeline(null, target, shouldPlay, null, null, true);
-                    if (generation !== seekGeneration) return;
-
-                    let readyAudio = null;
+                    setStatus("Seeking · demuxing video and selected audio in parallel…");
+                    let audioPreparation = Promise.resolve(null);
                     if (selectedTrack?.supported) {
                         requestedAudioRef.current = selectedTrack.id;
-                        readyAudio = await startAudioPipeline(selectedTrack, target, false, true);
-                        if (!readyAudio) {
-                            if (generation === seekGeneration) {
-                                setStatus("Audio could not be prepared at this position. Playback remains paused.");
-                            }
-                            return;
-                        }
+                        audioPreparation = startAudioPipeline(selectedTrack, target, false, true);
                     }
 
+                    const [videoReady, readyAudio] = await Promise.all([
+                        startPipeline(null, target, shouldPlay, null, null, true),
+                        audioPreparation,
+                    ]);
                     if (generation !== seekGeneration) return;
+                    if (selectedTrack?.supported && !readyAudio) {
+                        setStatus("Audio could not be prepared at this position. Playback remains paused.");
+                        return;
+                    }
+
+                    if (generation !== seekGeneration || videoReady === false) return;
                     const currentVideo = videoRef.current;
                     if (!currentVideo || !sessionRef.current || sessionRef.current.cancelled) return;
 

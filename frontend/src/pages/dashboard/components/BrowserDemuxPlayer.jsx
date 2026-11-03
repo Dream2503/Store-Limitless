@@ -30,8 +30,6 @@ const AUDIO_SOURCE_CODECS = {
     eac3: "eac3",
     dts: "dts",
     truehd: "truehd",
-    pcm_u8: "pcm-u8",
-    pcm_s8: "pcm-s8",
     pcm_s16le: "pcm-s16",
     pcm_s16be: "pcm-s16be",
     pcm_s24le: "pcm-s24",
@@ -42,8 +40,6 @@ const AUDIO_SOURCE_CODECS = {
     pcm_f32be: "pcm-f32be",
     pcm_f64le: "pcm-f64",
     pcm_f64be: "pcm-f64be",
-    pcm_mulaw: "ulaw",
-    pcm_alaw: "alaw",
 };
 
 function audioCodecName(codec) {

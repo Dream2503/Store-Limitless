@@ -7,6 +7,30 @@ const MAX_FORWARD_BUFFER_SECONDS = 8;
 const RETAIN_VIDEO_BUFFER_SECONDS = 20;
 const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"]);
 
+function formatVttTimestamp(seconds) {
+    const milliseconds = Math.max(0, Math.round(Number(seconds) * 1000));
+    const hours = Math.floor(milliseconds / 3600000);
+    const minutes = Math.floor((milliseconds % 3600000) / 60000);
+    const wholeSeconds = Math.floor((milliseconds % 60000) / 1000);
+    const remainder = milliseconds % 1000;
+    return String(hours).padStart(2, "0") + ":" +
+        String(minutes).padStart(2, "0") + ":" +
+        String(wholeSeconds).padStart(2, "0") + "." +
+        String(remainder).padStart(3, "0");
+}
+
+function buildWebVtt(cues) {
+    const body = cues
+        .filter((cue) => Number.isFinite(cue.start) && Number.isFinite(cue.end) &&
+            cue.end > cue.start && cue.text)
+        .map((cue) =>
+            formatVttTimestamp(cue.start) + " --> " + formatVttTimestamp(cue.end) + "\n" +
+            String(cue.text).replace(/\r/g, "").replace(/\u0000/g, ""),
+        )
+        .join("\n\n");
+    return "WEBVTT\n\n" + body + (body ? "\n" : "");
+}
+
 function mimeSupportDetails(mimeType) {
     const match = String(mimeType || "").match(/codecs\s*=\s*["']([^"']+)["']/i);
     if (!match || typeof MediaSource === "undefined") {
@@ -207,23 +231,6 @@ function decoderConfig(demuxer, stream, type) {
     };
 }
 
-function subtitlePacketSeconds(packet, stream, field) {
-    const value = packet?.[field];
-    const direct = value == null || value === "" ? NaN : Number(value);
-    if (Number.isFinite(direct)) return direct;
-
-    const ticks = Number(packet?.[field === "timestamp" ? "pts" : "duration"]);
-    if (!Number.isFinite(ticks)) return NaN;
-
-    const base = packet?.time_base || packet?.timeBase || stream?.time_base || stream?.timeBase;
-    if (typeof base === "number" && Number.isFinite(base)) return ticks * base;
-    if (base && Number.isFinite(Number(base.num)) &&
-        Number.isFinite(Number(base.den)) && Number(base.den) !== 0) {
-        return ticks * Number(base.num) / Number(base.den);
-    }
-    return NaN;
-}
-
 function subtitleText(stream, packet) {
     const codec = String(stream?.codec_name || "").toLowerCase();
     let bytes = packet.data;
@@ -261,26 +268,6 @@ function isMediaTimeBuffered(media, time) {
             time <= media.buffered.end(index) + 0.15) return true;
     }
     return false;
-}
-
-function activeSubtitleText(cues, time) {
-    if (!Array.isArray(cues) || !cues.length || !Number.isFinite(time)) return "";
-
-    // Find the first cue whose start time is after the playback position.
-    let low = 0;
-    let high = cues.length;
-    while (low < high) {
-        const middle = (low + high) >>> 1;
-        if (cues[middle].start <= time) low = middle + 1;
-        else high = middle;
-    }
-
-    const active = [];
-    for (let index = low - 1; index >= 0; index -= 1) {
-        const cue = cues[index];
-        if (cue.end > time && cue.start <= time && cue.text) active.push(cue.text);
-    }
-    return active.reverse().join("\n");
 }
 
 export default function BrowserDemuxPlayer({source, title, active = true, onUseStandardPlayer, onUnavailable}) {

@@ -1511,7 +1511,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 audio.muted = video.muted || id !== selectedAudioRef.current;
                 audio.playbackRate = video.playbackRate;
 
-                if (!shouldPlay || !selectedAudioRef.current) {
+                if (!shouldPlay || id !== selectedAudioRef.current) {
                     audio.pause();
                     continue;
                 }

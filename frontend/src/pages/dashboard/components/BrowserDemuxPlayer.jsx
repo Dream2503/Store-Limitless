@@ -9,6 +9,43 @@ const MAX_IN_FLIGHT_BATCHES = Math.max(
 );
 const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"]);
 
+function mimeSupportDetails(mimeType) {
+    const match = String(mimeType || "").match(/codecs\s*=\s*["']([^"']+)["']/i);
+    if (!match || typeof MediaSource === "undefined") {
+        return {combined: false, video: [], audio: []};
+    }
+
+    const codecs = match[1].split(",").map((codec) => codec.trim()).filter(Boolean);
+    const videoCodecs = codecs.filter((codec) =>
+        /^(?:avc1|avc3|hev1|hvc1|vp08|vp09|av01|apch|apcn|apcs|apco)/i.test(codec),
+    );
+    const audioCodecs = codecs.filter((codec) => !videoCodecs.includes(codec));
+
+    const probe = (type, codec) => {
+        const mime = type + '/mp4; codecs="' + codec + '"';
+        return {
+            codec,
+            mime,
+            supported: MediaSource.isTypeSupported(mime),
+        };
+    };
+
+    return {
+        combined: MediaSource.isTypeSupported(mimeType),
+        video: videoCodecs.map((codec) => probe("video", codec)),
+        audio: audioCodecs.map((codec) => probe("audio", codec)),
+    };
+}
+
+function formatMimeSupportDetails(details) {
+    const entries = [...details.video, ...details.audio];
+    if (!entries.length) return "Individual codec support could not be determined.";
+    return entries.map((entry) =>
+        (entry.mime.startsWith("video/") ? "Video " : "Audio ") +
+        entry.codec + ": " + (entry.supported ? "supported" : "NOT supported"),
+    ).join("; ");
+}
+
 function videoCodecName(codec) {
     const value = String(codec || "").toLowerCase();
     if (["h264", "avc", "avc1"].includes(value)) return "avc";
@@ -491,8 +528,20 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             let createSourceBuffer = () => {};
             createSourceBuffer = () => {
                 if (session.cancelled || !session.opened || !session.mimeType || session.sourceBuffer) return;
-                if (!MediaSource.isTypeSupported(session.mimeType)) {
-                    rejectReady(new Error("Browser MSE does not support: " + session.mimeType));
+                const support = mimeSupportDetails(session.mimeType);
+                if (!support.combined) {
+                    const individualSupport = formatMimeSupportDetails(support);
+                    const unsupported = [...support.video, ...support.audio]
+                        .filter((entry) => !entry.supported)
+                        .map((entry) => entry.codec);
+                    const reason = unsupported.length
+                        ? "Unsupported codec(s): " + unsupported.join(", ") + "."
+                        : "The codecs may work separately, but this combined audio/video SourceBuffer is not supported.";
+                    rejectReady(new Error(
+                        "Browser MSE cannot play " + session.mimeType + ". " +
+                        reason + " Individual checks: " + individualSupport +
+                        " The source must be transcoded to browser-supported codecs for the enhanced player.",
+                    ));
                     return;
                 }
 

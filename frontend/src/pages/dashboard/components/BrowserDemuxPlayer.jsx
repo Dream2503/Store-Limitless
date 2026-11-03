@@ -219,6 +219,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const restartRef = useRef(null);
     const audioTracksRef = useRef([]);
     const selectedAudioRef = useRef("");
+    const requestedAudioRef = useRef("");
     const audioSessionRef = useRef(null);
     const audioSessionsRef = useRef(new Map());
     const pendingAudioSessionsRef = useRef(new Map());
@@ -931,11 +932,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (session.cancelled) return;
             session.rejectStartup?.(error);
             console.error("Audio track pipeline failed.", error);
-            const wasSelected = selectedAudioRef.current === track.id;
+            const wasRequested = requestedAudioRef.current === track.id;
             const activeId = audioSessionRef.current?.track?.id || "";
             session.dispose();
 
-            if (wasSelected) {
+            if (wasRequested) {
+                requestedAudioRef.current = activeId;
                 selectedAudioRef.current = activeId;
                 setSelectedAudio(activeId);
                 if (!activeId) fallback(error);
@@ -1007,16 +1009,18 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             pendingAudioSessionsRef.current.delete(track.id);
             session.ready = true;
 
-            if (activate) {
+            const shouldActivate = activate && requestedAudioRef.current === track.id;
+            if (shouldActivate) {
                 if (!video.paused) {
                     audio.muted = true;
                     await audio.play();
-                    if (session.cancelled) return null;
+                    if (session.cancelled || requestedAudioRef.current !== track.id) return null;
                 } else {
                     audio.pause();
                 }
 
                 selectedAudioRef.current = track.id;
+                requestedAudioRef.current = track.id;
                 setSelectedAudio(track.id);
                 audioSessionRef.current = session;
             } else {
@@ -1032,7 +1036,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             if (previousForTrack && previousForTrack !== session) previousForTrack.dispose();
 
-            if (activate) setStatus("Audio switched · video stream uninterrupted");
+            if (shouldActivate) setStatus("Audio switched · video stream uninterrupted");
             return session;
         } catch (error) {
             if (!session.cancelled) session.fail(error);
@@ -1047,6 +1051,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         fallbackRef.current = false;
         audioTracksRef.current = [];
         selectedAudioRef.current = "";
+        requestedAudioRef.current = "";
         setAudioTracks([]);
         setSubtitleTracks([]);
         setSelectedAudio("");
@@ -1116,6 +1121,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 }
                 const audioId = defaultAudio?.id || "";
                 selectedAudioRef.current = audioId;
+                requestedAudioRef.current = audioId;
                 setSelectedAudio(audioId);
 
                 await startPipeline(null, 0, false, metadataDemuxer, streams);
@@ -1158,6 +1164,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
         if (!track) {
             selectedAudioRef.current = "";
+            requestedAudioRef.current = "";
             audioSessionRef.current = null;
             setSelectedAudio("");
             for (const session of audioSessionsRef.current.values()) {
@@ -1171,6 +1178,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         const readySession = audioSessionsRef.current.get(track.id);
         if (readySession && !readySession.cancelled) {
             selectedAudioRef.current = track.id;
+            requestedAudioRef.current = track.id;
             audioSessionRef.current = readySession;
             setSelectedAudio(track.id);
 
@@ -1189,6 +1197,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
         const time = video?.currentTime || 0;
         const wasPlaying = Boolean(video && !video.paused);
+        requestedAudioRef.current = track.id;
         setSelectedAudio(track.id);
         setStatus("Preparing this audio track · video keeps playing");
         void startAudioPipeline(track, time, wasPlaying, true);

@@ -281,7 +281,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         const taskId = subtitleTaskRef.current;
         setStatus("Extracting subtitle cues in a worker…");
         try {
-            const {WebDemuxer, AVLogLevel} = await import("web-demuxer");
+            const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
             const demuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
             subtitleDemuxerRef.current = demuxer;
             await demuxer.load(source);

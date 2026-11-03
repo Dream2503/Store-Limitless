@@ -429,7 +429,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 if (message.type === "ready") {
                     session.mimeType = message.mimeType;
                     createSourceBuffer();
-                } else if (message.type === "packet-ack") {
+                } else if (message.type === "batch-ack") {
                     const waiter = session.packetAcks.get(message.id);
                     if (waiter) {
                         session.packetAcks.delete(message.id);
@@ -473,6 +473,41 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const pump = async (demuxer, track, streamIndex, mediaType) => {
                 const reader = demuxer.readAVPacket(session.startAt, 0, mediaType, streamIndex).getReader();
                 session.readers.push(reader);
+                const batch = [];
+                let batchBytes = 0;
+
+                const flushBatch = async () => {
+                    if (!batch.length) return;
+                    const id = session.nextPacketId++;
+                    const items = batch.splice(0);
+                    batchBytes = 0;
+                    const transfers = [];
+                    const packets = items.map((packet) => {
+                        const bytes = packet.data;
+                        const buffer = (
+                            bytes.buffer instanceof ArrayBuffer &&
+                            bytes.byteOffset === 0 &&
+                            bytes.byteLength === bytes.buffer.byteLength
+                        ) ? bytes.buffer : bytes.slice().buffer;
+                        transfers.push(buffer);
+                        return {
+                            buffer,
+                            timestamp: packet.timestamp,
+                            duration: packet.duration,
+                            keyframe: packet.keyframe === 1,
+                        };
+                    });
+
+                    const ack = new Promise((resolve, reject) => session.packetAcks.set(id, {resolve, reject}));
+                    try {
+                        worker.postMessage({type: "packet-batch", id, track, packets}, transfers);
+                    } catch (error) {
+                        session.packetAcks.delete(id);
+                        throw error;
+                    }
+                    await ack;
+                };
+
                 try {
                     while (!session.cancelled && sessionRef.current === session) {
                         const result = await reader.read();
@@ -480,26 +515,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                         const packet = result.value;
                         if (!packet?.data?.byteLength || !Number.isFinite(packet.timestamp)) continue;
 
-                        const id = session.nextPacketId++;
-                        const bytes = packet.data;
-                        const buffer = (
-                            bytes.buffer instanceof ArrayBuffer &&
-                            bytes.byteOffset === 0 &&
-                            bytes.byteLength === bytes.buffer.byteLength
-                        ) ? bytes.buffer : bytes.slice().buffer;
-
-                        const ack = new Promise((resolve, reject) => session.packetAcks.set(id, {resolve, reject}));
-                        worker.postMessage({
-                            type: "packet",
-                            id,
-                            track,
-                            buffer,
-                            timestamp: packet.timestamp,
-                            duration: packet.duration,
-                            keyframe: packet.keyframe === 1,
-                        }, [buffer]);
-                        await ack;
+                        batch.push(packet);
+                        batchBytes += packet.data.byteLength;
+                        if (batch.length >= 24 || batchBytes >= 2 * 1024 * 1024) {
+                            await flushBatch();
+                        }
                     }
+
+                    await flushBatch();
                     if (!session.cancelled && sessionRef.current === session) {
                         worker.postMessage({type: "end-track", track});
                     }

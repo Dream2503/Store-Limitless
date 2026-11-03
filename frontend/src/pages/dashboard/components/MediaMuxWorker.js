@@ -76,31 +76,31 @@ async function initialize(message) {
     }
 }
 
-function addPacket(message) {
+function addPacketBatch(message) {
     if (failed || !output) return;
     const track = message.track;
     if (track !== "video" && track !== "audio") return;
     const source = track === "video" ? videoSource : audioSource;
-    if (!source) return;
+    if (!source) {
+        self.postMessage({type: "batch-ack", id: message.id});
+        return;
+    }
 
     trackChains[track] = trackChains[track].then(async () => {
-        const bytes = new Uint8Array(message.buffer);
-        const timestamp = Number(message.timestamp);
-        const duration = Number(message.duration);
-        if (!Number.isFinite(timestamp)) {
-            self.postMessage({type: "packet-ack", id: message.id});
-            return;
+        for (const item of message.packets) {
+            const timestamp = Number(item.timestamp);
+            if (!Number.isFinite(timestamp)) continue;
+            const duration = Number(item.duration);
+            const packet = new EncodedPacket(
+                new Uint8Array(item.buffer),
+                track === "video" ? (item.keyframe ? "key" : "delta") : "key",
+                timestamp,
+                Number.isFinite(duration) && duration > 0 ? duration : (track === "video" ? 1 / 30 : 0.02),
+                packetSequence[track]++,
+            );
+            await source.add(packet);
         }
-
-        const packet = new EncodedPacket(
-            bytes,
-            track === "video" ? (message.keyframe ? "key" : "delta") : "key",
-            timestamp,
-            Number.isFinite(duration) && duration > 0 ? duration : (track === "video" ? 1 / 30 : 0.02),
-            packetSequence[track]++,
-        );
-        await source.add(packet);
-        self.postMessage({type: "packet-ack", id: message.id});
+        self.postMessage({type: "batch-ack", id: message.id});
     }).catch(reportError);
 }
 
@@ -123,8 +123,8 @@ self.addEventListener("message", (event) => {
     const message = event.data;
     if (message.type === "init") {
         void initialize(message);
-    } else if (message.type === "packet") {
-        addPacket(message);
+    } else if (message.type === "packet-batch") {
+        addPacketBatch(message);
     } else if (message.type === "end-track") {
         closedTracks.add(message.track);
         void finalizeWhenReady();

@@ -260,7 +260,6 @@ function subtitleText(stream, packet) {
         if (dialogue) {
             const fields = dialogue[1].split(",");
             if (fields.length >= 10) text = fields.slice(9).join(",");
-        }
         } else {
             const fields = text.split(",");
             if (fields.length >= 10) text = fields.slice(9).join(",");

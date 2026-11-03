@@ -4,26 +4,18 @@ import {
     AudioSampleSink,
     AudioSampleSource,
     EncodedAudioPacketSource,
-    EncodedPacket,
+    EncodedPacketSink,
     EncodedVideoPacketSource,
     Input,
     Mp4OutputFormat,
-    Output,
     Quality,
     UrlSource,
 } from "mediabunny";
 
+let input = null;
 let output = null;
 let videoSource = null;
 let audioSource = null;
-let audioCodec = null;
-let audioDecoderConfig = null;
-let audioMode = "passthrough";
-let audioInput = null;
-let audioIterator = null;
-
-let trackChains = {video: Promise.resolve(), audio: Promise.resolve()};
-let packetSequence = {video: 0, audio: 0};
 let pendingWrites = new Map();
 let pendingWriteBytes = 0;
 const MAX_PENDING_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -31,50 +23,87 @@ const outputCapacityWaiters = [];
 let nextWriteId = 1;
 let closedTracks = new Set();
 let expectedTracks = 0;
-let audioPrimed = false;
 let finalizing = false;
 let failed = false;
+let audioIterator = null;
+let firstAudioSample = null;
 
-async function prepareAc3Audio(message) {
-    const [{registerAc3Decoder}, {registerAacEncoder}] = await Promise.all([
-        import("@mediabunny/ac3"),
-        import("@mediabunny/aac-encoder"),
-    ]);
-    registerAc3Decoder();
-    registerAacEncoder();
+function reportError(error) {
     if (failed) return;
+    failed = true;
+    const message = error instanceof Error ? error.message : String(error);
+    self.postMessage({type: "error", message});
 
-    audioInput = new Input({
-        formats: ALL_FORMATS,
-        source: new UrlSource(message.source, {
-            // Keep the AC-3 reader on a small rolling range cache instead of
-            // allowing the default 64 MiB cache to run ahead of playback.
-            maxCacheSize: 4 * 1024 * 1024,
-            parallelism: 2,
-        }),
-    });
+    for (const waiter of outputCapacityWaiters) waiter.reject(new Error(message));
+    outputCapacityWaiters.length = 0;
+    pendingWrites.clear();
+    pendingWriteBytes = 0;
 
-    const tracks = await audioInput.getAudioTracks();
-    if (failed) return;
-    const trackNumber = Number(message.trackNumber);
-    const track = tracks.find((item) => item.number === trackNumber);
-    if (!track) {
-        throw new Error("Could not find selected audio track " + trackNumber + " in the Matroska source.");
+    try { input?.dispose(); } catch { /* input already disposed */ }
+    input = null;
+    try { firstAudioSample?.close(); } catch { /* sample already closed */ }
+    firstAudioSample = null;
+    try { void audioIterator?.return?.(); } catch { /* iterator already closed */ }
+    audioIterator = null;
+
+    try {
+        const canceled = output?.cancel?.();
+        if (canceled?.catch) void canceled.catch(() => {});
+    } catch {
+        // Output may already be finalizing.
     }
-
-    const codec = await track.getCodec();
-    if (!["ac3", "eac3"].includes(String(codec || "").toLowerCase())) {
-        throw new Error("Selected source track is not AC-3/E-AC-3: " + (codec || "unknown"));
-    }
-
-    const sink = new AudioSampleSink(track);
-    // Creating the iterator is lazy. Do not wait for a decoded sample before
-    // starting the video muxer; the audio pump will decode and encode as ranges
-    // arrive while video packets are already being demuxed.
-    audioIterator = sink.samples(Number(message.startAt) || 0)[Symbol.asyncIterator]();
 }
 
-async function pumpAc3Audio() {
+async function finalizeWhenReady() {
+    if (failed || finalizing || closedTracks.size < expectedTracks) return;
+    finalizing = true;
+
+    try {
+        await output.finalize();
+        self.postMessage({type: "done"});
+    } catch (error) {
+        reportError(error);
+    } finally {
+        try { input?.dispose(); } catch { /* input already disposed */ }
+        input = null;
+    }
+}
+
+async function pumpVideoPackets(sink, startPacket) {
+    try {
+        for await (const packet of sink.packets(startPacket)) {
+            if (failed) break;
+            await videoSource.add(packet);
+        }
+    } catch (error) {
+        reportError(error);
+        return;
+    }
+
+    if (failed) return;
+    videoSource.close();
+    closedTracks.add("video");
+    void finalizeWhenReady();
+}
+
+async function pumpEncodedAudioPackets(sink, startPacket) {
+    try {
+        for await (const packet of sink.packets(startPacket)) {
+            if (failed) break;
+            await audioSource.add(packet);
+        }
+    } catch (error) {
+        reportError(error);
+        return;
+    }
+
+    if (failed) return;
+    audioSource.close();
+    closedTracks.add("audio");
+    void finalizeWhenReady();
+}
+
+async function pumpDecodedAudioSamples() {
     try {
         while (!failed && audioIterator) {
             const result = await audioIterator.next();
@@ -87,53 +116,78 @@ async function pumpAc3Audio() {
                 sample.close();
             }
         }
-
-        if (failed) return;
-        audioSource.close();
-        closedTracks.add("audio");
-        void finalizeWhenReady();
     } catch (error) {
         reportError(error);
-    } finally {
-        try { audioInput?.dispose(); } catch { /* input already closed */ }
-        audioInput = null;
-        audioIterator = null;
+        return;
     }
-}
 
-function reportError(error) {
     if (failed) return;
-    failed = true;
-    const message = error instanceof Error ? error.message : String(error);
-    self.postMessage({type: "error", message});
-    for (const waiter of outputCapacityWaiters) waiter.reject(new Error(message));
-    outputCapacityWaiters.length = 0;
-    pendingWrites.clear();
-    pendingWriteBytes = 0;
-
-    try { audioInput?.dispose(); } catch { /* input already closed */ }
-    audioInput = null;
-    try {
-        const canceled = output?.cancel?.();
-        if (canceled?.catch) void canceled.catch(() => {});
-    } catch {
-        // Output may already be finalizing.
-    }
+    audioSource.close();
+    closedTracks.add("audio");
+    void finalizeWhenReady();
 }
 
 async function initialize(message) {
     try {
         expectedTracks = message.audio ? 2 : 1;
+
+        // One shared range source feeds both sinks. Mediabunny prefetches
+        // packet data based on consumer speed and keeps the cache bounded.
+        input = new Input({
+            formats: ALL_FORMATS,
+            source: new UrlSource(message.source, {
+                maxCacheSize: 8 * 1024 * 1024,
+                parallelism: 4,
+            }),
+        });
+
+        const videoTracks = await input.getVideoTracks();
+        const videoTrack = videoTracks.find((track) => track.number === Number(message.video.trackNumber));
+        if (!videoTrack) {
+            throw new Error("Could not find video track " + message.video.trackNumber + " in the source.");
+        }
+
+        const videoSink = new EncodedPacketSink(videoTrack);
+        const startAt = Math.max(0, Number(message.startAt) || 0);
+        let firstVideoPacket = startAt > 0
+            ? await videoSink.getKeyPacket(startAt)
+            : await videoSink.getFirstKeyPacket();
+        if (!firstVideoPacket) firstVideoPacket = await videoSink.getFirstPacket();
+        if (!firstVideoPacket) throw new Error("The video track contains no readable packets.");
+
         videoSource = new EncodedVideoPacketSource(message.video.codec);
+
+        let audioSink = null;
+        let firstAudioPacket = null;
+        let audioMode = "passthrough";
+
         if (message.audio) {
+            const audioTracks = await input.getAudioTracks();
+            const audioTrack = audioTracks.find((track) => track.number === Number(message.audio.trackNumber));
+            if (!audioTrack) {
+                throw new Error("Could not find audio track " + message.audio.trackNumber + " in the source.");
+            }
+
             audioMode = message.audio.mode || "passthrough";
-            audioCodec = message.audio.codec;
-            audioDecoderConfig = message.audio.decoderConfig;
-            audioPrimed = false;
+            const sourceCodec = String(await audioTrack.getCodec() || "").toLowerCase();
+            const expectedCodec = String(message.audio.inputCodec || "").toLowerCase();
+            if (expectedCodec && sourceCodec && expectedCodec !== sourceCodec) {
+                throw new Error(
+                    "Selected audio track changed between metadata scan and streaming input (" +
+                    expectedCodec + " -> " + sourceCodec + ").",
+                );
+            }
 
             if (audioMode === "ac3-to-aac") {
-                // AAC's codec string is known up front. Register the output
-                // track immediately and load/decode AC-3 independently below.
+                const [{registerAc3Decoder}, {registerAacEncoder}] = await Promise.all([
+                    import("@mediabunny/ac3"),
+                    import("@mediabunny/aac-encoder"),
+                ]);
+                registerAc3Decoder();
+                registerAacEncoder();
+
+                const sink = new AudioSampleSink(audioTrack);
+                audioIterator = sink.samples(startAt)[Symbol.asyncIterator]();
                 audioSource = new AudioSampleSource({
                     codec: "aac",
                     fullCodecString: "mp4a.40.2",
@@ -144,7 +198,13 @@ async function initialize(message) {
                     },
                 });
             } else {
-                audioSource = new EncodedAudioPacketSource(audioCodec);
+                audioSink = new EncodedPacketSink(audioTrack);
+                firstAudioPacket = startAt > 0
+                    ? await audioSink.getPacket(startAt)
+                    : await audioSink.getFirstPacket();
+                if (!firstAudioPacket) firstAudioPacket = await audioSink.getFirstPacket();
+                if (!firstAudioPacket) throw new Error("The selected audio track contains no readable packets.");
+                audioSource = new EncodedAudioPacketSource(message.audio.codec);
             }
         }
 
@@ -156,10 +216,9 @@ async function initialize(message) {
                 pendingWrites.set(id, {byteLength: copy.byteLength});
                 self.postMessage({type: "data", id, buffer: copy.buffer}, [copy.buffer]);
 
-                // Keep remuxing while MSE appends previous fragments. Backpressure
-                // only when the bounded output queue reaches its memory budget.
+                // Backpressure the packet iterators when the MSE append queue
+                // is full instead of accumulating the rest of the file in RAM.
                 if (pendingWriteBytes < MAX_PENDING_OUTPUT_BYTES) return;
-
                 return new Promise((resolve, reject) => {
                     outputCapacityWaiters.push({resolve, reject});
                 });
@@ -175,29 +234,17 @@ async function initialize(message) {
             rotation: message.video.rotation || 0,
             flip: Boolean(message.video.flip),
         });
+
         if (audioSource && message.audio) {
             if (audioMode === "ac3-to-aac") {
-                // Decoded samples are re-encoded as browser-compatible AAC.
-                // No AC-3 priming packet or AC-3 sample entry reaches MSE.
                 output.addAudioTrack(audioSource, {
                     languageCode: message.audio.languageCode || "und",
                     name: message.audio.name || "",
                 });
             } else {
-                const priming = message.audio.primingPacket;
-                if (!priming?.buffer || !Number.isFinite(priming.timestamp)) {
-                    throw new Error("The audio track did not receive a valid priming packet.");
-                }
-                const primingPacket = new EncodedPacket(
-                    new Uint8Array(priming.buffer),
-                    "key",
-                    priming.timestamp,
-                    Number.isFinite(priming.duration) && priming.duration > 0 ? priming.duration : 0.02,
-                    0,
-                );
                 output.addAudioTrack(audioSource, {
-                    decoderConfig: audioDecoderConfig,
-                    primingPacket,
+                    decoderConfig: message.audio.decoderConfig,
+                    primingPacket: firstAudioPacket,
                     languageCode: message.audio.languageCode || "und",
                     name: message.audio.name || "",
                 });
@@ -206,87 +253,21 @@ async function initialize(message) {
 
         await output.start();
         self.postMessage({type: "started"});
+
+        // Launch both packet streams immediately. They read concurrently from
+        // the shared range source and append fragments as soon as packets land.
+        void pumpVideoPackets(videoSink, firstVideoPacket);
+        if (message.audio) {
+            if (audioMode === "ac3-to-aac") {
+                void pumpDecodedAudioSamples();
+            } else {
+                void pumpEncodedAudioPackets(audioSink, firstAudioPacket);
+            }
+        }
+
         void output.getMimeType().then((mimeType) => {
             self.postMessage({type: "ready", mimeType});
         }).catch(reportError);
-
-        if (audioMode === "ac3-to-aac") {
-            // Do not block video demuxing on AC-3 decoder/WASM initialization.
-            // The audio source is already registered; audio samples join the
-            // same fragmented MP4 stream as soon as decoding starts.
-            void prepareAc3Audio(message.audio)
-                .then(() => {
-                    if (!failed) void pumpAc3Audio();
-                })
-                .catch(reportError);
-        }
-    } catch (error) {
-        reportError(error);
-    }
-}
-
-function addPacketBatch(message) {
-    if (failed || !output) return;
-    const track = message.track;
-    if (track !== "video" && track !== "audio") return;
-    if (track === "audio" && audioMode === "ac3-to-aac") {
-        self.postMessage({type: "batch-ack", id: message.id});
-        return;
-    }
-    const source = track === "video" ? videoSource : audioSource;
-    if (!source) {
-        self.postMessage({type: "batch-ack", id: message.id});
-        return;
-    }
-
-    trackChains[track] = trackChains[track].then(async () => {
-        for (const item of message.packets) {
-            const timestamp = Number(item.timestamp);
-            if (!Number.isFinite(timestamp)) continue;
-            const duration = Number(item.duration);
-            const packetData = new Uint8Array(item.buffer);
-            let packetType = track === "video" ? (item.keyframe ? "key" : "delta") : "key";
-            if (track === "audio" && audioCodec === "truehd") {
-                // TrueHD marks major-sync access units as key packets. The
-                // four-byte sync word follows the four-byte access-unit header.
-                const hasMajorSync = packetData.length >= 8 &&
-                    packetData[4] === 0xf8 &&
-                    packetData[5] === 0x72 &&
-                    packetData[6] === 0x6f &&
-                    packetData[7] === 0xba;
-                packetType = hasMajorSync ? "key" : "delta";
-            }
-            const packet = new EncodedPacket(
-                packetData,
-                packetType,
-                timestamp,
-                Number.isFinite(duration) && duration > 0 ? duration : (track === "video" ? 1 / 30 : 0.02),
-                packetSequence[track]++,
-            );
-            if (track === "audio" && !audioPrimed) {
-                // Passing metadata with the first packet lets Mediabunny use
-                // that packet as the priming packet required by AC-3/E-AC-3
-                // and DTS sample-entry generation.
-                await source.add(packet, {decoderConfig: audioDecoderConfig});
-                audioPrimed = true;
-            } else {
-                await source.add(packet);
-            }
-        }
-        self.postMessage({type: "batch-ack", id: message.id});
-    }).catch(reportError);
-}
-
-async function finalizeWhenReady() {
-    if (failed || finalizing || closedTracks.size < expectedTracks) return;
-    finalizing = true;
-
-    try {
-        await Promise.all([trackChains.video, trackChains.audio]);
-        videoSource?.close();
-        audioSource?.close();
-        await output.finalize();
-        self.postMessage({type: "done"});
     } catch (error) {
         reportError(error);
     }
@@ -296,11 +277,6 @@ self.addEventListener("message", (event) => {
     const message = event.data;
     if (message.type === "init") {
         void initialize(message);
-    } else if (message.type === "packet-batch") {
-        addPacketBatch(message);
-    } else if (message.type === "end-track") {
-        closedTracks.add(message.track);
-        void finalizeWhenReady();
     } else if (message.type === "write-ack") {
         const pending = pendingWrites.get(message.id);
         if (pending) {
@@ -318,8 +294,10 @@ self.addEventListener("message", (event) => {
         outputCapacityWaiters.length = 0;
         pendingWrites.clear();
         pendingWriteBytes = 0;
-        try { audioInput?.dispose(); } catch { /* input already closed */ }
-        audioInput = null;
+        try { input?.dispose(); } catch { /* input already disposed */ }
+        input = null;
+        try { firstAudioSample?.close(); } catch { /* sample already closed */ }
+        firstAudioSample = null;
         try { void audioIterator?.return?.(); } catch { /* iterator already closed */ }
         audioIterator = null;
         try {

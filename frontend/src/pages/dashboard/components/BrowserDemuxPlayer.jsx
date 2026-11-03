@@ -1494,24 +1494,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         const video = videoRef.current;
         if (!video) return undefined;
 
-        const updateSubtitle = () => {
-            const next = activeSubtitleText(subtitleCuesRef.current, video.currentTime);
-            setVisibleSubtitle((current) => current === next ? current : next);
-        };
-
-        const events = ["timeupdate", "seeking", "seeked", "loadedmetadata", "playing"];
-        events.forEach((name) => video.addEventListener(name, updateSubtitle));
-        updateSubtitle();
-
-        return () => {
-            events.forEach((name) => video.removeEventListener(name, updateSubtitle));
-        };
-    }, []);
-
-    useEffect(() => {
-        const video = videoRef.current;
-        if (!video) return undefined;
-
         const syncAudio = () => {
             const shouldPlay = !video.paused && !video.ended;
             for (const [id, session] of audioSessionsRef.current) {
@@ -1664,15 +1646,20 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             </div>
 
             <video ref={videoRef} controls playsInline preload="auto" className="h-full min-h-[240px] w-full bg-black object-contain" aria-label={title || "Video"}>
+                {subtitleUrl && (
+                    <track
+                        ref={subtitleTrackElementRef}
+                        kind="subtitles"
+                        src={subtitleUrl}
+                        srcLang={subtitleLanguage}
+                        label={subtitleLabel || "Subtitles"}
+                        default
+                        onLoad={(event) => {
+                            event.currentTarget.track.mode = "showing";
+                        }}
+                    />
+                )}
             </video>
-
-            {visibleSubtitle && (
-                <div className="pointer-events-none absolute inset-x-4 bottom-16 z-10 flex justify-center px-4">
-                    <span className="max-w-[min(92%,60rem)] whitespace-pre-line break-words rounded-md bg-black/80 px-3 py-1.5 text-center text-[clamp(14px,2.7vh,28px)] font-semibold leading-snug text-white shadow-[0_1px_3px_rgba(0,0,0,0.95)]">
-                        {visibleSubtitle}
-                    </span>
-                </div>
-            )}
 
             <div className="pointer-events-none absolute bottom-14 left-3 rounded bg-black/65 px-2 py-1 text-[11px] text-white/75">{status}</div>
 

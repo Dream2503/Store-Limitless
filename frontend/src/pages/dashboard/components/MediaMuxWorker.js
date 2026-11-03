@@ -26,7 +26,6 @@ let expectedTracks = 0;
 let finalizing = false;
 let failed = false;
 let audioIterator = null;
-let firstAudioSample = null;
 
 function reportError(error) {
     if (failed) return;
@@ -41,8 +40,6 @@ function reportError(error) {
 
     try { input?.dispose(); } catch { /* input already disposed */ }
     input = null;
-    try { firstAudioSample?.close(); } catch { /* sample already closed */ }
-    firstAudioSample = null;
     try { void audioIterator?.return?.(); } catch { /* iterator already closed */ }
     audioIterator = null;
 
@@ -159,6 +156,7 @@ async function initialize(message) {
 
         let audioSink = null;
         let firstAudioPacket = null;
+        let audioTrackForDecode = null;
         let audioMode = "passthrough";
 
         if (message.audio) {
@@ -179,15 +177,9 @@ async function initialize(message) {
             }
 
             if (audioMode === "ac3-to-aac") {
-                const [{registerAc3Decoder}, {registerAacEncoder}] = await Promise.all([
-                    import("@mediabunny/ac3"),
-                    import("@mediabunny/aac-encoder"),
-                ]);
-                registerAc3Decoder();
-                registerAacEncoder();
-
-                const sink = new AudioSampleSink(audioTrack);
-                audioIterator = sink.samples(startAt)[Symbol.asyncIterator]();
+                // Register the AAC output track immediately. Loading the WASM
+                // decoder is deferred until after video packet pumping begins.
+                audioTrackForDecode = audioTrack;
                 audioSource = new AudioSampleSource({
                     codec: "aac",
                     fullCodecString: "mp4a.40.2",
@@ -254,12 +246,25 @@ async function initialize(message) {
         await output.start();
         self.postMessage({type: "started"});
 
-        // Launch both packet streams immediately. They read concurrently from
-        // the shared range source and append fragments as soon as packets land.
+        // Start video immediately. AC-3 decoder/WASM setup happens in
+        // parallel and cannot delay the first video fragments.
         void pumpVideoPackets(videoSink, firstVideoPacket);
         if (message.audio) {
             if (audioMode === "ac3-to-aac") {
-                void pumpDecodedAudioSamples();
+                void (async () => {
+                    const [{registerAc3Decoder}, {registerAacEncoder}] = await Promise.all([
+                        import("@mediabunny/ac3"),
+                        import("@mediabunny/aac-encoder"),
+                    ]);
+                    if (failed) return;
+                    registerAc3Decoder();
+                    registerAacEncoder();
+                    if (failed) return;
+
+                    const sink = new AudioSampleSink(audioTrackForDecode);
+                    audioIterator = sink.samples(startAt)[Symbol.asyncIterator]();
+                    await pumpDecodedAudioSamples();
+                })().catch(reportError);
             } else {
                 void pumpEncodedAudioPackets(audioSink, firstAudioPacket);
             }
@@ -296,8 +301,6 @@ self.addEventListener("message", (event) => {
         pendingWriteBytes = 0;
         try { input?.dispose(); } catch { /* input already disposed */ }
         input = null;
-        try { firstAudioSample?.close(); } catch { /* sample already closed */ }
-        firstAudioSample = null;
         try { void audioIterator?.return?.(); } catch { /* iterator already closed */ }
         audioIterator = null;
         try {

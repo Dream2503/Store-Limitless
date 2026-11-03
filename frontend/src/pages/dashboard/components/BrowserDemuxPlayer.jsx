@@ -1554,44 +1554,74 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         if (!active) video.pause();
 
         let pendingSeek = null;
-        const onSeeking = () => {
-            const session = sessionRef.current;
-            if (!session || session.cancelled || session.programmaticSeek) return;
-            pendingSeek = {
-                wasPlaying: !video.paused,
-            };
-        };
-        const onSeeked = () => {
-            if (!pendingSeek) return;
-            const wasPlaying = pendingSeek.wasPlaying;
-            const time = Math.max(0, Number(video.currentTime) || 0);
-            pendingSeek = null;
 
+        const finishSeek = (time, wasPlaying) => {
             const session = sessionRef.current;
             if (!session || session.cancelled || session.programmaticSeek) return;
 
-            if (isMediaTimeBuffered(video, time)) {
-                session.forceAppend = true;
-                session.wakeAppend?.();
-                for (const audioSession of audioSessionsRef.current.values()) {
-                    if (audioSession.cancelled) continue;
-                    try {
-                        audioSession.audio.currentTime = time;
-                        audioSession.wakeAppend?.();
-                        if (wasPlaying && audioSession.audio.paused && audioSession.audio.readyState >= 2) {
-                            audioSession.audio.play().catch(() => {});
-                        }
-                    } catch {
-                        // The audio SourceBuffer may be updating; syncAudio retries.
-                    }
-                }
+            if (!isMediaTimeBuffered(video, time)) {
+                if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
+                seekTimerRef.current = window.setTimeout(() => {
+                    restartRef.current?.(null, time, wasPlaying);
+                }, 0);
                 return;
             }
 
+            const selectedId = selectedAudioRef.current;
+            const selectedTrack = audioTracksRef.current.find((item) => item.id === selectedId);
+            const selectedSession = audioSessionsRef.current.get(selectedId);
+
+            if (selectedTrack?.supported &&
+                (!selectedSession || selectedSession.cancelled ||
+                    !isMediaTimeBuffered(selectedSession.audio, time))) {
+                if (selectedSession && !selectedSession.cancelled) {
+                    selectedSession.audio.muted = true;
+                    selectedSession.dispose?.();
+                }
+                requestedAudioRef.current = selectedTrack.id;
+                void startAudioPipeline(selectedTrack, time, wasPlaying, true);
+                return;
+            }
+
+            if (selectedSession && !selectedSession.cancelled) {
+                try {
+                    selectedSession.audio.currentTime = time;
+                    selectedSession.wakeAppend?.();
+                    if (wasPlaying && selectedSession.audio.paused &&
+                        selectedSession.audio.readyState >= 2) {
+                        selectedSession.audio.play().catch(() => {});
+                    }
+                } catch {
+                    // The audio SourceBuffer may be updating; syncAudio retries.
+                }
+            }
+        };
+
+        const onSeeking = () => {
+            const session = sessionRef.current;
+            if (!session || session.cancelled || session.programmaticSeek) return;
+            if (!pendingSeek) pendingSeek = {wasPlaying: !video.paused};
+
             if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
             seekTimerRef.current = window.setTimeout(() => {
-                restartRef.current?.(null, time, wasPlaying);
-            }, 0);
+                if (!pendingSeek || !video.seeking) return;
+                const {wasPlaying} = pendingSeek;
+                const time = Math.max(0, Number(video.currentTime) || 0);
+                if (!isMediaTimeBuffered(video, time)) {
+                    pendingSeek = null;
+                    restartRef.current?.(null, time, wasPlaying);
+                }
+            }, 180);
+        };
+
+        const onSeeked = () => {
+            if (!pendingSeek) return;
+            if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
+            seekTimerRef.current = null;
+            const {wasPlaying} = pendingSeek;
+            pendingSeek = null;
+            const time = Math.max(0, Number(video.currentTime) || 0);
+            finishSeek(time, wasPlaying);
         };
 
         video.addEventListener("seeking", onSeeking);
@@ -1599,6 +1629,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         return () => {
             video.removeEventListener("seeking", onSeeking);
             video.removeEventListener("seeked", onSeeked);
+            if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
         };
     }, [active, startAudioPipeline]);
 

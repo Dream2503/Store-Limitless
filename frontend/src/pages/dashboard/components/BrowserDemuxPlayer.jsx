@@ -206,6 +206,22 @@ function decoderConfig(demuxer, stream, type) {
     };
 }
 
+function subtitlePacketSeconds(packet, stream, field) {
+    const direct = Number(packet?.[field]);
+    if (Number.isFinite(direct)) return direct;
+
+    const ticks = Number(packet?.[field === "timestamp" ? "pts" : "duration"]);
+    if (!Number.isFinite(ticks)) return NaN;
+
+    const base = packet?.time_base || packet?.timeBase || stream?.time_base || stream?.timeBase;
+    if (typeof base === "number" && Number.isFinite(base)) return ticks * base;
+    if (base && Number.isFinite(Number(base.num)) &&
+        Number.isFinite(Number(base.den)) && Number(base.den) !== 0) {
+        return ticks * Number(base.num) / Number(base.den);
+    }
+    return NaN;
+}
+
 function subtitleText(stream, packet) {
     const codec = String(stream?.codec_name || "").toLowerCase();
     let bytes = packet.data;
@@ -336,9 +352,15 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                             const text = subtitleText(stream, packet);
                             if (!text) continue;
 
-                            const start = Math.max(0, Number(packet.timestamp) || 0);
-                            const duration = Number(packet.duration);
-                            const end = start + (Number.isFinite(duration) && duration > 0 ? duration : 3);
+                            const packetStart = subtitlePacketSeconds(packet, stream, "timestamp");
+                            const packetDuration = subtitlePacketSeconds(packet, stream, "duration");
+                            if (!Number.isFinite(packetStart)) continue;
+
+                            const start = Math.max(0, packetStart);
+                            const duration = Number.isFinite(packetDuration) && packetDuration > 0
+                                ? packetDuration
+                                : 3;
+                            const end = start + duration;
                             if (end > start) cues.push({start, end, text});
                         }
                     } finally {
@@ -418,6 +440,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             didStart: false,
             programmaticSeek: false,
             trimming: false,
+            keepSeekableHistory: true,
             startAt: Math.max(0, Number(startAt) || 0),
             shouldPlay: Boolean(shouldPlay),
             listeners: [],
@@ -554,7 +577,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const appendNext = () => {
                 const sb = session.sourceBuffer;
                 if (session.cancelled || !sb || sb.updating || session.writingId !== null) return;
-                if (session.didStart && sb.buffered.length) {
+                if (session.didStart && sb.buffered.length && !session.forceAppend) {
                     const end = sb.buffered.end(sb.buffered.length - 1);
                     if (end - video.currentTime >= MAX_FORWARD_BUFFER_SECONDS) return;
                 }
@@ -576,7 +599,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
         const trimOldBuffer = () => {
                 const sb = session.sourceBuffer;
-                if (!session.didStart || !sb || sb.updating || session.trimming || !sb.buffered.length || video.currentTime < 45) return;
+                if (!session.didStart || !sb || sb.updating || session.trimming ||
+                    !sb.buffered.length || video.currentTime < 45 || session.keepSeekableHistory) return;
                 const start = sb.buffered.start(0);
                 const end = Math.min(sb.buffered.end(0), video.currentTime - 30);
                 if (end <= start + 1) return;
@@ -629,8 +653,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                             session.didStart = true;
                             if (session.startAt > 0) {
                                 session.programmaticSeek = true;
+                                session.programmaticSeekTarget = session.startAt;
                                 try { video.currentTime = session.startAt; } catch { /* first range not ready */ }
-                                window.setTimeout(() => { session.programmaticSeek = false; }, 700);
                             }
                             if (session.shouldPlay) video.play().catch(() => {});
                         }
@@ -717,9 +741,22 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (session.cancelled) return;
 
             const wakeAppend = () => appendNext();
+            const onProgrammaticSeeked = () => {
+                if (!session.programmaticSeek) return;
+                const target = session.programmaticSeekTarget;
+                if (target == null || Math.abs(video.currentTime - target) < 0.75) {
+                    session.programmaticSeek = false;
+                    session.programmaticSeekTarget = null;
+                }
+            };
             video.addEventListener("timeupdate", wakeAppend);
             video.addEventListener("playing", wakeAppend);
-            session.listeners.push(["timeupdate", wakeAppend], ["playing", wakeAppend]);
+            video.addEventListener("seeked", onProgrammaticSeeked);
+            session.listeners.push(
+                ["timeupdate", wakeAppend],
+                ["playing", wakeAppend],
+                ["seeked", onProgrammaticSeeked],
+            );
 
             setStatus(audioStream
                 ? transcodeAudio
@@ -1203,8 +1240,34 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             }
         })();
 
+        let seekGeneration = 0;
         restartRef.current = (audioIndex, time, shouldPlay) => {
-            void startPipeline(null, time, shouldPlay);
+            const target = Math.max(0, Number(time) || 0);
+            const generation = ++seekGeneration;
+            const selectedTrack = audioTracksRef.current.find(
+                (item) => item.id === selectedAudioRef.current,
+            );
+
+            // A replacement video source resets its media timeline, so old
+            // standalone audio SourceBuffers must be recreated at the same time.
+            for (const item of pendingAudioSessionsRef.current.values()) item.dispose?.();
+            pendingAudioSessionsRef.current.clear();
+            for (const item of audioSessionsRef.current.values()) item.dispose?.();
+            audioSessionsRef.current.clear();
+            audioSessionRef.current = null;
+
+            void (async () => {
+                try {
+                    await startPipeline(null, target, shouldPlay);
+                    if (generation !== seekGeneration) return;
+                    if (selectedTrack?.supported) {
+                        requestedAudioRef.current = selectedTrack.id;
+                        await startAudioPipeline(selectedTrack, target, shouldPlay, true);
+                    }
+                } catch (error) {
+                    fallback(error instanceof Error ? error : new Error(String(error)));
+                }
+            })();
         };
 
         return () => {
@@ -1417,13 +1480,26 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         if (!video) return undefined;
         if (!active) video.pause();
 
+        let pendingSeek = null;
         const onSeeking = () => {
             const session = sessionRef.current;
             if (!session || session.cancelled || session.programmaticSeek) return;
-            const time = video.currentTime;
-            const wasPlaying = !video.paused;
+            pendingSeek = {
+                time: Math.max(0, Number(video.currentTime) || 0),
+                wasPlaying: !video.paused,
+            };
+        };
+        const onSeeked = () => {
+            if (!pendingSeek) return;
+            const {time, wasPlaying} = pendingSeek;
+            pendingSeek = null;
 
-            if (selectedAudioRef.current) {
+            const session = sessionRef.current;
+            if (!session || session.cancelled || session.programmaticSeek) return;
+
+            if (isMediaTimeBuffered(video, time)) {
+                session.forceAppend = true;
+                session.wakeAppend?.();
                 for (const audioSession of audioSessionsRef.current.values()) {
                     if (audioSession.cancelled) continue;
                     try {
@@ -1433,22 +1509,24 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                             audioSession.audio.play().catch(() => {});
                         }
                     } catch {
-                        // MediaSource may be updating; the next sync tick retries.
+                        // The audio SourceBuffer may be updating; syncAudio retries.
                     }
                 }
+                return;
             }
 
-            for (let index = 0; index < video.buffered.length; index += 1) {
-                if (time >= video.buffered.start(index) - 0.15 && time <= video.buffered.end(index) + 0.15) return;
-            }
             if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
             seekTimerRef.current = window.setTimeout(() => {
                 restartRef.current?.(null, time, wasPlaying);
-            }, 120);
+            }, 0);
         };
 
         video.addEventListener("seeking", onSeeking);
-        return () => video.removeEventListener("seeking", onSeeking);
+        video.addEventListener("seeked", onSeeked);
+        return () => {
+            video.removeEventListener("seeking", onSeeking);
+            video.removeEventListener("seeked", onSeeked);
+        };
     }, [active, startAudioPipeline]);
 
     useEffect(() => () => {

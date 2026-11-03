@@ -5,9 +5,10 @@ import sys
 from os import environ
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
+from starlette.middleware.base import RequestResponseEndpoint
 
 BASE_DIR: Path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
 
@@ -18,7 +19,7 @@ frontend_app: FastAPI = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @frontend_app.middleware("http")
-async def cross_origin_isolation_headers(request, call_next):
+async def cross_origin_isolation_headers(request: Request, call_next: RequestResponseEndpoint) -> Response:
     """Enable the browser's optional SharedArrayBuffer streaming fast path."""
 
     response = await call_next(request)

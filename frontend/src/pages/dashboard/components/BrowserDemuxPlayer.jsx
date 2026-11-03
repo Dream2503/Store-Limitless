@@ -615,6 +615,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const finishIfReady = () => {
                 const sb = session.sourceBuffer;
                 if (!session.pendingEnd || !sb || sb.updating || session.queue.length || session.writingId !== null) return;
+                if (!session.targetBuffered) {
+                    session.fail(new Error("The video stream ended before the requested seek position was buffered."));
+                    return;
+                }
                 if (mediaSource.readyState === "open") {
                     try { mediaSource.endOfStream(); } catch { /* already ended */ }
                 }
@@ -748,7 +752,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                         if (isMediaTimeBuffered(video, session.startAt)) {
                             session.targetBuffered = true;
                             markTargetBuffered();
-                            quotaRestartAttemptsRef.current = 0;
                         }
 
                         trimOldBuffer();
@@ -831,7 +834,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             // The output MIME type depends on the first packet for codecs such
             // as AC-3/E-AC-3. Start feeding packets after the worker is running,
             // then wait for its MIME type once the priming packet is available.
-            const wakeAppend = () => appendNext();
+            const wakeAppend = () => {
+                appendNext();
+                if (video.currentTime > session.startAt + 5) {
+                    quotaRestartAttemptsRef.current = 0;
+                }
+            };
             video.addEventListener("timeupdate", wakeAppend);
             video.addEventListener("playing", wakeAppend);
             session.listeners.push(["timeupdate", wakeAppend], ["playing", wakeAppend]);

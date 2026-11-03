@@ -516,7 +516,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 }
             };
 
-            const trimOldBuffer = () => {
+            session.wakeAppend = appendNext;
+
+        const trimOldBuffer = () => {
                 const sb = session.sourceBuffer;
                 if (!session.didStart || !sb || sb.updating || session.trimming || !sb.buffered.length || video.currentTime < 45) return;
                 const start = sb.buffered.start(0);
@@ -1224,7 +1226,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
                 const drift = Math.abs(audio.currentTime - video.currentTime);
                 if (drift > 0.35 && video.readyState >= 2) {
-                    try { audio.currentTime = video.currentTime; } catch { /* audio stream is buffering */ }
+                    try {
+                        audio.currentTime = video.currentTime;
+                        session.wakeAppend?.();
+                    } catch { /* audio stream is buffering */ }
                 }
                 if (audio.paused && audio.readyState >= 2) {
                     audio.play().catch((error) => {
@@ -1270,28 +1275,16 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const time = video.currentTime;
             const wasPlaying = !video.paused;
 
-            const audioSessions = Array.from(audioSessionsRef.current.values());
-            for (const audioSession of audioSessions) {
+            for (const audioSession of audioSessionsRef.current.values()) {
                 if (audioSession.cancelled) continue;
-                let audioBuffered = false;
-                for (let index = 0; index < audioSession.audio.buffered.length; index += 1) {
-                    if (time >= audioSession.audio.buffered.start(index) - 0.15 &&
-                        time <= audioSession.audio.buffered.end(index) + 0.15) {
-                        audioBuffered = true;
-                        break;
+                try {
+                    audioSession.audio.currentTime = time;
+                    audioSession.wakeAppend?.();
+                    if (wasPlaying && audioSession.audio.paused && audioSession.audio.readyState >= 2) {
+                        audioSession.audio.play().catch(() => {});
                     }
-                }
-
-                if (audioBuffered) {
-                    try { audioSession.audio.currentTime = time; } catch { /* browser is updating the timeline */ }
-                } else {
-                    audioSession.audio.pause();
-                    void startAudioPipeline(
-                        audioSession.track,
-                        time,
-                        wasPlaying,
-                        audioSession.track.id === selectedAudioRef.current,
-                    );
+                } catch {
+                    // MediaSource may be updating; the next sync tick retries.
                 }
             }
 

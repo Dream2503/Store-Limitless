@@ -437,6 +437,26 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         sessionRef.current?.dispose();
         sessionRef.current = null;
 
+        let resolveTargetBuffered;
+        let rejectTargetBuffered;
+        let targetBufferedSettled = false;
+        const targetBufferedPromise = new Promise((resolve, reject) => {
+            resolveTargetBuffered = resolve;
+            rejectTargetBuffered = reject;
+        });
+        targetBufferedPromise.catch(() => {});
+
+        const markTargetBuffered = () => {
+            if (targetBufferedSettled) return;
+            targetBufferedSettled = true;
+            resolveTargetBuffered();
+        };
+        const rejectTargetBuffer = (error) => {
+            if (targetBufferedSettled) return;
+            targetBufferedSettled = true;
+            rejectTargetBuffered(error);
+        };
+
         const session = {
             cancelled: false,
             demuxers: [],
@@ -449,8 +469,11 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             pendingEnd: false,
             didStart: false,
             programmaticSeek: false,
+            programmaticSeekTarget: null,
+            targetBuffered: false,
+            quotaRecoveryAttempts: 0,
+            quotaRestartScheduled: false,
             trimming: false,
-            keepSeekableHistory: true,
             startAt: Math.max(0, Number(startAt) || 0),
             shouldPlay: Boolean(shouldPlay),
             listeners: [],
@@ -458,6 +481,17 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             dispose: null,
             fail: null,
         };
+
+        const onProgrammaticSeeked = () => {
+            if (!session.programmaticSeek) return;
+            const target = session.programmaticSeekTarget;
+            if (target == null || Math.abs(video.currentTime - target) < 0.75) {
+                session.programmaticSeek = false;
+                session.programmaticSeekTarget = null;
+            }
+        };
+        video.addEventListener("seeked", onProgrammaticSeeked);
+        session.listeners.push(["seeked", onProgrammaticSeeked]);
 
         session.dispose = () => {
             if (session.cancelled) return;
@@ -479,6 +513,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         session.fail = (error) => {
             if (session.cancelled) return;
             session.rejectStartup?.(error);
+            rejectTargetBuffer(error);
             console.error("Parallel media pipeline failed.", error);
             session.dispose();
             if (sessionRef.current === session) sessionRef.current = null;
@@ -571,6 +606,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 rejectOpen(error);
                 rejectStarted(error);
                 rejectReady(error);
+                rejectTargetBuffer(error);
             };
 
             const worker = new MediaMuxWorker();

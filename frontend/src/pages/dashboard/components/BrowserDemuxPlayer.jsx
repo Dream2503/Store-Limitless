@@ -1633,7 +1633,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
         const time = Math.max(0, Number(video?.currentTime) || 0);
         const shouldPlay = Boolean((video && !video.paused) || resumeAfterSyncRef.current);
-        const gateWasPending = syncPendingRef.current;
+        const gateWasPending = syncPendingRef.current || resumeAfterSyncRef.current;
+        if (gateWasPending) syncPendingRef.current = true;
         requestedAudioRef.current = track.id;
         setSelectedAudio(track.id);
 

@@ -238,7 +238,11 @@ async def main() -> None:
             environ["VITE_API_URL"] = api_url
             app.add_middleware(
                 CORSMiddleware,
-                allow_origins=[website_url],
+                allow_origins=[
+                    website_url,
+                    "http://localhost:5173",
+                    "http://127.0.0.1:5173",
+                ],
                 allow_credentials=True,
                 allow_methods=["*"],
                 allow_headers=["*"],

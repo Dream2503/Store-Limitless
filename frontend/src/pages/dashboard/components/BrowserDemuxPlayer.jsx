@@ -23,6 +23,9 @@ export default function BrowserDemuxPlayer({
     const playerRef = useRef(null);
     const fallbackTriggeredRef = useRef(false);
     const [libraryReady, setLibraryReady] = useState(false);
+    const [zeroCopyAvailable, setZeroCopyAvailable] = useState(
+        () => Boolean(window.crossOriginIsolated && typeof SharedArrayBuffer !== "undefined"),
+    );
 
     const fallback = useCallback((error) => {
         if (fallbackTriggeredRef.current) return;
@@ -79,6 +82,17 @@ export default function BrowserDemuxPlayer({
         }
     }, [active]);
 
+    useEffect(() => {
+        const updateIsolationStatus = () => {
+            setZeroCopyAvailable(Boolean(
+                window.crossOriginIsolated && typeof SharedArrayBuffer !== "undefined",
+            ));
+        };
+        updateIsolationStatus();
+        window.addEventListener("pageshow", updateIsolationStatus);
+        return () => window.removeEventListener("pageshow", updateIsolationStatus);
+    }, []);
+
     return (
         <div className="relative h-full min-h-0 w-full bg-black">
             {libraryReady ? (
@@ -114,6 +128,15 @@ export default function BrowserDemuxPlayer({
                     Preparing browser media player…
                 </div>
             )}
+
+            <div
+                className={`absolute left-3 top-3 z-[60] rounded-md border px-2.5 py-1.5 text-[11px] font-medium shadow-lg backdrop-blur ${zeroCopyAvailable ? "border-[#3ecf8e]/40 bg-[#062a1d]/85 text-[#8af0bd]" : "border-white/15 bg-black/70 text-white/75"}`}
+                title={zeroCopyAvailable
+                    ? "Cross-origin isolation is active. Movi can use its SharedArrayBuffer zero-copy HTTP streaming path."
+                    : "Zero-copy streaming is unavailable. Open StoreLimitless from localhost or HTTPS and enable COOP/COEP headers."}
+            >
+                {zeroCopyAvailable ? "Zero-copy stream" : "Standard stream"}
+            </div>
 
             <button
                 type="button"

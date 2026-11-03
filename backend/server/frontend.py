@@ -17,6 +17,16 @@ INDEX_FILE: Path = FRONTEND_DIR / "index.html"
 frontend_app: FastAPI = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 
+@frontend_app.middleware("http")
+async def cross_origin_isolation_headers(request, call_next):
+    """Enable the browser's optional SharedArrayBuffer streaming fast path."""
+
+    response = await call_next(request)
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault("Cross-Origin-Embedder-Policy", "require-corp")
+    return response
+
+
 @frontend_app.get("/config.js")
 async def runtime_config() -> Response:
     """Return runtime JavaScript configuration for the frontend."""

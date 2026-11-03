@@ -114,6 +114,7 @@ def _public_cors_headers(request: Request) -> dict[str, str]:
         "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
         "Access-Control-Allow-Headers": "Authorization, Content-Type, Range, If-Range, If-None-Match, If-Modified-Since, Accept, Origin, X-Requested-With",
         "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length, Content-Disposition, ETag",
+        "Cross-Origin-Resource-Policy": "cross-origin",
         "Vary": "Origin",
     }
 

@@ -2,11 +2,7 @@ import {useCallback, useEffect, useRef, useState} from "react";
 import MediaMuxWorker from "./MediaMuxWorker.js?worker";
 
 const DEMUX_WASM_URL = "https://cdn.jsdelivr.net/npm/web-demuxer@4.0.0/dist/wasm-files/web-demuxer.wasm";
-const MAX_FORWARD_BUFFER_SECONDS = 35;
-const MAX_IN_FLIGHT_BATCHES = Math.max(
-    3,
-    Math.min(10, Math.floor((typeof navigator !== "undefined" ? navigator.hardwareConcurrency : 8) * 0.75)),
-);
+const MAX_FORWARD_BUFFER_SECONDS = 12;
 const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"]);
 
 function mimeSupportDetails(mimeType) {
@@ -285,7 +281,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         const taskId = subtitleTaskRef.current;
         setStatus("Extracting subtitle cues in a worker…");
         try {
-            const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
+            const {WebDemuxer, AVLogLevel} = await import("web-demuxer");
             const demuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
             subtitleDemuxerRef.current = demuxer;
             await demuxer.load(source);
@@ -342,8 +338,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             sourceBuffer: null,
             objectUrl: "",
             queue: [],
-            packetAcks: new Map(),
-            nextPacketId: 1,
             writingId: null,
             pendingEnd: false,
             didStart: false,
@@ -361,16 +355,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (session.cancelled) return;
             session.cancelled = true;
             for (const [name, handler] of session.listeners) video.removeEventListener(name, handler);
-            for (const reader of session.readers) {
-                try { void reader.cancel(); } catch { /* stream already closed */ }
-            }
             for (const demuxer of session.demuxers) {
                 try { demuxer.destroy?.(); } catch { /* worker already closed */ }
             }
-            for (const waiter of session.packetAcks.values()) {
-                waiter.reject(new DOMException("Playback replaced", "AbortError"));
-            }
-            session.packetAcks.clear();
             if (session.worker) {
                 try { session.worker.postMessage({type: "cancel"}); } catch { /* worker already closed */ }
                 session.worker.terminate();
@@ -415,8 +402,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (!videoCodec) throw new Error("Unsupported video codec: " + videoStream.codec_name);
 
             let audioStream = null;
-            let audioDemuxer = null;
             let transcodeAudio = false;
+            let videoTrackNumber = null;
             let audioTrackNumber = null;
             if (audioIndex !== null && audioIndex !== "") {
                 audioStream = (streams || []).find((item) =>
@@ -428,47 +415,27 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 }
 
                 transcodeAudio = needsAudioTranscoding(audioStream.codec_name);
-                if (transcodeAudio) {
-                    const orderedAudioStreams = (streams || [])
-                        .filter((item) => item.codec_type_string === "audio")
-                        .sort((a, b) => a.index - b.index);
-                    audioTrackNumber = orderedAudioStreams.findIndex((item) => item.index === audioStream.index) + 1;
-                    if (audioTrackNumber < 1) {
-                        throw new Error("Could not map the selected AC-3 audio stream to its Matroska track number.");
-                    }
-                } else {
-                    audioDemuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
-                    session.demuxers.push(audioDemuxer);
-                    await audioDemuxer.load(source);
-                    await audioDemuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
+                const orderedAudioStreams = (streams || [])
+                    .filter((item) => item.codec_type_string === "audio")
+                    .sort((a, b) => a.index - b.index);
+                audioTrackNumber = orderedAudioStreams.findIndex((item) => item.index === audioStream.index) + 1;
+                if (audioTrackNumber < 1) {
+                    throw new Error("Could not map the selected audio stream to its Matroska track number.");
                 }
+            }
+            const orderedVideoStreams = (streams || [])
+                .filter((item) => item.codec_type_string === "video")
+                .sort((a, b) => a.index - b.index);
+            videoTrackNumber = orderedVideoStreams.findIndex((item) => item.index === videoStream.index) + 1;
+            if (videoTrackNumber < 1) {
+                throw new Error("Could not map the video stream to its Matroska track number.");
             }
             if (session.cancelled) return;
 
             const videoConfig = decoderConfig(videoDemuxer, videoStream, "video");
             const audioConfig = audioStream && !transcodeAudio
-                ? decoderConfig(audioDemuxer, audioStream, "audio")
+                ? decoderConfig(videoDemuxer, audioStream, "audio")
                 : null;
-
-            // Encoded passthrough tracks need their first packet for sample-entry
-            // metadata. AC-3/E-AC-3 are decoded to PCM and re-encoded as AAC.
-            let audioReader = null;
-            let firstAudioPacket = null;
-            if (audioStream && !transcodeAudio) {
-                audioReader = audioDemuxer.readAVPacket(
-                    session.startAt,
-                    0,
-                    AVMediaType.AVMEDIA_TYPE_AUDIO,
-                    audioStream.index,
-                ).getReader();
-                session.readers.push(audioReader);
-                const firstAudioResult = await audioReader.read();
-                if (firstAudioResult.done || !firstAudioResult.value?.data?.byteLength ||
-                    !Number.isFinite(firstAudioResult.value.timestamp)) {
-                    throw new Error("The selected audio track did not provide a valid priming packet.");
-                }
-                firstAudioPacket = firstAudioResult.value;
-            }
 
             const mediaSource = new MediaSource();
             session.mediaSource = mediaSource;
@@ -620,12 +587,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     session.mimeType = message.mimeType;
                     createSourceBuffer();
                     resolveReady();
-                } else if (message.type === "batch-ack") {
-                    const waiter = session.packetAcks.get(message.id);
-                    if (waiter) {
-                        session.packetAcks.delete(message.id);
-                        waiter.resolve();
-                    }
                 } else if (message.type === "data") {
                     session.queue.push({id: message.id, buffer: message.buffer});
                     appendNext();
@@ -645,29 +606,26 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     rotation: videoStream.rotation || 0,
                     flip: Boolean(videoStream.flip),
                 },
+                source,
+                startAt: session.startAt,
+                video: {
+                    codec: videoCodec,
+                    trackNumber: videoTrackNumber,
+                    decoderConfig: videoConfig,
+                    rotation: videoStream.rotation || 0,
+                    flip: Boolean(videoStream.flip),
+                },
                 audio: audioStream ? {
                     codec: transcodeAudio ? "aac" : audioCodecName(audioStream.codec_name),
                     inputCodec: audioCodecName(audioStream.codec_name),
                     mode: transcodeAudio ? "ac3-to-aac" : "passthrough",
-                    source: transcodeAudio ? source : null,
-                    trackNumber: transcodeAudio ? audioTrackNumber : null,
-                    startAt: session.startAt,
+                    trackNumber: audioTrackNumber,
                     decoderConfig: audioConfig,
                     languageCode: languageCode(audioStream.tags?.language),
                     name: audioStream.tags?.title || audioStream.tags?.language || "",
-                    ...(!transcodeAudio ? {
-                        primingPacket: {
-                            buffer: firstAudioPacket.data.slice().buffer,
-                            timestamp: firstAudioPacket.timestamp,
-                            duration: firstAudioPacket.duration,
-                        },
-                    } : {}),
                 } : null,
             };
-            const initTransfers = audioStream && !transcodeAudio
-                ? [initMessage.audio.primingPacket.buffer]
-                : [];
-            worker.postMessage(initMessage, initTransfers);
+            worker.postMessage(initMessage);
 
             const onVideoError = () => {
                 if (session.cancelled) return;
@@ -692,121 +650,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             await Promise.all([sourceOpen, workerStarted]);
             if (session.cancelled) return;
 
-            const pump = async (
-                demuxer,
-                track,
-                streamIndex,
-                mediaType,
-                existingReader = null,
-                initialPacket = null,
-            ) => {
-                const reader = existingReader ||
-                    demuxer.readAVPacket(session.startAt, 0, mediaType, streamIndex).getReader();
-                if (!existingReader) session.readers.push(reader);
-                const batch = [];
-                const inFlightBatches = new Set();
-                let batchBytes = 0;
-                let batchError = null;
-
-                if (initialPacket?.data?.byteLength && Number.isFinite(initialPacket.timestamp)) {
-                    batch.push(initialPacket);
-                    batchBytes += initialPacket.data.byteLength;
-                }
-
-                const flushBatch = async () => {
-                    if (!batch.length) return;
-                    if (batchError) throw batchError;
-
-                    const id = session.nextPacketId++;
-                    const items = batch.splice(0);
-                    batchBytes = 0;
-                    const transfers = [];
-                    const packets = items.map((packet) => {
-                        const bytes = packet.data;
-                        const buffer = (
-                            bytes.buffer instanceof ArrayBuffer &&
-                            bytes.byteOffset === 0 &&
-                            bytes.byteLength === bytes.buffer.byteLength
-                        ) ? bytes.buffer : bytes.slice().buffer;
-                        transfers.push(buffer);
-                        return {
-                            buffer,
-                            timestamp: packet.timestamp,
-                            duration: packet.duration,
-                            keyframe: packet.keyframe === 1,
-                        };
-                    });
-
-                    const ack = new Promise((resolve, reject) => session.packetAcks.set(id, {resolve, reject}));
-                    try {
-                        worker.postMessage({type: "packet-batch", id, track, packets}, transfers);
-                    } catch (error) {
-                        session.packetAcks.delete(id);
-                        throw error;
-                    }
-
-                    // Keep a bounded number of packet batches moving through the
-                    // muxer instead of waiting after every batch for an MSE append.
-                    let completion;
-                    completion = ack.then(
-                        () => null,
-                        (error) => {
-                            batchError ||= error;
-                            return error;
-                        },
-                    );
-                    inFlightBatches.add(completion);
-                    void completion.then(() => inFlightBatches.delete(completion));
-
-                    if (inFlightBatches.size >= MAX_IN_FLIGHT_BATCHES) {
-                        const error = await Promise.race(inFlightBatches);
-                        if (error) throw error;
-                    }
-                };
-
-                try {
-                    while (!session.cancelled && sessionRef.current === session) {
-                        if (batchError) throw batchError;
-                        const result = await reader.read();
-                        if (result.done) break;
-                        const packet = result.value;
-                        if (!packet?.data?.byteLength || !Number.isFinite(packet.timestamp)) continue;
-
-                        batch.push(packet);
-                        batchBytes += packet.data.byteLength;
-                        if (batch.length >= 24 || batchBytes >= 2 * 1024 * 1024) {
-                            await flushBatch();
-                        }
-                    }
-
-                    await flushBatch();
-                    if (inFlightBatches.size) await Promise.all(inFlightBatches);
-                    if (batchError) throw batchError;
-
-                    if (!session.cancelled && sessionRef.current === session) {
-                        worker.postMessage({type: "end-track", track});
-                    }
-                } finally {
-                    try { reader.releaseLock?.(); } catch { /* already closed */ }
-                }
-            };
-
-            const videoPump = pump(videoDemuxer, "video", videoStream.index, AVMediaType.AVMEDIA_TYPE_VIDEO);
-            const audioPump = audioStream && !transcodeAudio
-                ? pump(
-                    audioDemuxer,
-                    "audio",
-                    audioStream.index,
-                    AVMediaType.AVMEDIA_TYPE_AUDIO,
-                    audioReader,
-                    firstAudioPacket,
-                )
-                : Promise.resolve();
-
-            void Promise.all([videoPump, audioPump]).catch((error) => {
-                if (!session.cancelled) session.fail(error);
-            });
-
             await workerReady;
             if (session.cancelled) return;
 
@@ -817,9 +660,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             setStatus(audioStream
                 ? transcodeAudio
-                    ? "AC-3 audio decoding and AAC encoding active · video demux worker active"
-                    : `Video/audio demux workers active · up to ${MAX_IN_FLIGHT_BATCHES} in-flight batches per track`
-                : `Video demux worker active · up to ${MAX_IN_FLIGHT_BATCHES} in-flight batches`);
+                    ? "Range streaming active · AC-3 decoding and AAC encoding in parallel"
+                    : "Range streaming active · video and audio packets demuxed progressively"
+                : "Range streaming active · video packets demuxed progressively");
         } catch (error) {
             if (!session.cancelled) session.fail(error);
         }
@@ -979,7 +822,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         <div className="relative flex h-full min-h-0 w-full flex-col bg-black">
             <div className="absolute left-3 top-3 z-20 flex flex-wrap items-center gap-2">
                 <span className="rounded-md border border-[#3ecf8e]/40 bg-[#062a1d]/90 px-2.5 py-1.5 text-[11px] font-medium text-[#8af0bd] shadow-lg backdrop-blur">
-                    {workerCount} workers · {MAX_IN_FLIGHT_BATCHES} batches/track
+                    {workerCount} workers · range streaming
                 </span>
                 {audioTracks.length > 0 && (
                     <label className="flex items-center gap-1.5 rounded-md border border-white/15 bg-black/75 px-2 py-1 text-[11px] text-white shadow-lg backdrop-blur">

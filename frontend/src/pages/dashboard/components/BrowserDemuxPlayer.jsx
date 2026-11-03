@@ -672,7 +672,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         setSelectedAudio("");
         setSelectedSubtitle("");
         clearSubtitle();
-        setStatus("Preparing separate FFmpeg/WASM workers…");
+        setStatus("Opening HTTP range stream…");
 
         (async () => {
             try {
@@ -809,13 +809,11 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         if (subtitleUrlRef.current) URL.revokeObjectURL(subtitleUrlRef.current);
     }, []);
 
-    const workerCount = 2 + (selectedAudio ? 1 : 0) + (selectedSubtitle ? 1 : 0);
-
     return (
         <div className="relative flex h-full min-h-0 w-full flex-col bg-black">
             <div className="absolute left-3 top-3 z-20 flex flex-wrap items-center gap-2">
                 <span className="rounded-md border border-[#3ecf8e]/40 bg-[#062a1d]/90 px-2.5 py-1.5 text-[11px] font-medium text-[#8af0bd] shadow-lg backdrop-blur">
-                    {workerCount} workers · progressive range playback
+                    HTTP Range · progressive demux
                 </span>
                 {audioTracks.length > 0 && (
                     <label className="flex items-center gap-1.5 rounded-md border border-white/15 bg-black/75 px-2 py-1 text-[11px] text-white shadow-lg backdrop-blur">

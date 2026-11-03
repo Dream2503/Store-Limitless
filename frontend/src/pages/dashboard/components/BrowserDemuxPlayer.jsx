@@ -286,7 +286,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const subtitlePreloadTaskRef = useRef(0);
     const subtitleTaskRef = useRef(0);
     const subtitleTrackElementRef = useRef(null);
-    const quotaRestartAttemptsRef = useRef(0);
     const seekTimerRef = useRef(null);
     const fallbackRef = useRef(false);
 
@@ -827,9 +826,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             // then wait for its MIME type once the priming packet is available.
             const wakeAppend = () => {
                 appendNext();
-                if (video.currentTime > session.startAt + 5) {
-                    quotaRestartAttemptsRef.current = 0;
-                }
             };
             video.addEventListener("play", wakeAppend);
             video.addEventListener("timeupdate", wakeAppend);

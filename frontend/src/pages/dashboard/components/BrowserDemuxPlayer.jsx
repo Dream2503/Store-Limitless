@@ -429,6 +429,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 if (message.type === "ready") {
                     session.mimeType = message.mimeType;
                     createSourceBuffer();
+                } else if (message.type === "packet-ack") {
+                    const waiter = session.packetAcks.get(message.id);
+                    if (waiter) {
+                        session.packetAcks.delete(message.id);
+                        waiter.resolve();
+                    }
                 } else if (message.type === "data") {
                     session.queue.push({id: message.id, buffer: message.buffer});
                     appendNext();

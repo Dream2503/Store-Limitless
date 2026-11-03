@@ -10,6 +10,7 @@ import {
 let output = null;
 let videoSource = null;
 let audioSource = null;
+let audioCodec = null;
 let trackChains = {video: Promise.resolve(), audio: Promise.resolve()};
 let packetSequence = {video: 0, audio: 0};
 let pendingWrites = new Map();
@@ -44,7 +45,10 @@ async function initialize(message) {
     try {
         expectedTracks = message.audio ? 2 : 1;
         videoSource = new EncodedVideoPacketSource(message.video.codec);
-        if (message.audio) audioSource = new EncodedAudioPacketSource(message.audio.codec);
+        if (message.audio) {
+            audioCodec = message.audio.codec;
+            audioSource = new EncodedAudioPacketSource(audioCodec);
+        }
 
         const target = new AppendOnlyStreamTarget(new WritableStream({
             write(data) {
@@ -103,9 +107,21 @@ function addPacketBatch(message) {
             const timestamp = Number(item.timestamp);
             if (!Number.isFinite(timestamp)) continue;
             const duration = Number(item.duration);
+            const packetData = new Uint8Array(item.buffer);
+            let packetType = track === "video" ? (item.keyframe ? "key" : "delta") : "key";
+            if (track === "audio" && audioCodec === "truehd") {
+                // TrueHD marks major-sync access units as key packets. The
+                // four-byte sync word follows the four-byte access-unit header.
+                const hasMajorSync = packetData.length >= 8 &&
+                    packetData[4] === 0xf8 &&
+                    packetData[5] === 0x72 &&
+                    packetData[6] === 0x6f &&
+                    packetData[7] === 0xba;
+                packetType = hasMajorSync ? "key" : "delta";
+            }
             const packet = new EncodedPacket(
-                new Uint8Array(item.buffer),
-                track === "video" ? (item.keyframe ? "key" : "delta") : "key",
+                packetData,
+                packetType,
                 timestamp,
                 Number.isFinite(duration) && duration > 0 ? duration : (track === "video" ? 1 / 30 : 0.02),
                 packetSequence[track]++,

@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@mediabunny/ac3": "^1.62.1",
+    "@mediabunny/ac3": "^1.65.0",
     "@mediabunny/aac-encoder": "^1.65.0",
     "mediabunny": "^1.65.0",
     "react": "^19.2.0",

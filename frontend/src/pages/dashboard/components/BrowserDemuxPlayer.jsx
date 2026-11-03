@@ -393,6 +393,27 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             const videoConfig = decoderConfig(videoDemuxer, videoStream, "video");
             const audioConfig = audioStream ? decoderConfig(audioDemuxer, audioStream, "audio") : null;
+
+            // AC-3/E-AC-3 sample entries need the first encoded packet as
+            // track-level priming metadata before the Output is started.
+            let audioReader = null;
+            let firstAudioPacket = null;
+            if (audioStream) {
+                audioReader = audioDemuxer.readAVPacket(
+                    session.startAt,
+                    0,
+                    AVMediaType.AVMEDIA_TYPE_AUDIO,
+                    audioStream.index,
+                ).getReader();
+                session.readers.push(audioReader);
+                const firstAudioResult = await audioReader.read();
+                if (firstAudioResult.done || !firstAudioResult.value?.data?.byteLength ||
+                    !Number.isFinite(firstAudioResult.value.timestamp)) {
+                    throw new Error("The selected audio track did not provide a valid priming packet.");
+                }
+                firstAudioPacket = firstAudioResult.value;
+            }
+
             const mediaSource = new MediaSource();
             session.mediaSource = mediaSource;
             session.objectUrl = URL.createObjectURL(mediaSource);
@@ -548,7 +569,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 }
             });
             worker.addEventListener("error", (event) => session.fail(new Error(event.message || "Remux worker crashed.")));
-            worker.postMessage({
+            const initMessage = {
                 type: "init",
                 video: {
                     codec: videoCodec,
@@ -561,8 +582,15 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     decoderConfig: audioConfig,
                     languageCode: languageCode(audioStream.tags?.language),
                     name: audioStream.tags?.title || audioStream.tags?.language || "",
+                    primingPacket: {
+                        buffer: firstAudioPacket.data.slice().buffer,
+                        timestamp: firstAudioPacket.timestamp,
+                        duration: firstAudioPacket.duration,
+                    },
                 } : null,
-            });
+            };
+            const initTransfers = audioStream ? [initMessage.audio.primingPacket.buffer] : [];
+            worker.postMessage(initMessage, initTransfers);
 
             const onVideoError = () => {
                 if (session.cancelled) return;
@@ -587,13 +615,26 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             await Promise.all([sourceOpen, workerStarted]);
             if (session.cancelled) return;
 
-            const pump = async (demuxer, track, streamIndex, mediaType) => {
-                const reader = demuxer.readAVPacket(session.startAt, 0, mediaType, streamIndex).getReader();
-                session.readers.push(reader);
+            const pump = async (
+                demuxer,
+                track,
+                streamIndex,
+                mediaType,
+                existingReader = null,
+                initialPacket = null,
+            ) => {
+                const reader = existingReader ||
+                    demuxer.readAVPacket(session.startAt, 0, mediaType, streamIndex).getReader();
+                if (!existingReader) session.readers.push(reader);
                 const batch = [];
                 const inFlightBatches = new Set();
                 let batchBytes = 0;
                 let batchError = null;
+
+                if (initialPacket?.data?.byteLength && Number.isFinite(initialPacket.timestamp)) {
+                    batch.push(initialPacket);
+                    batchBytes += initialPacket.data.byteLength;
+                }
 
                 const flushBatch = async () => {
                     if (!batch.length) return;
@@ -675,7 +716,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             const videoPump = pump(videoDemuxer, "video", videoStream.index, AVMediaType.AVMEDIA_TYPE_VIDEO);
             const audioPump = audioStream
-                ? pump(audioDemuxer, "audio", audioStream.index, AVMediaType.AVMEDIA_TYPE_AUDIO)
+                ? pump(
+                    audioDemuxer,
+                    "audio",
+                    audioStream.index,
+                    AVMediaType.AVMEDIA_TYPE_AUDIO,
+                    audioReader,
+                    firstAudioPacket,
+                )
                 : Promise.resolve();
 
             void Promise.all([videoPump, audioPump]).catch((error) => {

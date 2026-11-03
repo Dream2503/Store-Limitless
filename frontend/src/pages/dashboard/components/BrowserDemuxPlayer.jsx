@@ -1139,6 +1139,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             restartRef.current = null;
             sessionRef.current?.dispose();
             sessionRef.current = null;
+            for (const session of pendingAudioSessionsRef.current.values()) session.dispose?.();
+            pendingAudioSessionsRef.current.clear();
+            for (const session of audioSessionsRef.current.values()) session.dispose?.();
+            audioSessionsRef.current.clear();
+            audioSessionRef.current = null;
+            selectedAudioRef.current = "";
             metadataDemuxer?.destroy?.();
             clearSubtitle();
         };
@@ -1154,6 +1160,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             setSelectedAudio("");
             for (const session of audioSessionsRef.current.values()) {
                 session.audio.muted = true;
+                session.audio.pause();
             }
             setStatus("Audio off");
             return;
@@ -1210,7 +1217,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 audio.muted = video.muted || id !== selectedAudioRef.current;
                 audio.playbackRate = video.playbackRate;
 
-                if (!shouldPlay) {
+                if (!shouldPlay || !selectedAudioRef.current) {
                     audio.pause();
                     continue;
                 }

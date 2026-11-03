@@ -175,7 +175,7 @@ async function initialize(message) {
         output = new Output({
             format: new Mp4OutputFormat({
                 fastStart: "fragmented",
-                minimumFragmentDuration: 0.12,
+                minimumFragmentDuration: 0.04,
             }),
             target,
         });

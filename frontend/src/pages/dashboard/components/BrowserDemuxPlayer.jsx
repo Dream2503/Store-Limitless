@@ -270,6 +270,39 @@ function isMediaTimeBuffered(media, time) {
     return false;
 }
 
+function waitForMediaTimeReady(media, time, timeoutMs = 15000) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let timeout = null;
+        const events = ["progress", "loadeddata", "canplay", "timeupdate", "seeked", "durationchange"];
+
+        const cleanup = () => {
+            for (const name of events) media.removeEventListener(name, check);
+            if (timeout !== null) window.clearTimeout(timeout);
+        };
+        const finish = (error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            if (error) reject(error);
+            else resolve();
+        };
+        const check = () => {
+            if (media.error) {
+                finish(new Error("Media failed while buffering the requested playback position."));
+                return;
+            }
+            if (media.readyState >= 2 && isMediaTimeBuffered(media, time)) finish();
+        };
+
+        for (const name of events) media.addEventListener(name, check);
+        timeout = window.setTimeout(() => {
+            finish(new Error("Timed out waiting for media data at " + time.toFixed(2) + " seconds."));
+        }, timeoutMs);
+        check();
+    });
+}
+
 export default function BrowserDemuxPlayer({source, title, active = true, onUseStandardPlayer, onUnavailable}) {
     const videoRef = useRef(null);
     const sessionRef = useRef(null);
@@ -429,7 +462,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         }
     }, [clearSubtitle]);
 
-    const startPipeline = useCallback(async (audioIndex, startAt = 0, shouldPlay = false, preparedVideoDemuxer = null, knownStreams = null) => {
+    const startPipeline = useCallback(async (
+        audioIndex,
+        startAt = 0,
+        shouldPlay = false,
+        preparedVideoDemuxer = null,
+        knownStreams = null,
+        deferPlayback = false,
+    ) => {
         const video = videoRef.current;
         if (!video) throw new Error("Video element is unavailable.");
 
@@ -839,7 +879,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             await Promise.all([sourceOpen, workerStarted, workerReady, targetBufferedPromise]);
             if (session.cancelled) return;
 
-            if (session.shouldPlay) {
+            if (session.shouldPlay && !deferPlayback) {
                 await video.play().catch((error) => {
                     console.warn("Playback could not resume automatically after seeking.", error);
                 });
@@ -1051,7 +1091,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
                     if (!session.didStart && sourceBuffer.buffered.length) {
                         session.didStart = true;
-                        try { audio.currentTime = session.startAt; } catch { /* metadata may still be loading */ }
+                    }
+
+                    if (isMediaTimeBuffered(audio, session.requestedTime)) {
+                        try { audio.currentTime = session.requestedTime; } catch { /* metadata may still be loading */ }
                         resolveBuffered();
                     }
 
@@ -1182,10 +1225,13 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             await Promise.all([sourceOpen, workerStarted, workerReady, firstBuffered]);
             if (session.cancelled || pendingAudioSessionsRef.current.get(track.id) !== session) return null;
 
+            audio.pause();
             try {
                 audio.currentTime = session.requestedTime;
                 session.wakeAppend?.();
-            } catch { /* first range establishes the timeline */ }
+            } catch { /* the next SourceBuffer update retries */ }
+            await waitForMediaTimeReady(audio, session.requestedTime);
+            if (session.cancelled || pendingAudioSessionsRef.current.get(track.id) !== session) return null;
             audio.volume = video.volume;
             audio.playbackRate = video.playbackRate;
 

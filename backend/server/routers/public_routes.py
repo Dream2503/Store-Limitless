@@ -300,6 +300,19 @@ async def public_stream(token: str, request: Request) -> Response:
     return await _file_response(file, request, attachment=False)
 
 
+@router.head("/stream/{token}")
+async def public_stream_head(token: str, request: Request) -> Response:
+    """Expose stream size and range headers without sending media bytes.
+
+    Browser demuxers use HEAD before issuing ranged GET requests so they can
+    resolve the original container's size. Keep this response identical to the
+    GET stream metadata while leaving the existing chunked stream untouched.
+    """
+
+    file = await _owned_public_file(token, request)
+    return await _file_response(file, request, attachment=False, head_only=True)
+
+
 @router.get("/download/{token}")
 async def public_download(token: str, request: Request) -> Response:
     """Download an attachment with byte ranges, validators, and resumable transfers."""

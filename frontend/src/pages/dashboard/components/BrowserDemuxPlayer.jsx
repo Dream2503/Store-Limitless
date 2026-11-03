@@ -207,7 +207,8 @@ function decoderConfig(demuxer, stream, type) {
 }
 
 function subtitlePacketSeconds(packet, stream, field) {
-    const direct = Number(packet?.[field]);
+    const value = packet?.[field];
+    const direct = value == null || value === "" ? NaN : Number(value);
     if (Number.isFinite(direct)) return direct;
 
     const ticks = Number(packet?.[field === "timestamp" ? "pts" : "duration"]);
@@ -352,7 +353,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                             const text = subtitleText(stream, packet);
                             if (!text) continue;
 
-                            const packetStart = subtitlePacketSeconds(packet, stream, "timestamp");
+                                            const packetStart = subtitlePacketSeconds(packet, stream, "timestamp");
                             const packetDuration = subtitlePacketSeconds(packet, stream, "duration");
                             if (!Number.isFinite(packetStart)) continue;
 
@@ -1244,9 +1245,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         restartRef.current = (audioIndex, time, shouldPlay) => {
             const target = Math.max(0, Number(time) || 0);
             const generation = ++seekGeneration;
-            const selectedTrack = audioTracksRef.current.find(
-                (item) => item.id === selectedAudioRef.current,
-            );
+            const selectedId = selectedAudioRef.current;
+            const selectedTrack = audioTracksRef.current.find((item) => item.id === selectedId);
 
             // A replacement video source resets its media timeline, so old
             // standalone audio SourceBuffers must be recreated at the same time.
@@ -1262,7 +1262,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     if (generation !== seekGeneration) return;
                     if (selectedTrack?.supported) {
                         requestedAudioRef.current = selectedTrack.id;
-                        await startAudioPipeline(selectedTrack, target, shouldPlay, true);
+                        const readyAudio = await startAudioPipeline(selectedTrack, target, shouldPlay, true);
+                        if (!readyAudio && generation === seekGeneration) {
+                            requestedAudioRef.current = "";
+                            selectedAudioRef.current = "";
+                            setSelectedAudio("");
+                        }
                     }
                 } catch (error) {
                     fallback(error instanceof Error ? error : new Error(String(error)));
@@ -1485,13 +1490,13 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const session = sessionRef.current;
             if (!session || session.cancelled || session.programmaticSeek) return;
             pendingSeek = {
-                time: Math.max(0, Number(video.currentTime) || 0),
                 wasPlaying: !video.paused,
             };
         };
         const onSeeked = () => {
             if (!pendingSeek) return;
-            const {time, wasPlaying} = pendingSeek;
+            const wasPlaying = pendingSeek.wasPlaying;
+            const time = Math.max(0, Number(video.currentTime) || 0);
             pendingSeek = null;
 
             const session = sessionRef.current;

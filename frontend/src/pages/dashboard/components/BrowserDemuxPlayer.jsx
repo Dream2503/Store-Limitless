@@ -332,6 +332,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const subtitleTaskRef = useRef(0);
     const seekTimerRef = useRef(null);
     const syncPendingRef = useRef(false);
+    const resumeAfterSyncRef = useRef(false);
     const fallbackRef = useRef(false);
 
     const [audioTracks, setAudioTracks] = useState([]);
@@ -1412,6 +1413,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 setSelectedAudio(audioId);
 
                 syncPendingRef.current = Boolean(defaultAudio);
+                resumeAfterSyncRef.current = false;
                 const videoPreparation = startPipeline(null, 0, false, metadataDemuxer, streams);
                 const audioPreparation = defaultAudio
                     ? startAudioPipeline(defaultAudio, 0, false, true)
@@ -1439,6 +1441,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const selectedTrack = audioTracksRef.current.find((item) => item.id === selectedId);
             const video = videoRef.current;
             syncPendingRef.current = Boolean(selectedTrack?.supported);
+            resumeAfterSyncRef.current = Boolean(shouldPlay);
 
             // Freeze both outputs before replacing either MediaSource.
             video?.pause();
@@ -1495,6 +1498,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                         await waitForMediaTimeReady(currentAudio, target);
                         if (generation !== seekGeneration || readyAudio.cancelled) return;
                         syncPendingRef.current = false;
+                        resumeAfterSyncRef.current = false;
 
                         selectedAudioRef.current = selectedTrack.id;
                         requestedAudioRef.current = selectedTrack.id;
@@ -1520,6 +1524,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                         }
                     } else {
                         syncPendingRef.current = false;
+                        resumeAfterSyncRef.current = false;
                         if (shouldPlay) await currentVideo.play();
                     }
 
@@ -1559,6 +1564,52 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         };
     }, [clearSubtitle, fallback, source, startAudioPipeline, startPipeline]);
 
+    const releasePendingAudioGate = async (readySession, time, shouldPlay) => {
+        const video = videoRef.current;
+        if (!syncPendingRef.current || !video || !readySession || readySession.cancelled) return;
+        if (Math.abs(video.currentTime - time) > 0.5) return;
+
+        const audio = readySession.audio;
+        video.pause();
+        audio.pause();
+        video.currentTime = time;
+        audio.currentTime = time;
+        audio.volume = video.volume;
+        audio.playbackRate = video.playbackRate;
+        audio.muted = video.muted;
+
+        await Promise.all([
+            waitForMediaTimeReady(video, time),
+            waitForMediaTimeReady(audio, time),
+        ]);
+        if (readySession.cancelled || Math.abs(video.currentTime - time) > 0.5) return;
+
+        selectedAudioRef.current = readySession.track.id;
+        requestedAudioRef.current = readySession.track.id;
+        audioSessionRef.current = readySession;
+        syncPendingRef.current = false;
+        resumeAfterSyncRef.current = false;
+
+        for (const [id, session] of audioSessionsRef.current) {
+            session.audio.muted = video.muted || id !== readySession.track.id;
+            session.audio.volume = video.volume;
+            session.audio.playbackRate = video.playbackRate;
+        }
+
+        if (shouldPlay) {
+            const starts = await Promise.allSettled([audio.play(), video.play()]);
+            if (starts.some((result) => result.status === "rejected")) {
+                video.pause();
+                audio.pause();
+                setStatus("A/V is ready, but the browser blocked playback. Press play to retry.");
+                return;
+            }
+        }
+        setStatus(shouldPlay
+            ? "Audio and video synchronized · playback resumed"
+            : "Audio and video ready · paused");
+    };
+
     const onAudioChange = (event) => {
         const track = audioTracksRef.current.find((item) => item.id === event.target.value);
         const video = videoRef.current;
@@ -1572,51 +1623,54 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 session.audio.muted = true;
                 session.audio.pause();
             }
+            syncPendingRef.current = false;
+            const resume = resumeAfterSyncRef.current;
+            resumeAfterSyncRef.current = false;
             setStatus("Audio off");
+            if (resume && video) video.play().catch(() => {});
             return;
         }
 
-        const pendingSession = pendingAudioSessionsRef.current.get(track.id);
-        if (pendingSession && !pendingSession.cancelled) {
-            // The background preloader may still be near the beginning of the file.
-            // Restart only this pending audio stream at the current playback time so
-            // it does not have to append every packet between 0 and the playhead.
-            const time = Math.max(0, Number(video?.currentTime) || 0);
-            const wasPlaying = Boolean(video && !video.paused);
-            requestedAudioRef.current = track.id;
-            setSelectedAudio(track.id);
-            setStatus("Preparing selected audio at the current position · video keeps playing");
-            void startAudioPipeline(track, time, wasPlaying, true);
-            return;
-        }
+        const time = Math.max(0, Number(video?.currentTime) || 0);
+        const shouldPlay = Boolean((video && !video.paused) || resumeAfterSyncRef.current);
+        const gateWasPending = syncPendingRef.current;
+        requestedAudioRef.current = track.id;
+        setSelectedAudio(track.id);
 
-        const readySession = audioSessionsRef.current.get(track.id);
-        if (readySession && !readySession.cancelled) {
-            const targetTime = Math.max(0, Number(video?.currentTime) || 0);
-            const audio = readySession.audio;
+        const prepare = async () => {
+            setStatus(gateWasPending
+                ? "Preparing selected audio before resuming playback…"
+                : "Preparing selected audio at the current position · video keeps playing");
 
-            // "Ready" means the first fragment arrived, not necessarily that this
-            // track has buffered the current playhead. Restart it at the playhead
-            // rather than making it append the entire earlier section of the file.
-            if (!isMediaTimeBuffered(audio, targetTime)) {
-                const wasPlaying = Boolean(video && !video.paused);
-                requestedAudioRef.current = track.id;
-                setSelectedAudio(track.id);
-                setStatus("Preparing selected audio at the current position · video keeps playing");
-                readySession.dispose?.();
-                void startAudioPipeline(track, targetTime, wasPlaying, true);
+            let readySession = audioSessionsRef.current.get(track.id);
+            if (!readySession || readySession.cancelled || !isMediaTimeBuffered(readySession.audio, time)) {
+                readySession?.dispose?.();
+                readySession = await startAudioPipeline(
+                    track,
+                    time,
+                    gateWasPending ? false : shouldPlay,
+                    true,
+                    gateWasPending,
+                );
+            }
+
+            if (!readySession || readySession.cancelled) {
+                setStatus("The selected audio could not be prepared. Playback remains paused.");
                 return;
             }
 
-            if (Math.abs(audio.currentTime - targetTime) > 0.2) {
-                try { audio.currentTime = targetTime; } catch { /* the next sync tick retries */ }
+            if (gateWasPending) {
+                await releasePendingAudioGate(readySession, time, shouldPlay);
+                return;
             }
-            audio.playbackRate = video?.playbackRate || 1;
-            audio.volume = video?.volume ?? 1;
-            audio.muted = true;
 
-            // Start the new audio element while muted. Only switch the mute states
-            // after play() succeeds, so a failed element never interrupts the old one.
+            if (Math.abs(readySession.audio.currentTime - time) > 0.2) {
+                try { readySession.audio.currentTime = time; } catch { /* the next sync tick retries */ }
+            }
+            readySession.audio.playbackRate = video?.playbackRate || 1;
+            readySession.audio.volume = video?.volume ?? 1;
+            readySession.audio.muted = true;
+
             const activate = () => {
                 if (readySession.cancelled || requestedAudioRef.current !== track.id) return;
                 selectedAudioRef.current = track.id;
@@ -1632,9 +1686,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 setStatus("Audio switched · video stream uninterrupted");
             };
 
-            requestedAudioRef.current = track.id;
             if (video && !video.paused) {
-                audio.play().then(activate).catch((error) => {
+                readySession.audio.play().then(activate).catch((error) => {
                     requestedAudioRef.current = selectedAudioRef.current;
                     setSelectedAudio(selectedAudioRef.current);
                     console.warn("Could not activate the selected audio stream.", error);
@@ -1643,15 +1696,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             } else {
                 activate();
             }
-            return;
-        }
+        };
 
-        const time = video?.currentTime || 0;
-        const wasPlaying = Boolean(video && !video.paused);
-        requestedAudioRef.current = track.id;
-        setSelectedAudio(track.id);
-        setStatus("Preparing this audio track · video keeps playing");
-        void startAudioPipeline(track, time, wasPlaying, true);
+        void prepare().catch((error) => {
+            console.error("Audio selection failed.", error);
+            setStatus(error?.message || "Could not prepare the selected audio track.");
+        });
     };
 
     const onSubtitleChange = (event) => {
@@ -1753,6 +1803,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 video.currentTime = time;
                 await waitForMediaTimeReady(video, time);
                 syncPendingRef.current = false;
+                resumeAfterSyncRef.current = false;
                 if (wasPlaying) await video.play();
                 return;
             }
@@ -1786,6 +1837,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             ]);
             if (selectedSession.cancelled || sessionRef.current !== session) return;
             syncPendingRef.current = false;
+            resumeAfterSyncRef.current = false;
 
             selectedAudioRef.current = selectedId;
             requestedAudioRef.current = selectedId;
@@ -1818,7 +1870,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const session = sessionRef.current;
             if (!session || session.cancelled || session.programmaticSeek) return;
             if (!pendingSeek) {
-                pendingSeek = {wasPlaying: !video.paused};
+                const wasPlaying = !video.paused;
+                pendingSeek = {wasPlaying};
+                resumeAfterSyncRef.current = wasPlaying;
                 syncPendingRef.current = Boolean(selectedAudioRef.current);
                 video.pause();
                 for (const item of audioSessionsRef.current.values()) item.audio.pause();

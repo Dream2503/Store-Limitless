@@ -42,6 +42,7 @@ async function prepareAc3Audio(message) {
     ]);
     registerAc3Decoder();
     registerAacEncoder();
+    if (failed) return;
 
     audioInput = new Input({
         formats: ALL_FORMATS,
@@ -49,6 +50,7 @@ async function prepareAc3Audio(message) {
     });
 
     const tracks = await audioInput.getAudioTracks();
+    if (failed) return;
     const trackNumber = Number(message.trackNumber);
     const track = tracks.find((item) => item.number === trackNumber);
     if (!track) {
@@ -63,6 +65,10 @@ async function prepareAc3Audio(message) {
     const sink = new AudioSampleSink(track);
     audioIterator = sink.samples(Number(message.startAt) || 0)[Symbol.asyncIterator]();
     const first = await audioIterator.next();
+    if (failed) {
+        first.value?.close?.();
+        return;
+    }
     if (first.done || !first.value) {
         throw new Error("The selected AC-3 track did not produce any decodable audio samples.");
     }
@@ -140,6 +146,7 @@ async function initialize(message) {
 
             if (audioMode === "ac3-to-aac") {
                 await prepareAc3Audio(message.audio);
+                if (failed) return;
             } else {
                 audioSource = new EncodedAudioPacketSource(audioCodec);
             }

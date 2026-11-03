@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import MediaMuxWorker from "./MediaMuxWorker.js?worker";
+import MediaAudioWorker from "./MediaAudioWorker.js?worker";
 
 const DEMUX_WASM_URL = "https://cdn.jsdelivr.net/npm/web-demuxer@4.0.0/dist/wasm-files/web-demuxer.wasm";
 const MAX_FORWARD_BUFFER_SECONDS = 12;
@@ -182,16 +183,6 @@ function decoderConfig(demuxer, stream, type) {
     };
 }
 
-function vttTime(seconds) {
-    const value = Math.max(0, Number(seconds) || 0);
-    const h = Math.floor(value / 3600);
-    const m = Math.floor((value % 3600) / 60);
-    const s = Math.floor(value % 60);
-    const ms = Math.floor((value - Math.floor(value)) * 1000);
-    return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0") + ":" +
-        String(s).padStart(2, "0") + "." + String(ms).padStart(3, "0");
-}
-
 function subtitleText(stream, packet) {
     const codec = String(stream?.codec_name || "").toLowerCase();
     let bytes = packet.data;
@@ -201,7 +192,9 @@ function subtitleText(stream, packet) {
         if (length > 0 && length <= bytes.length - 2) bytes = bytes.subarray(2, 2 + length);
     }
 
-    let text = new TextDecoder("utf-8").decode(bytes || new Uint8Array()).replace(/\u0000/g, "").trim();
+    let text = new TextDecoder("utf-8").decode(bytes || new Uint8Array())
+        .replace(/\u0000/g, "")
+        .trim();
     if (!text) return "";
 
     if (codec === "ass" || codec === "ssa") {
@@ -212,24 +205,12 @@ function subtitleText(stream, packet) {
     } else if (["srt", "subrip", "webvtt"].includes(codec)) {
         const lines = text.split(/\r?\n/);
         const timing = lines.findIndex((line) => line.includes("-->"));
-        text = timing >= 0 ? lines.slice(timing + 1).join("\n").trim()
+        text = timing >= 0
+            ? lines.slice(timing + 1).join("\n").trim()
             : lines.filter((line) => !/^\d+$/.test(line.trim())).join("\n").trim();
     }
 
-    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
-}
-
-function makeWebVtt(stream, packets) {
-    const cues = [];
-    for (const packet of packets) {
-        const text = subtitleText(stream, packet);
-        if (!text) continue;
-        const start = Math.max(0, Number(packet.timestamp) || 0);
-        const duration = Number(packet.duration);
-        const end = start + (Number.isFinite(duration) && duration > 0 ? duration : 3);
-        cues.push(vttTime(start) + " --> " + vttTime(Math.max(start + 0.25, end)) + "\n" + text);
-    }
-    return "WEBVTT\n\n" + cues.join("\n\n") + "\n";
+    return text;
 }
 
 export default function BrowserDemuxPlayer({source, title, active = true, onUseStandardPlayer, onUnavailable}) {
@@ -238,9 +219,11 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const restartRef = useRef(null);
     const audioTracksRef = useRef([]);
     const selectedAudioRef = useRef("");
+    const audioSessionRef = useRef(null);
+    const pendingAudioSessionRef = useRef(null);
     const subtitleDemuxerRef = useRef(null);
     const subtitleTaskRef = useRef(0);
-    const subtitleUrlRef = useRef("");
+    const subtitleTrackRef = useRef(null);
     const seekTimerRef = useRef(null);
     const fallbackRef = useRef(false);
 
@@ -248,8 +231,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const [subtitleTracks, setSubtitleTracks] = useState([]);
     const [selectedAudio, setSelectedAudio] = useState("");
     const [selectedSubtitle, setSelectedSubtitle] = useState("");
-    const [subtitleUrl, setSubtitleUrl] = useState("");
-    const [subtitleLabel, setSubtitleLabel] = useState("");
     const [status, setStatus] = useState("Preparing parallel workers…");
 
     const fallback = useCallback((error) => {
@@ -263,62 +244,100 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         subtitleTaskRef.current += 1;
         subtitleDemuxerRef.current?.destroy?.();
         subtitleDemuxerRef.current = null;
-        const oldUrl = subtitleUrlRef.current;
-        subtitleUrlRef.current = "";
-        setSubtitleUrl("");
-        setSubtitleLabel("");
-        if (oldUrl) URL.revokeObjectURL(oldUrl);
+
+        const activeTrack = subtitleTrackRef.current;
+        if (activeTrack) {
+            activeTrack.mode = "disabled";
+            if (activeTrack.cues) {
+                for (let index = activeTrack.cues.length - 1; index >= 0; index -= 1) {
+                    activeTrack.removeCue(activeTrack.cues[index]);
+                }
+            }
+            subtitleTrackRef.current = null;
+        }
     }, []);
 
     const loadSubtitle = useCallback(async (stream) => {
         clearSubtitle();
         if (!stream) return;
-        if (!TEXT_SUBTITLE_CODECS.has(String(stream.codec_name || "").toLowerCase())) {
-            setStatus("Image-based subtitles are not supported by the browser caption renderer.");
+
+        const video = videoRef.current;
+        if (!video || typeof video.addTextTrack !== "function" || typeof VTTCue === "undefined") {
+            setStatus("This browser cannot render embedded text subtitles.");
             return;
         }
 
         const taskId = subtitleTaskRef.current;
-        setStatus("Extracting subtitle cues in a worker…");
+        const textTrack = video.addTextTrack(
+            "subtitles",
+            trackLabel(stream),
+            languageCode(stream.tags?.language),
+        );
+        textTrack.mode = "showing";
+        subtitleTrackRef.current = textTrack;
+        setStatus("Loading subtitle cues…");
+
+        let demuxer = null;
+        let cueCount = 0;
         try {
             const {WebDemuxer, AVMediaType, AVLogLevel} = await import("web-demuxer");
-            const demuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
+            demuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
             subtitleDemuxerRef.current = demuxer;
             await demuxer.load(source);
             await demuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
-            if (taskId !== subtitleTaskRef.current) {
-                demuxer.destroy();
-                return;
-            }
+            if (taskId !== subtitleTaskRef.current) return;
 
-            const reader = demuxer.readAVPacket(0, 0, AVMediaType.AVMEDIA_TYPE_SUBTITLE, stream.index).getReader();
-            const packets = [];
+            const reader = demuxer.readAVPacket(
+                0,
+                0,
+                AVMediaType.AVMEDIA_TYPE_SUBTITLE,
+                stream.index,
+            ).getReader();
+
             try {
                 while (taskId === subtitleTaskRef.current) {
                     const next = await reader.read();
                     if (next.done) break;
-                    packets.push(next.value);
+
+                    const packet = next.value;
+                    const text = subtitleText(stream, packet);
+                    if (!text) continue;
+
+                    // Web-Demuxer packet timestamps and durations are already in seconds.
+                    const start = Math.max(0, Number(packet.timestamp) || 0);
+                    const duration = Number(packet.duration);
+                    const end = start + (Number.isFinite(duration) && duration > 0 ? duration : 3);
+                    if (end <= start) continue;
+
+                    try {
+                        textTrack.addCue(new VTTCue(start, end, text));
+                        cueCount += 1;
+                    } catch (error) {
+                        console.warn("Skipping an invalid subtitle cue.", error);
+                    }
                 }
             } finally {
                 try { reader.releaseLock?.(); } catch { /* already closed */ }
             }
 
-            demuxer.destroy();
-            if (subtitleDemuxerRef.current === demuxer) subtitleDemuxerRef.current = null;
-            if (taskId !== subtitleTaskRef.current) return;
-
-            const vtt = makeWebVtt(stream, packets);
-            if (!vtt.includes("-->")) throw new Error("No readable cues were found in this subtitle stream.");
-            const url = URL.createObjectURL(new Blob([vtt], {type: "text/vtt"}));
-            subtitleUrlRef.current = url;
-            setSubtitleUrl(url);
-            setSubtitleLabel(trackLabel(stream));
-            setStatus("Parallel worker playback active");
+            if (taskId === subtitleTaskRef.current) {
+                if (cueCount > 0) {
+                    textTrack.mode = "showing";
+                    setStatus("Subtitles active · " + cueCount + " cues");
+                } else {
+                    textTrack.mode = "disabled";
+                    setStatus("No readable subtitle cues were found in this track.");
+                }
+            }
         } catch (error) {
             if (taskId === subtitleTaskRef.current) {
+                textTrack.mode = "disabled";
                 console.warn("Subtitle extraction failed.", error);
                 setStatus(error?.message || "Could not read this subtitle track.");
             }
+        } finally {
+            demuxer?.destroy?.();
+            if (subtitleDemuxerRef.current === demuxer) subtitleDemuxerRef.current = null;
         }
     }, [clearSubtitle, source]);
 
@@ -608,15 +627,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     rotation: videoStream.rotation || 0,
                     flip: Boolean(videoStream.flip),
                 },
-                audio: audioStream ? {
-                    codec: transcodeAudio ? "aac" : audioCodecName(audioStream.codec_name),
-                    inputCodec: audioCodecName(audioStream.codec_name),
-                    mode: transcodeAudio ? "ac3-to-aac" : "passthrough",
-                    trackNumber: audioTrackNumber,
-                    decoderConfig: audioConfig,
-                    languageCode: languageCode(audioStream.tags?.language),
-                    name: audioStream.tags?.title || audioStream.tags?.language || "",
-                } : null,
+                audio: null,
             };
             worker.postMessage(initMessage);
 
@@ -660,6 +671,339 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (!session.cancelled) session.fail(error);
         }
     }, [fallback, source]);
+
+    const startAudioPipeline = useCallback(async (track, startAt = 0, shouldPlay = false) => {
+        const video = videoRef.current;
+        if (!video || !track) return;
+
+        pendingAudioSessionRef.current?.dispose?.();
+
+        const session = {
+            cancelled: false,
+            track,
+            audio: new Audio(),
+            worker: new MediaAudioWorker(),
+            mediaSource: new MediaSource(),
+            sourceBuffer: null,
+            objectUrl: "",
+            queue: [],
+            writingId: null,
+            pendingEnd: false,
+            didStart: false,
+            opened: false,
+            mimeType: "",
+            startAt: Math.max(0, Number(startAt) || 0),
+            trimming: false,
+            listeners: [],
+            rejectStartup: null,
+            dispose: null,
+            fail: null,
+        };
+
+        const audio = session.audio;
+        const worker = session.worker;
+        const mediaSource = session.mediaSource;
+        audio.preload = "auto";
+        audio.volume = 0;
+        audio.muted = video.muted;
+        audio.playbackRate = video.playbackRate;
+
+        session.objectUrl = URL.createObjectURL(mediaSource);
+        session.dispose = () => {
+            if (session.cancelled) return;
+            session.cancelled = true;
+            for (const [name, handler] of session.listeners) {
+                audio.removeEventListener(name, handler);
+            }
+            try { worker.postMessage({type: "cancel"}); } catch { /* worker already closed */ }
+            worker.terminate();
+            audio.pause();
+            audio.removeAttribute("src");
+            audio.load();
+            if (session.objectUrl) URL.revokeObjectURL(session.objectUrl);
+        };
+
+        let resolveOpen;
+        let rejectOpen;
+        const sourceOpen = new Promise((resolve, reject) => {
+            resolveOpen = resolve;
+            rejectOpen = reject;
+        });
+        let resolveStarted;
+        let rejectStarted;
+        const workerStarted = new Promise((resolve, reject) => {
+            resolveStarted = resolve;
+            rejectStarted = reject;
+        });
+        let resolveReady;
+        let rejectReady;
+        const workerReady = new Promise((resolve, reject) => {
+            resolveReady = resolve;
+            rejectReady = reject;
+        });
+        let resolveBuffered;
+        let rejectBuffered;
+        const firstBuffered = new Promise((resolve, reject) => {
+            resolveBuffered = resolve;
+            rejectBuffered = reject;
+        });
+
+        session.rejectStartup = (error) => {
+            rejectOpen(error);
+            rejectStarted(error);
+            rejectReady(error);
+            rejectBuffered(error);
+        };
+
+        const finishIfReady = () => {
+            const sourceBuffer = session.sourceBuffer;
+            if (!session.pendingEnd || !sourceBuffer || sourceBuffer.updating ||
+                session.queue.length || session.writingId !== null) return;
+            if (mediaSource.readyState === "open") {
+                try { mediaSource.endOfStream(); } catch { /* already ended */ }
+            }
+        };
+
+        const appendNext = () => {
+            const sourceBuffer = session.sourceBuffer;
+            if (session.cancelled || !sourceBuffer || sourceBuffer.updating || session.writingId !== null) return;
+
+            if (session.didStart && sourceBuffer.buffered.length) {
+                const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                const playbackTime = Math.max(audio.currentTime || 0, session.startAt);
+                if (end - playbackTime >= MAX_FORWARD_BUFFER_SECONDS) return;
+            }
+
+            const next = session.queue.shift();
+            if (!next) {
+                finishIfReady();
+                return;
+            }
+
+            try {
+                session.writingId = next.id;
+                sourceBuffer.appendBuffer(next.buffer);
+            } catch (error) {
+                session.writingId = null;
+                session.fail(error);
+            }
+        };
+
+        const trimOldBuffer = () => {
+            const sourceBuffer = session.sourceBuffer;
+            const playbackTime = audio.currentTime || 0;
+            if (!session.didStart || !sourceBuffer || sourceBuffer.updating ||
+                session.trimming || !sourceBuffer.buffered.length || playbackTime < 45) return;
+
+            const start = sourceBuffer.buffered.start(0);
+            const end = Math.min(sourceBuffer.buffered.end(0), playbackTime - 30);
+            if (end <= start + 1) return;
+
+            try {
+                session.trimming = true;
+                sourceBuffer.remove(start, end);
+            } catch {
+                session.trimming = false;
+            }
+        };
+
+        const createSourceBuffer = () => {
+            if (session.cancelled || !session.opened || !session.mimeType || session.sourceBuffer) return;
+
+            if (!MediaSource.isTypeSupported(session.mimeType)) {
+                const error = new Error(
+                    "The browser cannot play the selected audio codec (" + session.mimeType + ").",
+                );
+                session.fail(error);
+                return;
+            }
+
+            try {
+                const sourceBuffer = mediaSource.addSourceBuffer(session.mimeType);
+                sourceBuffer.mode = "segments";
+                session.sourceBuffer = sourceBuffer;
+
+                const duration = Number(track.stream.duration);
+                if (Number.isFinite(duration) && duration > 0) {
+                    try { mediaSource.duration = duration; } catch { /* duration can be inferred from fragments */ }
+                }
+
+                sourceBuffer.addEventListener("updateend", () => {
+                    if (session.cancelled) return;
+
+                    if (session.writingId !== null) {
+                        worker.postMessage({type: "write-ack", id: session.writingId});
+                        session.writingId = null;
+                    }
+                    if (session.trimming) session.trimming = false;
+
+                    if (!session.didStart && sourceBuffer.buffered.length) {
+                        session.didStart = true;
+                        try { audio.currentTime = session.startAt; } catch { /* metadata may still be loading */ }
+                        resolveBuffered();
+                    }
+
+                    trimOldBuffer();
+                    appendNext();
+                    finishIfReady();
+                });
+
+                sourceBuffer.addEventListener("error", () => {
+                    session.fail(new Error("The browser rejected the selected audio media fragment."));
+                });
+
+                resolveReady();
+                appendNext();
+            } catch (error) {
+                session.fail(error);
+            }
+        };
+
+        mediaSource.addEventListener("sourceopen", () => {
+            if (session.cancelled) return;
+            session.opened = true;
+            resolveOpen();
+            createSourceBuffer();
+        }, {once: true});
+        mediaSource.addEventListener("error", () => {
+            session.fail(new Error("The audio MediaSource failed to open."));
+        }, {once: true});
+
+        worker.addEventListener("message", (event) => {
+            const message = event.data;
+            if (session.cancelled) return;
+
+            if (message.type === "started") {
+                resolveStarted();
+            } else if (message.type === "ready") {
+                session.mimeType = message.mimeType;
+                createSourceBuffer();
+            } else if (message.type === "data") {
+                session.queue.push({id: message.id, buffer: message.buffer});
+                appendNext();
+            } else if (message.type === "done") {
+                session.pendingEnd = true;
+                finishIfReady();
+            } else if (message.type === "error") {
+                session.fail(new Error(message.message || "Audio mux worker failed."));
+            }
+        });
+        worker.addEventListener("error", (event) => {
+            session.fail(new Error(event.message || "Audio mux worker crashed."));
+        });
+
+        const wakeAppend = () => appendNext();
+        audio.addEventListener("timeupdate", wakeAppend);
+        audio.addEventListener("playing", wakeAppend);
+        session.listeners.push(["timeupdate", wakeAppend], ["playing", wakeAppend]);
+
+        session.fail = (error) => {
+            if (session.cancelled) return;
+            session.rejectStartup?.(error);
+            console.error("Audio track pipeline failed.", error);
+            session.dispose();
+            if (pendingAudioSessionRef.current === session) pendingAudioSessionRef.current = null;
+            if (!audioSessionRef.current) fallback(error);
+            else setStatus(error?.message || "Could not switch to the selected audio track.");
+        };
+
+        pendingAudioSessionRef.current = session;
+        audio.src = session.objectUrl;
+        audio.load();
+
+        const audioCodec = audioCodecName(track.stream.codec_name);
+        const transcodeAudio = needsAudioTranscoding(track.stream.codec_name);
+        const orderedAudioStreams = audioTracksRef.current
+            .map((item) => item.stream)
+            .sort((a, b) => a.index - b.index);
+        const audioTrackNumber = orderedAudioStreams.findIndex((item) => item.index === track.index) + 1;
+
+        if (!audioCodec || audioTrackNumber < 1) {
+            session.fail(new Error("The selected audio stream cannot be mapped to a supported audio track."));
+            return;
+        }
+
+        const audioConfig = transcodeAudio ? null : {
+            codec: audioDecoderCodecString(track.stream, audioCodec, {
+                codec: track.stream.codec_string,
+                description: track.stream.extradata,
+            }),
+            sampleRate: Number(track.stream.sample_rate),
+            numberOfChannels: Number(track.stream.channels),
+            description: track.stream.extradata,
+        };
+
+        try {
+            worker.postMessage({
+                type: "init",
+                source,
+                startAt: session.startAt,
+                audio: {
+                    trackNumber: audioTrackNumber,
+                    codec: transcodeAudio ? "aac" : audioCodec,
+                    inputCodec: audioCodec,
+                    mode: transcodeAudio ? "ac3-to-aac" : "passthrough",
+                    decoderConfig: audioConfig,
+                    languageCode: languageCode(track.stream.tags?.language),
+                    name: track.stream.tags?.title || track.stream.tags?.language || "",
+                },
+            });
+
+            await Promise.all([sourceOpen, workerStarted, workerReady, firstBuffered]);
+            if (session.cancelled || pendingAudioSessionRef.current !== session) return;
+
+            try { audio.currentTime = session.startAt; } catch { /* first range establishes the timeline */ }
+            audio.muted = video.muted;
+            audio.playbackRate = video.playbackRate;
+
+            const previous = audioSessionRef.current;
+            if (shouldPlay && !video.paused) {
+                audio.volume = 0;
+                await audio.play();
+                if (session.cancelled || pendingAudioSessionRef.current !== session) return;
+            } else {
+                audio.pause();
+                audio.volume = video.volume;
+            }
+
+            audioSessionRef.current = session;
+            pendingAudioSessionRef.current = null;
+
+            if (shouldPlay && !video.paused) {
+                const targetVolume = video.muted ? 0 : video.volume;
+                const fadeStart = performance.now();
+                const fadeDuration = 120;
+                const fade = (now) => {
+                    if (session.cancelled) return;
+                    const progress = Math.min(1, (now - fadeStart) / fadeDuration);
+                    audio.volume = targetVolume * progress;
+                    if (previous && !previous.cancelled) {
+                        previous.audio.volume = targetVolume * (1 - progress);
+                    }
+                    if (progress < 1) {
+                        requestAnimationFrame(fade);
+                    } else {
+                        previous?.dispose?.();
+                    }
+                };
+                requestAnimationFrame(fade);
+            } else {
+                previous?.dispose?.();
+            }
+
+            setStatus("Audio track active · video stream uninterrupted");
+        } catch (error) {
+            if (!session.cancelled) {
+                session.fail(error);
+                const activeId = audioSessionRef.current?.track?.id || "";
+                if (selectedAudioRef.current === track.id) {
+                    selectedAudioRef.current = activeId;
+                    setSelectedAudio(activeId);
+                }
+            }
+        }
+    }, [fallback, source]);
+
 
     useEffect(() => {
         let cancelled = false;
@@ -738,15 +1082,16 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 selectedAudioRef.current = audioId;
                 setSelectedAudio(audioId);
 
-                await startPipeline(defaultAudio?.index ?? null, 0, false, metadataDemuxer, streams);
+                await startPipeline(null, 0, false, metadataDemuxer, streams);
                 metadataDemuxer = null;
+                if (defaultAudio) void startAudioPipeline(defaultAudio, 0, false);
             } catch (error) {
                 if (!cancelled) fallback(error instanceof Error ? error : new Error(String(error)));
             }
         })();
 
         restartRef.current = (audioIndex, time, shouldPlay) => {
-            void startPipeline(audioIndex, time, shouldPlay);
+            void startPipeline(null, time, shouldPlay);
         };
 
         return () => {
@@ -761,12 +1106,24 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
     const onAudioChange = (event) => {
         const track = audioTracksRef.current.find((item) => item.id === event.target.value);
+        if (!track) {
+            pendingAudioSessionRef.current?.dispose?.();
+            pendingAudioSessionRef.current = null;
+            audioSessionRef.current?.dispose?.();
+            audioSessionRef.current = null;
+            selectedAudioRef.current = "";
+            setSelectedAudio("");
+            setStatus("Audio off");
+            return;
+        }
+
         const video = videoRef.current;
         const time = video?.currentTime || 0;
         const wasPlaying = Boolean(video && !video.paused);
-        selectedAudioRef.current = track?.id || "";
-        setSelectedAudio(track?.id || "");
-        restartRef.current?.(track?.index ?? null, time, wasPlaying);
+        selectedAudioRef.current = track.id;
+        setSelectedAudio(track.id);
+        setStatus("Preparing audio track · video keeps playing");
+        void startAudioPipeline(track, time, wasPlaying);
     };
 
     const onSubtitleChange = (event) => {
@@ -784,29 +1141,104 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     useEffect(() => {
         const video = videoRef.current;
         if (!video) return undefined;
+
+        const syncAudio = () => {
+            const session = audioSessionRef.current;
+            if (!session || session.cancelled) return;
+            const audio = session.audio;
+
+            audio.muted = video.muted;
+            audio.volume = video.muted ? 0 : video.volume;
+            audio.playbackRate = video.playbackRate;
+
+            const drift = Math.abs(audio.currentTime - video.currentTime);
+            if (drift > 0.35 && video.readyState >= 2) {
+                try { audio.currentTime = video.currentTime; } catch { /* audio stream is buffering */ }
+            }
+
+            if (video.paused || video.ended) {
+                audio.pause();
+            } else if (audio.paused && audio.readyState >= 2) {
+                audio.play().catch((error) => {
+                    console.warn("Could not resume the selected audio track.", error);
+                });
+            }
+        };
+
+        const onVolumeChange = () => {
+            const sessions = [audioSessionRef.current, pendingAudioSessionRef.current];
+            for (const session of sessions) {
+                if (!session || session.cancelled) continue;
+                session.audio.muted = video.muted;
+                session.audio.volume = video.muted ? 0 : video.volume;
+            }
+        };
+
+        video.addEventListener("play", syncAudio);
+        video.addEventListener("playing", syncAudio);
+        video.addEventListener("pause", syncAudio);
+        video.addEventListener("timeupdate", syncAudio);
+        video.addEventListener("ratechange", syncAudio);
+        video.addEventListener("volumechange", onVolumeChange);
+        if (!active) video.pause();
+
+        return () => {
+            video.removeEventListener("play", syncAudio);
+            video.removeEventListener("playing", syncAudio);
+            video.removeEventListener("pause", syncAudio);
+            video.removeEventListener("timeupdate", syncAudio);
+            video.removeEventListener("ratechange", syncAudio);
+            video.removeEventListener("volumechange", onVolumeChange);
+        };
+    }, [active]);
+
+    useEffect(() => {
+        const video = videoRef.current;
+        if (!video) return undefined;
         if (!active) video.pause();
 
         const onSeeking = () => {
             const session = sessionRef.current;
             if (!session || session.cancelled || session.programmaticSeek) return;
             const time = video.currentTime;
+            const wasPlaying = !video.paused;
+
+            const activeAudio = audioSessionRef.current;
+            if (activeAudio && !activeAudio.cancelled) {
+                let audioBuffered = false;
+                for (let index = 0; index < activeAudio.audio.buffered.length; index += 1) {
+                    if (time >= activeAudio.audio.buffered.start(index) - 0.15 &&
+                        time <= activeAudio.audio.buffered.end(index) + 0.15) {
+                        audioBuffered = true;
+                        break;
+                    }
+                }
+
+                if (audioBuffered) {
+                    try { activeAudio.audio.currentTime = time; } catch { /* browser is updating the timeline */ }
+                } else {
+                    const selectedTrack = audioTracksRef.current.find((item) => item.id === selectedAudioRef.current);
+                    if (selectedTrack) void startAudioPipeline(selectedTrack, time, wasPlaying);
+                }
+            }
+
             for (let index = 0; index < video.buffered.length; index += 1) {
                 if (time >= video.buffered.start(index) - 0.15 && time <= video.buffered.end(index) + 0.15) return;
             }
             if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
-            const wasPlaying = !video.paused;
             seekTimerRef.current = window.setTimeout(() => {
-                restartRef.current?.(selectedAudioRef.current, time, wasPlaying);
+                restartRef.current?.(null, time, wasPlaying);
             }, 120);
         };
 
         video.addEventListener("seeking", onSeeking);
         return () => video.removeEventListener("seeking", onSeeking);
-    }, [active]);
+    }, [active, startAudioPipeline]);
 
     useEffect(() => () => {
         if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
-        if (subtitleUrlRef.current) URL.revokeObjectURL(subtitleUrlRef.current);
+        pendingAudioSessionRef.current?.dispose?.();
+        audioSessionRef.current?.dispose?.();
     }, []);
 
     return (
@@ -844,19 +1276,6 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             </div>
 
             <video ref={videoRef} controls playsInline preload="auto" className="h-full min-h-[240px] w-full bg-black object-contain" aria-label={title || "Video"}>
-                {subtitleUrl && (
-                    <track
-                        key={subtitleUrl}
-                        kind="subtitles"
-                        src={subtitleUrl}
-                        srcLang="und"
-                        label={subtitleLabel || "Embedded subtitles"}
-                        default
-                        onLoad={(event) => {
-                            try { event.currentTarget.track.mode = "showing"; } catch { /* browser has not attached it */ }
-                        }}
-                    />
-                )}
             </video>
 
             <div className="pointer-events-none absolute bottom-14 left-3 rounded bg-black/65 px-2 py-1 text-[11px] text-white/75">{status}</div>

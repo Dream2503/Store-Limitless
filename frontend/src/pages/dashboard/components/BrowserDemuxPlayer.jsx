@@ -472,7 +472,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             programmaticSeekTarget: null,
             targetBuffered: false,
             quotaRecoveryAttempts: 0,
-            quotaRestartScheduled: false,
+            forwardBufferSeconds: MAX_FORWARD_BUFFER_SECONDS,
             trimming: false,
             startAt: Math.max(0, Number(startAt) || 0),
             shouldPlay: Boolean(shouldPlay),

@@ -647,26 +647,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     if (error?.name === "QuotaExceededError") {
                         session.queue.unshift(next);
                         session.quotaRecoveryAttempts += 1;
-                        setStatus("Managing the video buffer · playback continues");
+                        session.forwardBufferSeconds = Math.max(0.5, session.forwardBufferSeconds / 2);
+                        setStatus("Reducing the video buffer · playback continues");
 
                         if (trimOldBuffer(true)) return;
-                        if (!session.quotaRestartScheduled) {
-                            session.quotaRestartScheduled = true;
-                            quotaRestartAttemptsRef.current += 1;
-                            if (quotaRestartAttemptsRef.current > 2) {
-                                session.fail(new Error(
-                                    "The browser repeatedly exhausted its video buffer quota, even after rebuilding the playback window.",
-                                ));
-                                return;
-                            }
-
-                            const target = Math.max(0, Number(video.currentTime) || session.startAt);
-                            const wasPlaying = !video.paused;
-                            window.setTimeout(() => {
-                                if (session.cancelled || sessionRef.current !== session) return;
-                                if (restartRef.current) restartRef.current(null, target, wasPlaying);
-                                else session.fail(error);
-                            }, 0);
+                        if (session.quotaRecoveryAttempts >= 4 &&
+                            session.forwardBufferSeconds <= 0.5 &&
+                            !sb.buffered.length) {
+                            session.fail(new Error("A video fragment is larger than the available browser buffer."));
                         }
                         return;
                     }

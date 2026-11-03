@@ -630,7 +630,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
                 if (session.didStart && sb.buffered.length) {
                     const end = sb.buffered.end(sb.buffered.length - 1);
-                    if (end - video.currentTime >= MAX_FORWARD_BUFFER_SECONDS) return;
+                    if (end - video.currentTime >= session.forwardBufferSeconds) return;
                 }
 
                 const next = session.queue.shift();

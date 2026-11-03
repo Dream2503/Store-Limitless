@@ -261,6 +261,10 @@ function subtitleText(stream, packet) {
             const fields = dialogue[1].split(",");
             if (fields.length >= 10) text = fields.slice(9).join(",");
         }
+        } else {
+            const fields = text.split(",");
+            if (fields.length >= 10) text = fields.slice(9).join(",");
+        }
         text = text.replace(/\{[^}]*\}/g, "").replace(/\\[Nn]/g, "\n").replace(/\\h/g, " ");
     } else if (["srt", "subrip", "webvtt"].includes(codec)) {
         const lines = text.replace(/^WEBVTT[^\r\n]*\r?\n/i, "").split(/\r?\n/);
@@ -342,6 +346,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const [subtitleUrl, setSubtitleUrl] = useState("");
     const [subtitleLabel, setSubtitleLabel] = useState("");
     const [subtitleLanguage, setSubtitleLanguage] = useState("und");
+    const [subtitleCues, setSubtitleCues] = useState([]);
+    const [visibleSubtitle, setVisibleSubtitle] = useState("");
     const [status, setStatus] = useState("Preparing parallel workers…");
 
     const fallback = useCallback((error) => {
@@ -359,6 +365,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         setSubtitleUrl("");
         setSubtitleLabel("");
         setSubtitleLanguage("und");
+        setSubtitleCues([]);
+        setVisibleSubtitle("");
     }, []);
 
     useEffect(() => {
@@ -389,10 +397,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             currentTrackElement.default = true;
             currentTrackElement.addEventListener("load", () => {
                 if (trackElement !== currentTrackElement) return;
-                currentTrackElement.track.mode = "showing";
+                currentTrackElement.track.mode = "disabled";
                 setStatus(
-                    "Native WebVTT renderer loaded · " +
-                    (currentTrackElement.track.cues?.length || 0) + " cues",
+                    "Subtitle data loaded · " +
+                    (currentTrackElement.track.cues?.length || 0) + " cues · in-player renderer active",
                 );
             }, {once: true});
             currentTrackElement.addEventListener("error", () => {
@@ -404,14 +412,14 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 });
             }, {once: true});
             video.appendChild(currentTrackElement);
-            try { currentTrackElement.track.mode = "showing"; } catch { /* activated by load event */ }
+            try { currentTrackElement.track.mode = "disabled"; } catch { /* activated by load event */ }
         };
 
         attach();
         const onLoadStart = () => {
             if (!trackElement || trackElement.parentElement !== video) attach();
             else {
-                try { trackElement.track.mode = "showing"; } catch { /* track may still be parsing */ }
+                try { trackElement.track.mode = "disabled"; } catch { /* track may still be parsing */ }
             }
         };
         video.addEventListener("loadstart", onLoadStart);
@@ -498,6 +506,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const url = URL.createObjectURL(new Blob([vtt], {
                 type: "text/vtt;charset=utf-8",
             }));
+            setSubtitleCues(cues);
             setSubtitleLabel(trackLabel(stream));
             setSubtitleLanguage(languageCode(stream.tags?.language));
             setSubtitleUrl(url);
@@ -514,6 +523,43 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (subtitleDemuxerRef.current === demuxer) subtitleDemuxerRef.current = null;
         }
     }, [clearSubtitle, source]);
+
+    useEffect(() => {
+        const video = videoRef.current;
+        if (!video || !subtitleCues.length) {
+            setVisibleSubtitle("");
+            return undefined;
+        }
+
+        const updateVisibleCue = () => {
+            const time = Number(video.currentTime) || 0;
+            let low = 0;
+            let high = subtitleCues.length - 1;
+            let candidate = -1;
+
+            while (low <= high) {
+                const middle = (low + high) >> 1;
+                if (subtitleCues[middle].start <= time) {
+                    candidate = middle;
+                    low = middle + 1;
+                } else {
+                    high = middle - 1;
+                }
+            }
+
+            const cue = candidate >= 0 ? subtitleCues[candidate] : null;
+            const nextText = cue && time < cue.end ? cue.text : "";
+            setVisibleSubtitle((current) => current === nextText ? current : nextText);
+        };
+
+        const events = ["timeupdate", "seeking", "seeked", "loadedmetadata", "durationchange"];
+        for (const eventName of events) video.addEventListener(eventName, updateVisibleCue);
+        updateVisibleCue();
+
+        return () => {
+            for (const eventName of events) video.removeEventListener(eventName, updateVisibleCue);
+        };
+    }, [subtitleCues]);
 
     const startPipeline = useCallback(async (
         audioIndex,
@@ -1343,6 +1389,25 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         }
     }, [fallback, source]);
 
+    const warmAudioTracks = useCallback((time, selectedId) => {
+        const target = Math.max(0, Number(time) || 0);
+        for (const track of audioTracksRef.current) {
+            if (!track.supported || track.id === selectedId) continue;
+
+            const existing = audioSessionsRef.current.get(track.id);
+            if (existing && !existing.cancelled && isMediaTimeBuffered(existing.audio, target)) continue;
+            existing?.dispose?.();
+
+            const pending = pendingAudioSessionsRef.current.get(track.id);
+            if (pending && !pending.cancelled && Math.abs(pending.requestedTime - target) < 0.5) continue;
+            pending?.dispose?.();
+
+            void startAudioPipeline(track, target, false, false).catch((error) => {
+                console.warn("Could not warm alternate audio track " + track.label, error);
+            });
+        }
+    }, [startAudioPipeline]);
+
 
     useEffect(() => {
         let cancelled = false;
@@ -1429,6 +1494,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 metadataDemuxer = null;
                 if (videoResult !== false && (!defaultAudio || audioResult)) {
                     syncPendingRef.current = false;
+                    warmAudioTracks(0, audioId);
                 } else if (defaultAudio) {
                     setStatus("Default audio is still unavailable. Playback remains paused.");
                 }
@@ -1533,6 +1599,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     }
 
                     if (generation === seekGeneration) {
+                        warmAudioTracks(target, selectedTrack?.id || "");
                         setStatus(shouldPlay
                             ? "Audio and video synchronized · playback resumed"
                             : "Audio and video ready · paused");
@@ -1566,7 +1633,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             metadataDemuxer?.destroy?.();
             clearSubtitle();
         };
-    }, [clearSubtitle, fallback, source, startAudioPipeline, startPipeline]);
+    }, [clearSubtitle, fallback, source, startAudioPipeline, startPipeline, warmAudioTracks]);
 
     const releasePendingAudioGate = async (readySession, time, shouldPlay) => {
         const video = videoRef.current;
@@ -1741,7 +1808,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 audio.muted = video.muted || id !== selectedAudioRef.current;
                 audio.playbackRate = video.playbackRate;
 
-                if (!shouldPlay || id !== selectedAudioRef.current) {
+                if (!shouldPlay) {
                     audio.pause();
                     continue;
                 }
@@ -1804,12 +1871,19 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             const selectedId = selectedAudioRef.current;
             const selectedTrack = audioTracksRef.current.find((item) => item.id === selectedId);
+            for (const [id, item] of audioSessionsRef.current) {
+                if (id !== selectedId) item.dispose?.();
+            }
+            for (const [id, item] of pendingAudioSessionsRef.current) {
+                if (id !== selectedId) item.dispose?.();
+            }
             if (!selectedTrack?.supported) {
                 video.currentTime = time;
                 await waitForMediaTimeReady(video, time);
                 syncPendingRef.current = false;
                 resumeAfterSyncRef.current = false;
                 if (wasPlaying) await video.play();
+                warmAudioTracks(time, selectedId);
                 return;
             }
 
@@ -1869,6 +1943,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             } else {
                 setStatus("Audio and video ready · paused");
             }
+            warmAudioTracks(time, selectedId);
         };
 
         const onSeeking = () => {
@@ -1918,7 +1993,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             video.removeEventListener("seeked", onSeeked);
             if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
         };
-    }, [active, startAudioPipeline]);
+    }, [active, startAudioPipeline, warmAudioTracks]);
 
     useEffect(() => () => {
         if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
@@ -1964,6 +2039,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             </div>
 
             <video ref={videoRef} controls playsInline preload="auto" className="h-full min-h-[240px] w-full bg-black object-contain" aria-label={title || "Video"} />
+
+            {visibleSubtitle && (
+                <div className="pointer-events-none absolute bottom-16 left-1/2 z-30 max-w-[88%] -translate-x-1/2 rounded-md bg-black/80 px-3 py-2 text-center text-lg font-semibold leading-snug text-white shadow-lg">
+                    <span className="whitespace-pre-line" style={{textShadow: "0 1px 2px #000, 0 0 4px #000"}}>{visibleSubtitle}</span>
+                </div>
+            )}
 
             <div className="pointer-events-none absolute bottom-14 left-3 rounded bg-black/65 px-2 py-1 text-[11px] text-white/75">{status}</div>
 

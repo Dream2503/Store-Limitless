@@ -83,6 +83,10 @@ function audioCodecName(codec) {
     return AUDIO_SOURCE_CODECS[String(codec || "").toLowerCase()] || null;
 }
 
+function needsAudioTranscoding(codec) {
+    return ["ac3", "eac3"].includes(String(codec || "").toLowerCase());
+}
+
 function aacDecoderCodecString(stream, config) {
     const candidates = [config?.codec, stream?.codec_string]
         .map((value) => String(value || "").trim())
@@ -412,6 +416,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             let audioStream = null;
             let audioDemuxer = null;
+            let transcodeAudio = false;
+            let audioTrackNumber = null;
             if (audioIndex !== null && audioIndex !== "") {
                 audioStream = (streams || []).find((item) =>
                     item.codec_type_string === "audio" && item.index === Number(audioIndex),
@@ -421,21 +427,34 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     throw new Error("Unsupported audio codec: " + audioStream.codec_name);
                 }
 
-                audioDemuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
-                session.demuxers.push(audioDemuxer);
-                await audioDemuxer.load(source);
-                await audioDemuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
+                transcodeAudio = needsAudioTranscoding(audioStream.codec_name);
+                if (transcodeAudio) {
+                    const orderedAudioStreams = (streams || [])
+                        .filter((item) => item.codec_type_string === "audio")
+                        .sort((a, b) => a.index - b.index);
+                    audioTrackNumber = orderedAudioStreams.findIndex((item) => item.index === audioStream.index) + 1;
+                    if (audioTrackNumber < 1) {
+                        throw new Error("Could not map the selected AC-3 audio stream to its Matroska track number.");
+                    }
+                } else {
+                    audioDemuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
+                    session.demuxers.push(audioDemuxer);
+                    await audioDemuxer.load(source);
+                    await audioDemuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
+                }
             }
             if (session.cancelled) return;
 
             const videoConfig = decoderConfig(videoDemuxer, videoStream, "video");
-            const audioConfig = audioStream ? decoderConfig(audioDemuxer, audioStream, "audio") : null;
+            const audioConfig = audioStream && !transcodeAudio
+                ? decoderConfig(audioDemuxer, audioStream, "audio")
+                : null;
 
-            // AC-3/E-AC-3 sample entries need the first encoded packet as
-            // track-level priming metadata before the Output is started.
+            // Encoded passthrough tracks need their first packet for sample-entry
+            // metadata. AC-3/E-AC-3 are decoded to PCM and re-encoded as AAC.
             let audioReader = null;
             let firstAudioPacket = null;
-            if (audioStream) {
+            if (audioStream && !transcodeAudio) {
                 audioReader = audioDemuxer.readAVPacket(
                     session.startAt,
                     0,
@@ -627,18 +646,27 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     flip: Boolean(videoStream.flip),
                 },
                 audio: audioStream ? {
-                    codec: audioCodecName(audioStream.codec_name),
+                    codec: transcodeAudio ? "aac" : audioCodecName(audioStream.codec_name),
+                    inputCodec: audioCodecName(audioStream.codec_name),
+                    mode: transcodeAudio ? "ac3-to-aac" : "passthrough",
+                    source: transcodeAudio ? source : null,
+                    trackNumber: transcodeAudio ? audioTrackNumber : null,
+                    startAt: session.startAt,
                     decoderConfig: audioConfig,
                     languageCode: languageCode(audioStream.tags?.language),
                     name: audioStream.tags?.title || audioStream.tags?.language || "",
-                    primingPacket: {
-                        buffer: firstAudioPacket.data.slice().buffer,
-                        timestamp: firstAudioPacket.timestamp,
-                        duration: firstAudioPacket.duration,
-                    },
+                    ...(!transcodeAudio ? {
+                        primingPacket: {
+                            buffer: firstAudioPacket.data.slice().buffer,
+                            timestamp: firstAudioPacket.timestamp,
+                            duration: firstAudioPacket.duration,
+                        },
+                    } : {}),
                 } : null,
             };
-            const initTransfers = audioStream ? [initMessage.audio.primingPacket.buffer] : [];
+            const initTransfers = audioStream && !transcodeAudio
+                ? [initMessage.audio.primingPacket.buffer]
+                : [];
             worker.postMessage(initMessage, initTransfers);
 
             const onVideoError = () => {
@@ -764,7 +792,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             };
 
             const videoPump = pump(videoDemuxer, "video", videoStream.index, AVMediaType.AVMEDIA_TYPE_VIDEO);
-            const audioPump = audioStream
+            const audioPump = audioStream && !transcodeAudio
                 ? pump(
                     audioDemuxer,
                     "audio",
@@ -788,7 +816,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             session.listeners.push(["timeupdate", wakeAppend], ["playing", wakeAppend]);
 
             setStatus(audioStream
-                ? `Video/audio demux workers active · up to ${MAX_IN_FLIGHT_BATCHES} in-flight batches per track`
+                ? transcodeAudio
+                    ? "AC-3 audio decoding and AAC encoding active · video demux worker active"
+                    : `Video/audio demux workers active · up to ${MAX_IN_FLIGHT_BATCHES} in-flight batches per track`
                 : `Video demux worker active · up to ${MAX_IN_FLIGHT_BATCHES} in-flight batches`);
         } catch (error) {
             if (!session.cancelled) session.fail(error);

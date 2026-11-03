@@ -1671,52 +1671,89 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
         let pendingSeek = null;
 
-        const finishSeek = (time, wasPlaying) => {
+        const finishSeek = async (time, wasPlaying) => {
             const session = sessionRef.current;
             if (!session || session.cancelled || session.programmaticSeek) return;
 
             if (!isMediaTimeBuffered(video, time)) {
-                if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
-                seekTimerRef.current = window.setTimeout(() => {
-                    restartRef.current?.(null, time, wasPlaying);
-                }, 0);
+                restartRef.current?.(null, time, wasPlaying);
                 return;
             }
 
             const selectedId = selectedAudioRef.current;
             const selectedTrack = audioTracksRef.current.find((item) => item.id === selectedId);
-            const selectedSession = audioSessionsRef.current.get(selectedId);
-
-            if (selectedTrack?.supported &&
-                (!selectedSession || selectedSession.cancelled ||
-                    !isMediaTimeBuffered(selectedSession.audio, time))) {
-                if (selectedSession && !selectedSession.cancelled) {
-                    selectedSession.audio.muted = true;
-                    selectedSession.dispose?.();
-                }
-                requestedAudioRef.current = selectedTrack.id;
-                void startAudioPipeline(selectedTrack, time, wasPlaying, true);
+            if (!selectedTrack?.supported) {
+                video.currentTime = time;
+                await waitForMediaTimeReady(video, time);
+                if (wasPlaying) await video.play();
                 return;
             }
 
-            if (selectedSession && !selectedSession.cancelled) {
-                try {
-                    selectedSession.audio.currentTime = time;
-                    selectedSession.wakeAppend?.();
-                    if (wasPlaying && selectedSession.audio.paused &&
-                        selectedSession.audio.readyState >= 2) {
-                        selectedSession.audio.play().catch(() => {});
-                    }
-                } catch {
-                    // The audio SourceBuffer may be updating; syncAudio retries.
+            let selectedSession = audioSessionsRef.current.get(selectedId);
+            if (!selectedSession || selectedSession.cancelled ||
+                !isMediaTimeBuffered(selectedSession.audio, time)) {
+                selectedSession?.dispose?.();
+                setStatus("Seeking · loading selected audio at the new position…");
+                requestedAudioRef.current = selectedId;
+                selectedSession = await startAudioPipeline(selectedTrack, time, false, true);
+            }
+
+            if (!selectedSession || selectedSession.cancelled) {
+                video.pause();
+                setStatus("Audio could not be prepared at this position. Playback remains paused.");
+                return;
+            }
+
+            video.pause();
+            selectedSession.audio.pause();
+            video.currentTime = time;
+            selectedSession.audio.currentTime = time;
+            selectedSession.audio.volume = video.volume;
+            selectedSession.audio.playbackRate = video.playbackRate;
+            selectedSession.audio.muted = video.muted;
+
+            await Promise.all([
+                waitForMediaTimeReady(video, time),
+                waitForMediaTimeReady(selectedSession.audio, time),
+            ]);
+            if (selectedSession.cancelled || sessionRef.current !== session) return;
+
+            selectedAudioRef.current = selectedId;
+            requestedAudioRef.current = selectedId;
+            audioSessionRef.current = selectedSession;
+            for (const [id, item] of audioSessionsRef.current) {
+                item.audio.muted = video.muted || id !== selectedId;
+                item.audio.volume = video.volume;
+                item.audio.playbackRate = video.playbackRate;
+            }
+
+            if (wasPlaying) {
+                setStatus("Synchronizing audio and video…");
+                const starts = await Promise.allSettled([
+                    selectedSession.audio.play(),
+                    video.play(),
+                ]);
+                if (starts.some((result) => result.status === "rejected")) {
+                    video.pause();
+                    selectedSession.audio.pause();
+                    setStatus("A/V is buffered, but the browser blocked synchronized playback. Press play to retry.");
+                    return;
                 }
+                setStatus("Audio and video synchronized · playback resumed");
+            } else {
+                setStatus("Audio and video ready · paused");
             }
         };
 
         const onSeeking = () => {
             const session = sessionRef.current;
             if (!session || session.cancelled || session.programmaticSeek) return;
-            if (!pendingSeek) pendingSeek = {wasPlaying: !video.paused};
+            if (!pendingSeek) {
+                pendingSeek = {wasPlaying: !video.paused};
+                video.pause();
+                for (const item of audioSessionsRef.current.values()) item.audio.pause();
+                for (const item of pendingAudioSessionsRef.current.values()) item.audio.pause();
+            }
 
             if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
             seekTimerRef.current = window.setTimeout(() => {
@@ -1727,7 +1764,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                     pendingSeek = null;
                     restartRef.current?.(null, time, wasPlaying);
                 }
-            }, 180);
+            }, 220);
         };
 
         const onSeeked = () => {
@@ -1737,7 +1774,12 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const {wasPlaying} = pendingSeek;
             pendingSeek = null;
             const time = Math.max(0, Number(video.currentTime) || 0);
-            finishSeek(time, wasPlaying);
+            void finishSeek(time, wasPlaying).catch((error) => {
+                video.pause();
+                for (const item of audioSessionsRef.current.values()) item.audio.pause();
+                console.error("Could not synchronize playback after seeking.", error);
+                setStatus(error?.message || "Could not synchronize audio and video after seeking.");
+            });
         };
 
         video.addEventListener("seeking", onSeeking);

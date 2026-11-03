@@ -26,11 +26,22 @@ const AUDIO_SOURCE_CODECS = {
     opus: "opus",
     vorbis: "vorbis",
     flac: "flac",
+    ac3: "ac3",
+    eac3: "eac3",
+    dts: "dts",
+    truehd: "truehd",
     pcm_u8: "pcm-u8",
+    pcm_s8: "pcm-s8",
     pcm_s16le: "pcm-s16",
+    pcm_s16be: "pcm-s16be",
     pcm_s24le: "pcm-s24",
+    pcm_s24be: "pcm-s24be",
     pcm_s32le: "pcm-s32",
+    pcm_s32be: "pcm-s32be",
     pcm_f32le: "pcm-f32",
+    pcm_f32be: "pcm-f32be",
+    pcm_f64le: "pcm-f64",
+    pcm_f64be: "pcm-f64be",
     pcm_mulaw: "ulaw",
     pcm_alaw: "alaw",
 };
@@ -67,6 +78,27 @@ function aacDecoderCodecString(stream, config) {
     return "mp4a.40.2";
 }
 
+function dtsDecoderCodecString(stream) {
+    const profile = [
+        stream?.profile,
+        stream?.codec_long_name,
+        stream?.codec_string,
+    ].join(" ").toLowerCase();
+
+    if (/express/.test(profile)) return "dtse";
+    if (/dts[- ]?hd|master audio|high resolution|xll/.test(profile)) return "dtsh";
+    return "dtsc";
+}
+
+function audioDecoderCodecString(stream, sourceCodec, config) {
+    if (sourceCodec === "aac") return aacDecoderCodecString(stream, config);
+    if (sourceCodec === "ac3") return "ac-3";
+    if (sourceCodec === "eac3") return "ec-3";
+    if (sourceCodec === "dts") return dtsDecoderCodecString(stream);
+    if (sourceCodec === "truehd") return "mlpa";
+    return sourceCodec;
+}
+
 function languageCode(language) {
     const value = String(language || "").toLowerCase().split(/[-_]/)[0];
     if (/^[a-z]{3}$/.test(value)) return value;
@@ -100,13 +132,19 @@ function decoderConfig(demuxer, stream, type) {
         throw new Error("Unsupported audio codec: " + (stream?.codec_name || "unknown"));
     }
 
+    const sampleRate = Number(config.sampleRate || stream.sample_rate);
+    const numberOfChannels = Number(config.numberOfChannels || stream.channels);
+    if (!Number.isFinite(sampleRate) || sampleRate <= 0 ||
+        !Number.isFinite(numberOfChannels) || numberOfChannels <= 0) {
+        throw new Error("Audio track is missing a valid sample rate or channel count.");
+    }
+
     return {
-        // EncodedAudioPacketSource uses the short Mediabunny codec ID
-        // (e.g. "aac"), while decoderConfig.codec must be the full
-        // WebCodecs/Mediabunny codec string (e.g. "mp4a.40.2").
-        codec: sourceCodec === "aac" ? aacDecoderCodecString(stream, config) : sourceCodec,
-        sampleRate: config.sampleRate || stream.sample_rate,
-        numberOfChannels: config.numberOfChannels || stream.channels,
+        // The packet source uses a short codec ID; decoderConfig needs the
+        // codec string defined by the Mediabunny registry.
+        codec: audioDecoderCodecString(stream, sourceCodec, config),
+        sampleRate,
+        numberOfChannels,
         description: config.description,
     };
 }
@@ -520,6 +558,18 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 } : null,
             });
 
+            const onVideoError = () => {
+                if (session.cancelled) return;
+                const code = video.error?.code;
+                session.fail(new Error(
+                    "The browser could not decode the remuxed media" +
+                    (code ? " (media error " + code + ")" : "") +
+                    "; switching to the standard player.",
+                ));
+            };
+            video.addEventListener("error", onVideoError);
+            session.listeners.push(["error", onVideoError]);
+
             video.pause();
             video.removeAttribute("src");
             video.src = session.objectUrl;
@@ -651,9 +701,10 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
         (async () => {
             try {
-                const {WebDemuxer} = await import("web-demuxer");
+                const {WebDemuxer, AVLogLevel} = await import("web-demuxer");
                 metadataDemuxer = new WebDemuxer({wasmFilePath: DEMUX_WASM_URL});
                 await metadataDemuxer.load(source);
+                await metadataDemuxer.setLogLevel(AVLogLevel.AV_LOG_FATAL);
                 if (cancelled) {
                     metadataDemuxer.destroy();
                     return;
@@ -700,7 +751,13 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
                 const defaultAudio = audio.find((item) => item.supported) || null;
                 if (audio.length > 0 && !defaultAudio) {
-                    throw new Error("This file's audio tracks use codecs that the browser remuxer cannot currently package. Switching to the standard player.");
+                    const detectedCodecs = [...new Set(audio.map((track) =>
+                        String(track.stream.codec_name || "unknown"),
+                    ))].join(", ");
+                    throw new Error(
+                        "No supported audio track was found. Detected audio codecs: " + detectedCodecs +
+                        ". The browser player supports AAC, MP3, Opus, Vorbis, FLAC, AC-3, E-AC-3, DTS, TrueHD and PCM; switching to the standard player.",
+                    );
                 }
                 const audioId = defaultAudio?.id || "";
                 selectedAudioRef.current = audioId;

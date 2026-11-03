@@ -3,7 +3,8 @@ import MediaMuxWorker from "./MediaMuxWorker.js?worker";
 import MediaAudioWorker from "./MediaAudioWorker.js?worker";
 
 const DEMUX_WASM_URL = "https://cdn.jsdelivr.net/npm/web-demuxer@4.0.0/dist/wasm-files/web-demuxer.wasm";
-const MAX_FORWARD_BUFFER_SECONDS = 12;
+const MAX_FORWARD_BUFFER_SECONDS = 8;
+const RETAIN_VIDEO_BUFFER_SECONDS = 20;
 const TEXT_SUBTITLE_CODECS = new Set(["subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"]);
 
 function mimeSupportDetails(mimeType) {
@@ -297,7 +298,8 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const subtitlePreloadPromiseRef = useRef(Promise.resolve());
     const subtitlePreloadTaskRef = useRef(0);
     const subtitleTaskRef = useRef(0);
-    const subtitleCuesRef = useRef([]);
+    const subtitleTrackElementRef = useRef(null);
+    const quotaRestartAttemptsRef = useRef(0);
     const seekTimerRef = useRef(null);
     const fallbackRef = useRef(false);
 
@@ -305,7 +307,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const [subtitleTracks, setSubtitleTracks] = useState([]);
     const [selectedAudio, setSelectedAudio] = useState("");
     const [selectedSubtitle, setSelectedSubtitle] = useState("");
-    const [visibleSubtitle, setVisibleSubtitle] = useState("");
+    const [subtitleUrl, setSubtitleUrl] = useState("");
+    const [subtitleLabel, setSubtitleLabel] = useState("");
+    const [subtitleLanguage, setSubtitleLanguage] = useState("und");
     const [status, setStatus] = useState("Preparing parallel workers…");
 
     const fallback = useCallback((error) => {
@@ -317,9 +321,30 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
     const clearSubtitle = useCallback(() => {
         subtitleTaskRef.current += 1;
-        subtitleCuesRef.current = [];
-        setVisibleSubtitle("");
+        setSubtitleUrl("");
+        setSubtitleLabel("");
+        setSubtitleLanguage("und");
     }, []);
+
+    useEffect(() => {
+        if (!subtitleUrl) return undefined;
+        return () => URL.revokeObjectURL(subtitleUrl);
+    }, [subtitleUrl]);
+
+    useEffect(() => {
+        const applySubtitleMode = () => {
+            const track = subtitleTrackElementRef.current?.track;
+            if (track) track.mode = subtitleUrl ? "showing" : "disabled";
+        };
+        const video = videoRef.current;
+        applySubtitleMode();
+        video?.addEventListener("loadedmetadata", applySubtitleMode);
+        video?.addEventListener("loadstart", applySubtitleMode);
+        return () => {
+            video?.removeEventListener("loadedmetadata", applySubtitleMode);
+            video?.removeEventListener("loadstart", applySubtitleMode);
+        };
+    }, [subtitleUrl]);
 
     const preloadSubtitleTracks = useCallback(async (streams, taskId) => {
         if (!streams.length || taskId !== subtitlePreloadTaskRef.current) return;

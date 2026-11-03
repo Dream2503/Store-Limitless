@@ -1379,9 +1379,19 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const generation = ++seekGeneration;
             const selectedId = selectedAudioRef.current;
             const selectedTrack = audioTracksRef.current.find((item) => item.id === selectedId);
+            const video = videoRef.current;
 
-            // A replacement video source resets its media timeline, so old
-            // standalone audio SourceBuffers must be recreated at the same time.
+            // Freeze both outputs before replacing either MediaSource.
+            video?.pause();
+            for (const item of audioSessionsRef.current.values()) {
+                item.audio.pause();
+                item.audio.muted = true;
+            }
+            for (const item of pendingAudioSessionsRef.current.values()) {
+                item.audio.pause();
+                item.audio.muted = true;
+            }
+
             for (const item of pendingAudioSessionsRef.current.values()) item.dispose?.();
             pendingAudioSessionsRef.current.clear();
             for (const item of audioSessionsRef.current.values()) item.dispose?.();
@@ -1390,19 +1400,79 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
             void (async () => {
                 try {
-                    await startPipeline(null, target, shouldPlay);
+                    setStatus("Seeking · preparing video and selected audio together…");
+                    await startPipeline(null, target, shouldPlay, null, null, true);
                     if (generation !== seekGeneration) return;
+
+                    let readyAudio = null;
                     if (selectedTrack?.supported) {
                         requestedAudioRef.current = selectedTrack.id;
-                        const readyAudio = await startAudioPipeline(selectedTrack, target, shouldPlay, true);
-                        if (!readyAudio && generation === seekGeneration) {
-                            requestedAudioRef.current = "";
-                            selectedAudioRef.current = "";
-                            setSelectedAudio("");
+                        readyAudio = await startAudioPipeline(selectedTrack, target, false, true);
+                        if (!readyAudio) {
+                            if (generation === seekGeneration) {
+                                setStatus("Audio could not be prepared at this position. Playback remains paused.");
+                            }
+                            return;
                         }
                     }
+
+                    if (generation !== seekGeneration) return;
+                    const currentVideo = videoRef.current;
+                    if (!currentVideo || !sessionRef.current || sessionRef.current.cancelled) return;
+
+                    currentVideo.pause();
+                    currentVideo.currentTime = target;
+                    await waitForMediaTimeReady(currentVideo, target);
+
+                    if (readyAudio) {
+                        const currentAudio = readyAudio.audio;
+                        currentAudio.pause();
+                        currentAudio.currentTime = target;
+                        currentAudio.volume = currentVideo.volume;
+                        currentAudio.playbackRate = currentVideo.playbackRate;
+                        currentAudio.muted = currentVideo.muted;
+
+                        await waitForMediaTimeReady(currentAudio, target);
+                        if (generation !== seekGeneration || readyAudio.cancelled) return;
+
+                        selectedAudioRef.current = selectedTrack.id;
+                        requestedAudioRef.current = selectedTrack.id;
+                        audioSessionRef.current = readyAudio;
+                        for (const [id, item] of audioSessionsRef.current) {
+                            item.audio.muted = currentVideo.muted || id !== selectedTrack.id;
+                            item.audio.volume = currentVideo.volume;
+                            item.audio.playbackRate = currentVideo.playbackRate;
+                        }
+
+                        if (shouldPlay) {
+                            setStatus("Synchronizing audio and video…");
+                            const starts = await Promise.allSettled([
+                                currentAudio.play(),
+                                currentVideo.play(),
+                            ]);
+                            if (starts.some((result) => result.status === "rejected")) {
+                                currentVideo.pause();
+                                currentAudio.pause();
+                                setStatus("A/V is buffered, but the browser blocked synchronized playback. Press play to retry.");
+                                return;
+                            }
+                        }
+                    } else if (shouldPlay) {
+                        await currentVideo.play();
+                    }
+
+                    if (generation === seekGeneration) {
+                        setStatus(shouldPlay
+                            ? "Audio and video synchronized · playback resumed"
+                            : "Audio and video ready · paused");
+                    }
                 } catch (error) {
-                    fallback(error instanceof Error ? error : new Error(String(error)));
+                    if (generation === seekGeneration) {
+                        videoRef.current?.pause();
+                        for (const item of audioSessionsRef.current.values()) item.audio.pause();
+                        setStatus(error?.message || "Could not prepare synchronized playback.");
+                    }
+                    console.error("Could not complete synchronized seek.", error);
                 }
             })();
         };

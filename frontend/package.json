@@ -10,10 +10,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "movi-player": "^0.4.1",
+    "mediabunny": "^1.65.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-router-dom": "^7.13.1"
+    "react-router-dom": "^7.13.1",
+    "web-demuxer": "^4.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

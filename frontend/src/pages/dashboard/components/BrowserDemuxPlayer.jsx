@@ -734,14 +734,21 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                         }
                         if (session.trimming) session.trimming = false;
 
+                        session.quotaRecoveryAttempts = 0;
                         if (!session.didStart && sb.buffered.length) {
                             session.didStart = true;
-                            if (session.startAt > 0) {
+                            if (session.startAt > 0 &&
+                                Math.abs(video.currentTime - session.startAt) > 0.25) {
                                 session.programmaticSeek = true;
                                 session.programmaticSeekTarget = session.startAt;
-                                try { video.currentTime = session.startAt; } catch { /* first range not ready */ }
+                                try { video.currentTime = session.startAt; } catch { /* target range is still arriving */ }
                             }
-                            if (session.shouldPlay) video.play().catch(() => {});
+                        }
+
+                        if (isMediaTimeBuffered(video, session.startAt)) {
+                            session.targetBuffered = true;
+                            markTargetBuffered();
+                            quotaRestartAttemptsRef.current = 0;
                         }
 
                         trimOldBuffer();

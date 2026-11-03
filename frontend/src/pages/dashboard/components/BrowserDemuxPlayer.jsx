@@ -331,6 +331,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
     const subtitleCueCacheRef = useRef(new Map());
     const subtitleTaskRef = useRef(0);
     const seekTimerRef = useRef(null);
+    const syncPendingRef = useRef(false);
     const fallbackRef = useRef(false);
 
     const [audioTracks, setAudioTracks] = useState([]);
@@ -1410,12 +1411,21 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 requestedAudioRef.current = audioId;
                 setSelectedAudio(audioId);
 
+                syncPendingRef.current = Boolean(defaultAudio);
                 const videoPreparation = startPipeline(null, 0, false, metadataDemuxer, streams);
                 const audioPreparation = defaultAudio
                     ? startAudioPipeline(defaultAudio, 0, false, true)
                     : Promise.resolve(null);
-                await Promise.all([videoPreparation, audioPreparation]);
+                const [videoResult, audioResult] = await Promise.all([
+                    videoPreparation,
+                    audioPreparation,
+                ]);
                 metadataDemuxer = null;
+                if (videoResult !== false && (!defaultAudio || audioResult)) {
+                    syncPendingRef.current = false;
+                } else if (defaultAudio) {
+                    setStatus("Default audio is still unavailable. Playback remains paused.");
+                }
             } catch (error) {
                 if (!cancelled) fallback(error instanceof Error ? error : new Error(String(error)));
             }
@@ -1428,6 +1438,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             const selectedId = selectedAudioRef.current;
             const selectedTrack = audioTracksRef.current.find((item) => item.id === selectedId);
             const video = videoRef.current;
+            syncPendingRef.current = Boolean(selectedTrack?.supported);
 
             // Freeze both outputs before replacing either MediaSource.
             video?.pause();
@@ -1483,6 +1494,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
 
                         await waitForMediaTimeReady(currentAudio, target);
                         if (generation !== seekGeneration || readyAudio.cancelled) return;
+                        syncPendingRef.current = false;
 
                         selectedAudioRef.current = selectedTrack.id;
                         requestedAudioRef.current = selectedTrack.id;
@@ -1506,8 +1518,9 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                                 return;
                             }
                         }
-                    } else if (shouldPlay) {
-                        await currentVideo.play();
+                    } else {
+                        syncPendingRef.current = false;
+                        if (shouldPlay) await currentVideo.play();
                     }
 
                     if (generation === seekGeneration) {
@@ -1658,6 +1671,13 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
         if (!video) return undefined;
 
         const syncAudio = () => {
+            if (syncPendingRef.current) {
+                if (!video.paused) video.pause();
+                for (const session of audioSessionsRef.current.values()) session.audio.pause();
+                for (const session of pendingAudioSessionsRef.current.values()) session.audio.pause();
+                return;
+            }
+
             const shouldPlay = !video.paused && !video.ended;
             for (const [id, session] of audioSessionsRef.current) {
                 if (session.cancelled) continue;
@@ -1732,6 +1752,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (!selectedTrack?.supported) {
                 video.currentTime = time;
                 await waitForMediaTimeReady(video, time);
+                syncPendingRef.current = false;
                 if (wasPlaying) await video.play();
                 return;
             }
@@ -1764,6 +1785,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
                 waitForMediaTimeReady(selectedSession.audio, time),
             ]);
             if (selectedSession.cancelled || sessionRef.current !== session) return;
+            syncPendingRef.current = false;
 
             selectedAudioRef.current = selectedId;
             requestedAudioRef.current = selectedId;
@@ -1797,6 +1819,7 @@ export default function BrowserDemuxPlayer({source, title, active = true, onUseS
             if (!session || session.cancelled || session.programmaticSeek) return;
             if (!pendingSeek) {
                 pendingSeek = {wasPlaying: !video.paused};
+                syncPendingRef.current = Boolean(selectedAudioRef.current);
                 video.pause();
                 for (const item of audioSessionsRef.current.values()) item.audio.pause();
                 for (const item of pendingAudioSessionsRef.current.values()) item.audio.pause();

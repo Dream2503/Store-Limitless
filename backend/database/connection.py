@@ -44,7 +44,8 @@ try:
 
                 CONSTRAINT fk_directories_user
                     FOREIGN KEY (username)
-                        REFERENCES users (username),
+                        REFERENCES users (username)
+                        ON DELETE CASCADE,
 
                 CONSTRAINT unique_directory_path
                     UNIQUE (path, username)
@@ -64,13 +65,15 @@ try:
 
                 CONSTRAINT fk_files_directory
                     FOREIGN KEY (directory_id)
-                        REFERENCES directories (id),
+                        REFERENCES directories (id)
+                        ON DELETE CASCADE
+                        ON UPDATE CASCADE,
 
                 CONSTRAINT fk_files_user
                     FOREIGN KEY (username)
                         REFERENCES users (username)
+                        ON DELETE CASCADE
             );
-
             """
         )
         connection.commit()

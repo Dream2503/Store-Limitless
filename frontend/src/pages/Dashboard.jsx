@@ -10,13 +10,12 @@ import ItemDetailsModal from "./dashboard/components/ItemDetailsModal.jsx";
 import DashboardContextMenu from "./dashboard/components/DashboardContextMenu.jsx";
 import DashboardWorkspace from "./dashboard/components/DashboardWorkspace.jsx";
 import UploadJobsTray from "./dashboard/components/UploadJobsTray.jsx";
-import {cancelQueuedDownloadTask, enqueueDownloadTask, listResumableDownloads, listResumableDownloadChunks, removeResumableDownload, removeResumableDownloadChunks, removeResumableDownloadChunksFrom, saveResumableDownload, saveResumableDownloadChunk} from "./dashboard/utils/resumableDownloads.js";
 import BulkActionConfirmModal from "./dashboard/components/BulkActionConfirmModal.jsx";
 import useDashboardData, {clearDashboardTreeCache} from "./dashboard/hooks/useDashboardData.js";
 import useGlobalFileSearch from "./dashboard/hooks/useGlobalFileSearch.js";
 import useUploadJobs from "./dashboard/hooks/useUploadJobs.js";
 import {API_URL, DASHBOARD_SELECTION_STORAGE_KEY, DASHBOARD_SELECTIONS_BY_VIEW_KEY,} from "./dashboard/constants.js";
-import {AUTH_SESSION_END_EVENT, createUniqueId, decodePathSegment, endAuthSession, folderPathToRoute, getFileIcon, getFileKind, getToken, makeSelectionViewKey,} from "./dashboard/utils.js";
+import {decodePathSegment, endAuthSession, folderPathToRoute, getFileIcon, getFileKind, getToken, makeSelectionViewKey} from "./dashboard/utils.js";
 
 /** @typedef {"files" | "trash"} DashboardTab */
 /** @typedef {{icon: string, color: string}} FileIconStyle */
@@ -87,6 +86,20 @@ function compareCaseInsensitive(left, right) {
 }
 
 /**
+ * Hand a signed attachment URL directly to the browser's native download manager.
+ * @param {string} url
+ */
+function triggerBrowserDownload(url) {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.rel = "noreferrer";
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+}
+
+/**
  * Render file browsing, search, selection, and file-management interactions.
  * @returns {import("react").ReactElement}
  */
@@ -116,579 +129,7 @@ export default function DashboardPage({active = true} = {}) {
     } = useDashboardData(currentFolder, navigate);
     const {searchResults, searchLoading, searchError} = useGlobalFileSearch(searchQuery, activeTab, files);
     const {uploadJobs, dismissUploadJob, cancelUploadJob, clearAllUploadJobs} = useUploadJobs(refreshDirectory);
-    const [downloadJobs, setDownloadJobs] = useState([]);
-    const downloadJobsRef = useRef([]);
-    const downloadControllersRef = useRef(new Map());
-    const clearAllTasksRef = useRef(null);
-
-    useEffect(() => {
-        downloadJobsRef.current = downloadJobs;
-    }, [downloadJobs]);
-
-    useEffect(() => () => {
-        downloadControllersRef.current.forEach((controller) => controller.abort());
-        downloadControllersRef.current.clear();
-    }, []);
-
-    useEffect(() => {
-        let cancelled = false;
-        listResumableDownloads().then((storedJobs) => {
-            if (cancelled) return;
-            const restored = storedJobs.map((job) => ["downloading", "queued"].includes(job.status) ? {
-                ...job, status: "paused", message: "Paused after page reload"
-            } : job);
-            downloadJobsRef.current = restored;
-            setDownloadJobs(restored);
-            restored.forEach((job) => {
-                if (job.status !== "downloading") saveResumableDownload(job).catch(() => {
-                });
-            });
-        }).catch((error) => console.warn("Could not restore resumable downloads:", error));
-        return () => {
-            cancelled = true;
-        };
-    }, []);
-
-    const updateDownloadJob = (jobId, changes) => {
-        const current = downloadJobsRef.current;
-        const existing = current.find((job) => job.id === jobId);
-        if (!existing) return;
-        const updated = {...existing, ...changes};
-        const next = current.map((job) => job.id === jobId ? updated : job);
-        downloadJobsRef.current = next;
-        setDownloadJobs(next);
-        saveResumableDownload(updated).catch((error) => console.warn("Could not persist download progress:", error));
-    };
-
-    const performResumableDownload = async (job, sessionToken = getToken()) => {
-        if (!sessionToken || getToken() !== sessionToken || downloadControllersRef.current.has(job.id)) return;
-        const controller = new AbortController();
-        downloadControllersRef.current.set(job.id, controller);
-        const ensureSession = () => {
-            if (controller.signal.aborted || getToken() !== sessionToken) {
-                throw new DOMException("The session ended", "AbortError");
-            }
-        };
-        updateDownloadJob(job.id, {status: "downloading", message: job.tempName ? "Downloading to temporary storage" : "Downloading"});
-
-        try {
-            ensureSession();
-            if (job.blobFallback) {
-                // Browsers without OPFS/save-file-picker support still get durable,
-                // resumable downloads. Persist each complete HTTP byte range in
-                // IndexedDB, then continue at the first byte that is not saved.
-                const head = await fetch(job.url, {
-                    method: "HEAD",
-                    signal: controller.signal,
-                    cache: "no-store",
-                });
-                if (!head.ok) throw new Error(`Could not verify download source (${head.status}).`);
-
-                const latestTotal = Number(head.headers.get("content-length") || job.total || 0);
-                if (!Number.isSafeInteger(latestTotal) || latestTotal <= 0) {
-                    throw new Error("The server did not provide a valid file size for resumable downloading.");
-                }
-
-                const latestEtag = head.headers.get("etag") || job.etag || "";
-                const rangeSize = 8 * 1024 * 1024;
-                let savedChunks = await listResumableDownloadChunks(job.id);
-
-                // Never combine ranges from different versions of a file.
-                const sourceChanged = (Boolean(job.etag && latestEtag) && job.etag !== latestEtag)
-                    || (Number(job.total) > 0 && Number(job.total) !== latestTotal);
-                if (sourceChanged) {
-                    await removeResumableDownloadChunks(job.id);
-                    savedChunks = [];
-                }
-
-                const chunksByOffset = new Map(savedChunks.map((chunk) => [Number(chunk.offset), chunk]));
-                let transferred = 0;
-                while (transferred < latestTotal) {
-                    const savedChunk = chunksByOffset.get(transferred);
-                    if (!savedChunk) break;
-                    const savedLength = savedChunk.bytes?.byteLength ?? savedChunk.bytes?.length ?? 0;
-                    const expectedLength = Math.min(rangeSize, latestTotal - transferred);
-                    if (savedLength !== expectedLength) break;
-                    transferred += savedLength;
-                }
-
-                // Discard any non-contiguous suffix. A range is only considered
-                // complete after its entire response has been saved atomically.
-                if (savedChunks.some((chunk) => Number(chunk.offset) >= transferred)) {
-                    await removeResumableDownloadChunksFrom(job.id, transferred);
-                    savedChunks = savedChunks.filter((chunk) => Number(chunk.offset) < transferred);
-                }
-
-                updateDownloadJob(job.id, {
-                    status: "downloading",
-                    total: latestTotal,
-                    etag: latestEtag,
-                    transferred,
-                    message: transferred ? "Resuming from saved progress" : "Downloading · resumable",
-                });
-
-                while (transferred < latestTotal) {
-                    ensureSession();
-
-                    const end = Math.min(transferred + rangeSize, latestTotal) - 1;
-                    let rangeBytes = null;
-                    let lastError = null;
-
-                    for (let attempt = 0; attempt < 5; attempt += 1) {
-                        try {
-                            const headers = {Range: `bytes=${transferred}-${end}`};
-                            if (latestEtag) headers["If-Range"] = latestEtag;
-                            const requestSignal = typeof AbortSignal.any === "function" && typeof AbortSignal.timeout === "function"
-                                ? AbortSignal.any([controller.signal, AbortSignal.timeout(180000)])
-                                : controller.signal;
-                            const response = await fetch(job.url, {
-                                headers,
-                                signal: requestSignal,
-                                cache: "no-store",
-                            });
-
-                            if (response.status === 200) {
-                                await response.body?.cancel();
-                                throw new Error("The server did not honor byte-range requests, so safe resume is unavailable.");
-                            }
-                            if (response.status !== 206) {
-                                throw new Error(`Download range failed (${response.status}).`);
-                            }
-
-                            const contentRange = response.headers.get("content-range") || "";
-                            if (contentRange !== `bytes ${transferred}-${end}/${latestTotal}`) {
-                                await response.body?.cancel();
-                                throw new Error(`Unexpected Content-Range: ${contentRange || "missing"}`);
-                            }
-
-                            const bytes = await response.arrayBuffer();
-                            if (bytes.byteLength !== end - transferred + 1) {
-                                throw new Error(`Incomplete range: received ${bytes.byteLength} bytes.`);
-                            }
-                            rangeBytes = bytes;
-                            break;
-                        } catch (error) {
-                            if (controller.signal.aborted || error?.name === "AbortError") throw error;
-                            lastError = error;
-                            if (attempt < 4) {
-                                await new Promise((resolve) => window.setTimeout(resolve, Math.min(1000 * (2 ** attempt), 8000)));
-                            }
-                        }
-                    }
-
-                    if (!rangeBytes) throw lastError || new Error("Download range failed after repeated attempts.");
-
-                    // Save bytes before committing the new offset; if the tab closes
-                    // at any earlier point, this range will simply be requested again.
-                    await saveResumableDownloadChunk(job.id, transferred, rangeBytes);
-                    transferred += rangeBytes.byteLength;
-                    updateDownloadJob(job.id, {
-                        status: "downloading",
-                        transferred,
-                        total: latestTotal,
-                        etag: latestEtag,
-                        message: "Downloading · resumable",
-                    });
-                }
-
-                savedChunks = await listResumableDownloadChunks(job.id);
-                const blobParts = [];
-                let verifiedOffset = 0;
-                for (const chunk of savedChunks) {
-                    if (Number(chunk.offset) !== verifiedOffset) {
-                        throw new Error("Saved download data has a gap. Resume the download to repair it.");
-                    }
-                    const expectedLength = Math.min(rangeSize, latestTotal - verifiedOffset);
-                    const bytes = chunk.bytes;
-                    const chunkLength = bytes?.byteLength ?? bytes?.length ?? 0;
-                    if (chunkLength !== expectedLength) {
-                        throw new Error("A saved download range is incomplete. Resume the download to repair it.");
-                    }
-                    blobParts.push(bytes);
-                    verifiedOffset += chunkLength;
-                    if (verifiedOffset === latestTotal) break;
-                }
-                if (verifiedOffset !== latestTotal) {
-                    throw new Error(`Incomplete download: received ${verifiedOffset} of ${latestTotal} bytes.`);
-                }
-
-                const blob = new Blob(blobParts, {
-                    type: head.headers.get("content-type") || "application/octet-stream",
-                });
-                const objectUrl = URL.createObjectURL(blob);
-                const anchor = document.createElement("a");
-                anchor.href = objectUrl;
-                anchor.download = job.name || "download";
-                anchor.rel = "noreferrer";
-                ensureSession();
-                document.body.appendChild(anchor);
-                anchor.click();
-                anchor.remove();
-                window.setTimeout(() => URL.revokeObjectURL(objectUrl), 5 * 60 * 1000);
-
-                await removeResumableDownloadChunks(job.id).catch((error) => {
-                    console.warn("Could not clear completed download chunks:", error);
-                });
-                updateDownloadJob(job.id, {
-                    status: "completed",
-                    transferred: latestTotal,
-                    total: latestTotal,
-                    message: "Complete · browser download started",
-                });
-                return;
-            }
-            const staged = Boolean(job.tempName);
-            const handle = staged
-                ? await (await navigator.storage.getDirectory()).getFileHandle(job.tempName, {create: true})
-                : job.handle;
-            if (!handle) throw new Error("The temporary download file is unavailable.");
-
-            if (!staged) {
-                const permission = await handle.queryPermission({mode: "readwrite"});
-                const granted = permission === "granted" || await handle.requestPermission({mode: "readwrite"}) === "granted";
-                if (!granted) throw new Error("Permission to write the selected download file was denied.");
-            }
-
-            if (job.streamOnly) {
-                // A ZIP stream can be resumed only if the server can reproduce the same
-                // archive byte-for-byte. Keep each received prefix in OPFS, then request
-                // the next byte range rather than truncating the file on every retry.
-                const initialFile = await handle.getFile();
-                let offset = Math.max(0, initialFile.size || 0);
-                // Without the validator saved from the first response, we cannot safely
-                // prove that a partial archive still matches the current selection.
-                if (offset > 0 && !job.etag) offset = 0;
-                const requestHeaders = {};
-                if (offset > 0) {
-                    requestHeaders.Range = "bytes=" + offset + "-";
-                    requestHeaders["If-Range"] = job.etag;
-                }
-
-                const response = await fetch(job.url, {
-                    headers: requestHeaders,
-                    signal: controller.signal,
-                    cache: "no-store",
-                });
-
-                // If the archive revision changed, If-Range intentionally returns a fresh
-                // 200 response. Start over safely instead of appending different ZIP bytes.
-                if (response.status === 200 && offset > 0) offset = 0;
-                if (offset > 0 && response.status !== 206) {
-                    await response.body?.cancel();
-                    throw new Error("The ZIP server did not honor the resume range.");
-                }
-                if (offset === 0 && response.status !== 200) {
-                    await response.body?.cancel();
-                    throw new Error("ZIP stream failed (" + response.status + ").");
-                }
-
-                const contentRange = response.headers.get("content-range") || "";
-                const rangeMatch = contentRange.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
-                let latestTotal = 0;
-                if (response.status === 206) {
-                    if (!rangeMatch || Number(rangeMatch[1]) !== offset) {
-                        await response.body?.cancel();
-                        throw new Error("The ZIP server returned an invalid resume range.");
-                    }
-                    latestTotal = Number(rangeMatch[3]);
-                } else {
-                    latestTotal = Number(response.headers.get("content-length") || 0);
-                }
-                if (!Number.isSafeInteger(latestTotal) || latestTotal <= 0 || offset > latestTotal) {
-                    await response.body?.cancel();
-                    throw new Error("The ZIP server did not provide a valid archive size.");
-                }
-
-                const latestEtag = response.headers.get("etag") || job.etag || "";
-                updateDownloadJob(job.id, {
-                    total: latestTotal,
-                    etag: latestEtag,
-                    transferred: offset,
-                    message: offset > 0
-                        ? "Resuming ZIP from " + formatFileSize(offset)
-                        : "Downloading ZIP to temporary storage",
-                });
-
-                let writer;
-                let writerClosed = false;
-                let reader;
-                let transferred = offset;
-                let lastReported = offset;
-                try {
-                    // Commit the old prefix and append at its current byte offset.
-                    // Closing on pause preserves bytes; aborting this OPFS writer would
-                    // roll back its pending writes and make every resume start at zero.
-                    writer = await handle.createWritable({keepExistingData: true});
-                    await writer.truncate(offset);
-                    await writer.seek(offset);
-
-                    reader = response.body?.getReader();
-                    if (!reader) throw new Error("Streaming ZIP responses are not supported by this browser.");
-
-                    while (true) {
-                        if (controller.signal.aborted) {
-                            await reader.cancel().catch(() => {});
-                            throw new DOMException("Download paused", "AbortError");
-                        }
-                        const {done, value} = await reader.read();
-                        if (done) break;
-                        if (!value?.byteLength) continue;
-                        await writer.write(value);
-                        transferred += value.byteLength;
-
-                        if (transferred - lastReported >= 1024 * 1024 || transferred >= latestTotal) {
-                            updateDownloadJob(job.id, {
-                                transferred,
-                                total: latestTotal,
-                                etag: latestEtag,
-                                message: "Downloading ZIP · " + formatFileSize(transferred),
-                            });
-                            lastReported = transferred;
-                        }
-                    }
-
-                    await writer.close();
-                    writerClosed = true;
-                    if (transferred !== latestTotal) {
-                        throw new Error("Incomplete ZIP stream: received " + transferred + " of " + latestTotal + " bytes.");
-                    }
-                } catch (error) {
-                    await reader?.cancel().catch(() => {});
-                    // Persist the successfully written prefix even for network errors,
-                    // so retrying can resume at the committed OPFS file length.
-                    if (writer && !writerClosed) {
-                        await writer.close().then(() => { writerClosed = true; }).catch(() => {});
-                    }
-                    throw error;
-                }
-
-                const completedFile = await handle.getFile();
-                const objectUrl = URL.createObjectURL(completedFile);
-                const anchor = document.createElement("a");
-                anchor.href = objectUrl;
-                anchor.download = job.name || completedFile.name || "StoreLimitless-files.zip";
-                anchor.rel = "noreferrer";
-                ensureSession();
-                document.body.appendChild(anchor);
-                anchor.click();
-                anchor.remove();
-                window.setTimeout(() => {
-                    URL.revokeObjectURL(objectUrl);
-                    navigator.storage.getDirectory()
-                        .then((root) => root.removeEntry(job.tempName))
-                        .catch(() => {});
-                }, 5 * 60 * 1000);
-                updateDownloadJob(job.id, {
-                    status: "completed",
-                    transferred,
-                    total: latestTotal,
-                    etag: latestEtag,
-                    message: "ZIP staged in StoreLimitless · browser download started",
-                });
-                return;
-            }
-
-            const head = await fetch(job.url, {method: "HEAD", signal: controller.signal});
-            if (!head.ok) throw new Error(`Could not verify download source (${head.status}).`);
-            const latestTotal = Number(head.headers.get("content-length") || job.total || 0);
-            const latestEtag = head.headers.get("etag") || job.etag || "";
-            let offset = Math.min(Number(job.transferred || 0), (await handle.getFile()).size, latestTotal);
-
-            if (job.etag && latestEtag && job.etag !== latestEtag && offset > 0) offset = 0;
-            let truncateWriter = await handle.createWritable({keepExistingData: true});
-            await truncateWriter.truncate(offset);
-            await truncateWriter.close();
-            updateDownloadJob(job.id, {total: latestTotal, etag: latestEtag, transferred: offset, message: staged ? "Downloading to temporary storage" : "Downloading"});
-
-            while (offset < latestTotal) {
-                ensureSession();
-                const end = Math.min(offset + 8 * 1024 * 1024, latestTotal) - 1;
-                let chunk = null;
-                let lastError = null;
-
-                for (let attempt = 0; attempt < 5; attempt += 1) {
-                    try {
-                        const headers = {Range: `bytes=${offset}-${end}`};
-                        if (latestEtag) headers["If-Range"] = latestEtag;
-                        const requestSignal = typeof AbortSignal.any === "function" && typeof AbortSignal.timeout === "function" ? AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]) : controller.signal;
-                        const response = await fetch(job.url, {headers, signal: requestSignal, cache: "no-store"});
-                        if (response.status === 200) {
-                            await response.body?.cancel();
-                            throw new Error("Server did not honor the byte range; refusing to append an unsafe response.");
-                        }
-                        if (response.status !== 206) throw new Error(`Download range failed (${response.status}).`);
-                        const contentRange = response.headers.get("content-range") || "";
-                        if (contentRange !== `bytes ${offset}-${end}/${latestTotal}`) throw new Error(`Unexpected Content-Range: ${contentRange || "missing"}`);
-                        const bytes = await response.arrayBuffer();
-                        if (bytes.byteLength !== end - offset + 1) throw new Error(`Incomplete range: received ${bytes.byteLength} bytes.`);
-                        chunk = bytes;
-                        break;
-                    } catch (error) {
-                        if (controller.signal.aborted || error?.name === "AbortError") throw error;
-                        lastError = error;
-                        if (attempt < 4) await new Promise((resolve) => window.setTimeout(resolve, Math.min(1000 * (2 ** attempt), 8000)));
-                    }
-                }
-
-                if (!chunk) throw lastError || new Error("Download range failed after repeated attempts.");
-                const writer = await handle.createWritable({keepExistingData: true});
-                await writer.seek(offset);
-                await writer.write(chunk);
-                await writer.close();
-                offset += chunk.byteLength;
-                updateDownloadJob(job.id, {transferred: offset, total: latestTotal, etag: latestEtag, message: staged ? "Downloading to temporary storage" : "Downloading"});
-            }
-
-            if (staged) {
-                // Only expose the browser download after the entire file has been staged.
-                const completedFile = await handle.getFile();
-                const objectUrl = URL.createObjectURL(completedFile);
-                const anchor = document.createElement("a");
-                anchor.href = objectUrl;
-                anchor.download = job.name || completedFile.name || "download";
-                anchor.rel = "noreferrer";
-                ensureSession();
-                document.body.appendChild(anchor);
-                anchor.click();
-                anchor.remove();
-                window.setTimeout(() => URL.revokeObjectURL(objectUrl), 5 * 60 * 1000);
-            }
-
-            updateDownloadJob(job.id, {status: "completed", transferred: latestTotal, total: latestTotal, message: staged ? "Complete · browser download started" : "Download complete"});
-        } catch (error) {
-            if (error?.name === "AbortError" || controller.signal.aborted) {
-                if (getToken() !== sessionToken) {
-                    removeStagedFile(job);
-                    removeResumableDownloadChunks(job.id).catch(() => {});
-                    removeResumableDownload(job.id).catch(() => {});
-                    return;
-                }
-                let transferred = downloadJobsRef.current.find((item) => item.id === job.id)?.transferred || 0;
-                if (job.streamOnly && job.tempName && typeof navigator.storage?.getDirectory === "function") {
-                    try {
-                        const root = await navigator.storage.getDirectory();
-                        const handle = await root.getFileHandle(job.tempName, {create: true});
-                        transferred = (await handle.getFile()).size;
-                    } catch (storageError) {
-                        console.warn("Could not inspect the saved ZIP prefix:", storageError);
-                    }
-                }
-                updateDownloadJob(job.id, {
-                    status: "paused",
-                    transferred,
-                    message: job.streamOnly
-                        ? "Paused · resume continues from saved ZIP bytes"
-                        : job.blobFallback ? "Paused · resume continues from saved progress" : "Paused",
-                });
-            } else {
-                updateDownloadJob(job.id, {status: "error", message: error?.message || "Download failed"});
-            }
-        } finally {
-            downloadControllersRef.current.delete(job.id);
-            // Retry cleanup after all in-flight writes have unwound. The logout
-            // listener may have tried removing an OPFS file while a writer held it.
-            const jobStillTracked = downloadJobsRef.current.some((item) => item.id === job.id);
-            if (getToken() !== sessionToken || !jobStillTracked) {
-                removeStagedFile(job);
-                removeResumableDownloadChunks(job.id).catch(() => {});
-                removeResumableDownload(job.id).catch(() => {});
-            }
-        }
-    };
-    const runResumableDownload = (job, sessionToken = getToken()) => {
-        if (!sessionToken || getToken() !== sessionToken) return;
-
-        const queueStatus = enqueueDownloadTask(job.id, async () => {
-            const currentJob = downloadJobsRef.current.find((item) => item.id === job.id);
-            if (!currentJob || getToken() !== sessionToken) return;
-            await performResumableDownload(currentJob, sessionToken);
-        });
-        if (queueStatus === "queued") {
-            updateDownloadJob(job.id, {
-                status: "queued",
-                message: "Queued · waiting for the previous download",
-            });
-        }
-    };
-
-    const pauseDownload = (jobId) => {
-        const controller = downloadControllersRef.current.get(jobId);
-        if (controller) {
-            controller.abort();
-            return;
-        }
-        if (cancelQueuedDownloadTask(jobId)) {
-            updateDownloadJob(jobId, {
-                status: "paused",
-                message: "Paused while queued",
-            });
-        }
-    };
-    const resumeDownload = (jobId) => {
-        const job = downloadJobsRef.current.find((item) => item.id === jobId);
-        const token = getToken();
-        if (job && token) runResumableDownload(job, token);
-    };
-    const removeStagedFile = (job) => {
-        if (!job?.tempName || typeof navigator.storage?.getDirectory !== "function") return;
-        navigator.storage.getDirectory()
-            .then((root) => root.removeEntry(job.tempName))
-            .catch((error) => console.warn("Could not remove temporary download file:", error));
-    };
-    const removeDownload = (jobId) => {
-        cancelQueuedDownloadTask(jobId);
-        const controller = downloadControllersRef.current.get(jobId);
-        const job = downloadJobsRef.current.find((item) => item.id === jobId);
-        controller?.abort();
-
-        const next = downloadJobsRef.current.filter((item) => item.id !== jobId);
-        downloadJobsRef.current = next;
-        setDownloadJobs(next);
-
-        // Keep a staged file until an active writer has settled; its finalizer cleans up after abort.
-        if (!controller) {
-            removeStagedFile(job);
-            removeResumableDownloadChunks(jobId).catch((error) => console.warn("Could not remove saved download chunks:", error));
-            removeResumableDownload(jobId).catch((error) => console.warn("Could not remove download task:", error));
-        }
-    };
-    const clearCompletedDownloads = () => {
-        downloadJobsRef.current.filter((job) => job.status === "completed" || job.status === "error").forEach((job) => {
-            removeStagedFile(job);
-            removeResumableDownloadChunks(job.id).catch(() => {
-            });
-            removeResumableDownload(job.id).catch(() => {
-            });
-        });
-        const next = downloadJobsRef.current.filter((job) => job.status !== "completed" && job.status !== "error");
-        downloadJobsRef.current = next;
-        setDownloadJobs(next);
-    };
-
-    /** Cancel active transfers and clear upload/download task history together. */
-    const clearAllTasks = () => {
-        clearAllUploadJobs();
-
-        const jobs = downloadJobsRef.current;
-        for (const job of jobs) {
-            cancelQueuedDownloadTask(job.id);
-            downloadControllersRef.current.get(job.id)?.abort();
-            removeStagedFile(job);
-            removeResumableDownloadChunks(job.id).catch((error) => console.warn("Could not clear saved download chunks:", error));
-            removeResumableDownload(job.id).catch((error) => console.warn("Could not clear download task:", error));
-        }
-
-        downloadJobsRef.current = [];
-        setDownloadJobs([]);
-    };
-    clearAllTasksRef.current = clearAllTasks;
-
-    useEffect(() => {
-        const handleSessionEnded = () => clearAllTasksRef.current?.();
-        window.addEventListener(AUTH_SESSION_END_EVENT, handleSessionEnded);
-        return () => window.removeEventListener(AUTH_SESSION_END_EVENT, handleSessionEnded);
-    }, []);
-    const [showFolderModal, setShowFolderModal] = useState(false);
+    const [showFolderModal, setShowFolderModal] = useState(false);    const [showFolderModal, setShowFolderModal] = useState(false);
     const [showUploadModal, setShowUploadModal] = useState(false);
     const [shareDialog, setShareDialog] = useState(null);
     const [shareCopyStatus, setShareCopyStatus] = useState("");
@@ -834,7 +275,7 @@ export default function DashboardPage({active = true} = {}) {
     /* ----------------------------- download ------------------------------ */
 
     /**
-     * Create a signed public link and trigger a browser download.
+     * Request a session-bound URL and let the browser manage the file transfer.
      * @param {string | number} fileId
      * @returns {Promise<void>}
      */
@@ -845,140 +286,28 @@ export default function DashboardPage({active = true} = {}) {
             return;
         }
 
-        // Prefer MEGA-style staging: download into the browser's private origin storage,
-        // then trigger the user's actual browser download only after every byte is verified.
-        if (typeof navigator.storage?.getDirectory === "function") {
-            try {
-                const linkResponse = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(fileId))}/download-link`, {
-                    method: "POST", headers: {Authorization: `Bearer ${token}`},
-                });
-                if (getToken() !== token) return;
-                const linkData = await linkResponse.json().catch(() => ({}));
-                if (getToken() !== token) return;
-                if (!linkResponse.ok) {
-                    if (linkResponse.status === 401) {
-                        if (getToken() === token && endAuthSession(token)) navigate("/");
-                        return;
-                    }
-                    throw new Error(linkData.detail || "Failed to prepare the download.");
-                }
-                if (!linkData.public_token) throw new Error("The server did not return a download token.");
-
-                const url = `${API_URL}/public/download/${encodeURIComponent(linkData.public_token)}`;
-                const head = await fetch(url, {method: "HEAD"});
-                if (getToken() !== token) return;
-                if (!head.ok) throw new Error(`Could not prepare download (${head.status}).`);
-                const total = Number(head.headers.get("content-length") || files.find((item) => String(item.id) === String(fileId))?.size || 0);
-                const estimate = await navigator.storage.estimate().catch(() => ({}));
-                if (getToken() !== token) return;
-                if (total > 0 && Number.isFinite(estimate.quota) && Number.isFinite(estimate.usage) && estimate.quota - estimate.usage < total) {
-                    throw new Error("There is not enough browser temporary storage to stage this file. Free up disk space and try again.");
-                }
-                await navigator.storage.persist().catch(() => false);
-                if (getToken() !== token) return;
-
-                const tempName = `storelimitless-${createUniqueId()}.download`;
-                const root = await navigator.storage.getDirectory();
-                if (getToken() !== token) return;
-                const tempHandle = await root.getFileHandle(tempName, {create: true});
-                if (getToken() !== token) {
-                    await root.removeEntry(tempName).catch(() => {});
-                    return;
-                }
-                const writer = await tempHandle.createWritable();
-                await writer.truncate(0);
-                await writer.close();
-                if (getToken() !== token) {
-                    await root.removeEntry(tempName).catch(() => {});
-                    return;
-                }
-
-                const file = files.find((item) => String(item.id) === String(fileId));
-                const job = {
-                    id: createUniqueId(),
-                    fileId: String(fileId),
-                    name: file?.name || "download",
-                    tempName,
-                    url,
-                    total,
-                    etag: head.headers.get("etag") || "",
-                    transferred: 0,
-                    status: "paused",
-                    message: "Queued",
-                    createdAt: Date.now(),
-                };
-                if (getToken() !== token) {
-                    removeStagedFile(job);
-                    return;
-                }
-                const next = [job, ...downloadJobsRef.current];
-                downloadJobsRef.current = next;
-                setDownloadJobs(next);
-                await saveResumableDownload(job);
-                if (getToken() !== token) {
-                    removeStagedFile(job);
-                    removeResumableDownload(job.id).catch(() => {});
-                    removeResumableDownloadChunks(job.id).catch(() => {});
-                    return;
-                }
-                runResumableDownload(job, token);
-                return;
-            } catch (error) {
-                console.error("Could not stage download in browser storage:", error);
-                alert(error.message || "Could not prepare the download.");
-                return;
-            }
-        }
-
-        // Without OPFS, stage verified byte ranges in IndexedDB, keep progress in the Downloads tray,
-        // and start the browser save only after the complete file has been verified.
         try {
             const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(fileId))}/download-link`, {
-                method: "POST", headers: {Authorization: `Bearer ${token}`},
+                method: "POST",
+                headers: {Authorization: `Bearer ${token}`},
             });
             if (getToken() !== token) return;
             const data = await response.json().catch(() => ({}));
             if (getToken() !== token) return;
+
             if (!response.ok) {
                 if (response.status === 401) {
                     if (getToken() === token && endAuthSession(token)) navigate("/");
                     return;
                 }
-                throw new Error(data.detail || "Failed to prepare the download.");
+                throw new Error(data.detail || "Could not prepare the download.");
             }
             if (!data.public_token) throw new Error("The server did not return a download token.");
 
-            const file = files.find((item) => String(item.id) === String(fileId));
-            const job = {
-                id: createUniqueId(),
-                fileId: String(fileId),
-                name: file?.name || "download",
-                url: `${API_URL}/public/download/${encodeURIComponent(data.public_token)}`,
-                total: Number(file?.size || 0),
-                transferred: 0,
-                status: "paused",
-                blobFallback: true,
-                message: "Queued · staging in browser storage",
-                createdAt: Date.now(),
-            };
-            if (getToken() !== token) {
-                removeStagedFile(job);
-                return;
-            }
-            const next = [job, ...downloadJobsRef.current];
-            downloadJobsRef.current = next;
-            setDownloadJobs(next);
-            await saveResumableDownload(job);
-            if (getToken() !== token) {
-                removeStagedFile(job);
-                removeResumableDownload(job.id).catch(() => {});
-                removeResumableDownloadChunks(job.id).catch(() => {});
-                return;
-            }
-            runResumableDownload(job, token);
+            triggerBrowserDownload(`${API_URL}/public/download/${encodeURIComponent(data.public_token)}`);
         } catch (error) {
-            console.error("Could not queue download:", error);
-            alert(error.message || "Failed to queue the download.");
+            console.error("Could not start browser download:", error);
+            alert(error instanceof Error ? error.message : "Could not prepare the download.");
         }
     };
 
@@ -1074,8 +403,7 @@ export default function DashboardPage({active = true} = {}) {
     };
 
     /**
-     * Prepare a short-lived public URL for a ZIP streamed directly from storage.
-     * The archive can contain files, folders, or a mixed selection.
+     * Request a signed ZIP URL and stream the archive directly through the browser.
      * @param {Array<string | number>} fileIds
      * @param {string} requestedName
      * @param {Array<string | number>} [folderIds]
@@ -1110,6 +438,7 @@ export default function DashboardPage({active = true} = {}) {
             if (getToken() !== token) return;
             const data = await response.json().catch(() => ({}));
             if (getToken() !== token) return;
+
             if (!response.ok) {
                 if (response.status === 401) {
                     if (getToken() === token && endAuthSession(token)) navigate("/");
@@ -1121,88 +450,10 @@ export default function DashboardPage({active = true} = {}) {
 
             const archiveName = downloadName.toLowerCase().endsWith(".zip") ? downloadName : `${downloadName}.zip`;
             const filenameQuery = new URLSearchParams({filename: archiveName}).toString();
-            const url = `${API_URL}/public/download-zip/${encodeURIComponent(data.public_token)}?${filenameQuery}`;
-
-            if (typeof navigator.storage?.getDirectory !== "function") {
-                // Use the same in-app resumable staging queue as ordinary files.
-                // Only start the browser download once every ZIP byte is stored.
-                const job = {
-                    id: createUniqueId(),
-                    name: archiveName,
-                    url,
-                    total: 0,
-                    etag: "",
-                    transferred: 0,
-                    status: "paused",
-                    blobFallback: true,
-                    message: "Queued · staging in browser storage",
-                    createdAt: Date.now(),
-                };
-                if (getToken() !== token) return;
-                const next = [job, ...downloadJobsRef.current];
-                downloadJobsRef.current = next;
-                setDownloadJobs(next);
-                await saveResumableDownload(job);
-                if (getToken() !== token) {
-                    removeResumableDownload(job.id).catch(() => {});
-                    removeResumableDownloadChunks(job.id).catch(() => {});
-                    return;
-                }
-                runResumableDownload(job, token);
-                return;
-            }
-            if (typeof navigator.storage.persist === "function") {
-                await navigator.storage.persist().catch(() => false);
-                if (getToken() !== token) return;
-            }
-
-            const root = await navigator.storage.getDirectory();
-            if (getToken() !== token) return;
-            const tempName = `storelimitless-zip-${createUniqueId()}.download`;
-            const tempHandle = await root.getFileHandle(tempName, {create: true});
-            if (getToken() !== token) {
-                await root.removeEntry(tempName).catch(() => {});
-                return;
-            }
-            const writer = await tempHandle.createWritable();
-            await writer.truncate(0);
-            await writer.close();
-            if (getToken() !== token) {
-                await root.removeEntry(tempName).catch(() => {});
-                return;
-            }
-
-            const job = {
-                id: createUniqueId(),
-                name: archiveName,
-                tempName,
-                streamOnly: true,
-                url,
-                total: 0,
-                etag: "",
-                transferred: 0,
-                status: "paused",
-                message: "Queued",
-                createdAt: Date.now(),
-            };
-            if (getToken() !== token) {
-                removeStagedFile(job);
-                return;
-            }
-            const next = [job, ...downloadJobsRef.current];
-            downloadJobsRef.current = next;
-            setDownloadJobs(next);
-            await saveResumableDownload(job);
-            if (getToken() !== token) {
-                removeStagedFile(job);
-                removeResumableDownload(job.id).catch(() => {});
-                removeResumableDownloadChunks(job.id).catch(() => {});
-                return;
-            }
-            runResumableDownload(job, token);
+            triggerBrowserDownload(`${API_URL}/public/download-zip/${encodeURIComponent(data.public_token)}?${filenameQuery}`);
         } catch (error) {
             console.error("ZIP download failed:", error);
-            alert(error.message || "Failed to download the selected items as a ZIP.");
+            alert(error instanceof Error ? error.message : "Failed to download the selected items as a ZIP.");
         }
     };
 
@@ -1524,7 +775,7 @@ export default function DashboardPage({active = true} = {}) {
      */
     const handleLogout = () => {
         clearDashboardTreeCache(getToken());
-        clearAllTasks();
+        clearAllUploadJobs();
         endAuthSession();
         navigate("/");
     };
@@ -3136,12 +2387,6 @@ export default function DashboardPage({active = true} = {}) {
             cancelUploadJob={cancelUploadJob}
             dismissUploadJob={dismissUploadJob}
             clearAllUploadJobs={clearAllUploadJobs}
-            clearAllTasks={clearAllTasks}
-            downloadJobs={downloadJobs}
-            pauseDownload={pauseDownload}
-            resumeDownload={resumeDownload}
-            removeDownload={removeDownload}
-            clearCompletedDownloads={clearCompletedDownloads}
         />
 
         {zipDownloadPrompt && (<div

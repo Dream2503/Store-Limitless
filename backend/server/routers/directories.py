@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+import aiofiles
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -14,10 +17,22 @@ from backend.database.models import Directory, File, User
 from backend.server.jwt_handler import OAuth2_scheme, get_current_user
 from backend.server.security import create_public_stream_token, create_public_zip_token, create_session_bound_stream_token
 from backend.server.utils import perform_validation
+from core.config import TRANSFER_PATH
 from core.data_center import Database
+from core.transfer import file_upload
 from core.utils import write_log
 
 router: APIRouter = APIRouter()
+
+MAX_EDITABLE_TEXT_SIZE = 5_000_000
+EDITABLE_TEXT_EXTENSIONS = {
+    "txt", "text", "log", "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
+    "html", "htm", "css", "scss", "sass", "js", "jsx", "mjs", "cjs", "ts", "tsx", "py", "pyw", "ipynb",
+    "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx", "rs", "go", "java", "kt", "kts", "swift", "rb", "php",
+    "sh", "bash", "zsh", "fish", "sql", "r", "lua", "pl", "pm", "ex", "exs", "erl", "hrl", "hs", "lhs",
+    "scala", "sc", "dart", "vue", "svelte", "graphql", "gql", "proto", "make", "cmake", "dockerfile",
+    "gitignore", "editorconfig", "diff", "patch", "properties", "gradle", "markdown", "mdown", "mkd", "md",
+}
 
 
 class ZipDownloadRequest(BaseModel):
@@ -601,6 +616,91 @@ async def get_file_metadata(fid: int, user: User = Depends(get_current_user)) ->
         "type": file.type,
         "size": max(0, int(file.size or 0)),
     }
+
+
+
+@router.put("/file/{fid}/content")
+async def replace_text_file_content(
+        fid: int,
+        request: Request,
+        user: User = Depends(get_current_user),
+) -> JSONResponse:
+    """Upload edited text as fresh provider chunks and replace the existing file record's links."""
+
+    file: File | None = await File.get(user.username, fid=fid)
+    if file is None or file.username != user.username:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    filename = Path(file.name).name
+    extension = filename.rsplit(".", 1)[-1].casefold()
+    if extension not in EDITABLE_TEXT_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="Editing is supported only for text and source-code files")
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length header") from error
+        if declared_size > MAX_EDITABLE_TEXT_SIZE:
+            raise HTTPException(status_code=413, detail="Edited text files are limited to 5 MB")
+
+    file_path = TRANSFER_PATH / user.username / "text-edits" / uuid4().hex / filename
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    total_size = 0
+    previous_links = list(file.links)
+    previous_size = file.size
+    previous_modified_at = file.modified_at
+
+    try:
+        async with aiofiles.open(file_path, "wb") as output:
+            async for chunk in request.stream():
+                total_size += len(chunk)
+                if total_size > MAX_EDITABLE_TEXT_SIZE:
+                    raise HTTPException(status_code=413, detail="Edited text files are limited to 5 MB")
+                await output.write(chunk)
+
+        # Upload brand-new storage chunks but keep this file's database identity.
+        # The old links remain in PostgreSQL until every new chunk is uploaded.
+        file.links = []
+        async with aclosing(file_upload(file, file_path, intermediate=True)) as upload_stream:
+            async for _ in upload_stream:
+                pass
+
+        file.modified_at = datetime.now(timezone.utc)
+        await file.update()
+        write_log(
+            "INFO",
+            Database,
+            "EDIT FILE",
+            user.username,
+            f"Saved edited file id={fid} name={file.name!r} size={file.size} chunks={len(file.links)}",
+        )
+        return JSONResponse({
+            "id": fid,
+            "name": file.name,
+            "size": file.size,
+            "chunks": len(file.links),
+            "modified_at": file.modified_at.isoformat(),
+        })
+
+    except HTTPException:
+        file.links = previous_links
+        file.size = previous_size
+        file.modified_at = previous_modified_at
+        raise
+    except Exception as error:
+        file.links = previous_links
+        file.size = previous_size
+        file.modified_at = previous_modified_at
+        write_log("ERROR", Database, "EDIT FILE", user.username, f"Failed to save edited file id={fid}: {error}")
+        raise HTTPException(status_code=502, detail="The edited file could not be uploaded to storage") from error
+    finally:
+        file_path.unlink(missing_ok=True)
+        try:
+            file_path.parent.rmdir()
+        except OSError:
+            pass
 
 
 @router.post("/file/{fid}/public-link")

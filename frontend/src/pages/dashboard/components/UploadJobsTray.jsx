@@ -2,7 +2,6 @@ import {useEffect, useRef, useState} from "react";
 import {useLocation, useNavigate} from "react-router-dom";
 import {API_URL, iconBtn, iconBtnDanger} from "../constants.js";
 import {formatFileSize, getToken} from "../utils.js";
-import DownloadJobsTray from "./DownloadJobsTray.jsx";
 
 /* -------------------------------------------------------------------------- */
 /*  Pure helpers                                                              */
@@ -921,19 +920,12 @@ export default function UploadJobsTray({
     cancelUploadJob,
     dismissUploadJob,
     clearAllUploadJobs,
-    clearAllTasks,
-    downloadJobs = [],
-    pauseDownload,
-    resumeDownload,
-    removeDownload,
-    clearCompletedDownloads,
-    readOnlyDownloads = false,
     fullscreen = false,
     onMinimize,
     traySide = "right",
     trayPosition = "bottom",
 }) {
-    const navigate = useNavigate();
+    const navigate = useNavigate();    const navigate = useNavigate();
     const location = useLocation();
     const [maximized, setMaximized] = useState(false);
     const [minimized, setMinimized] = useState(false);
@@ -945,7 +937,7 @@ export default function UploadJobsTray({
     const [selectionIndex, setSelectionIndex] = useState(0);
     const [starting, setStarting] = useState(false);
     const [error, setError] = useState("");
-    const clearTasks = clearAllTasks || clearAllUploadJobs;
+    const clearTasks = clearAllUploadJobs;
     // Batches that have already prompted automatically, so the 1-second polling refresh
     // can't reopen a picker the user deliberately closed.
     const promptedRef = useRef(new Set());
@@ -1028,12 +1020,10 @@ export default function UploadJobsTray({
         }
     }
 
-    if (!uploadJobs.length && !downloadJobs.length && !selectionJob && !fullscreen) return null;
+    if (!uploadJobs.length && !selectionJob && !fullscreen) return null;
 
-    const activeUploadCount = uploadJobs.filter((job) => job.status === "queued" || job.status === "uploading").length;
-    const activeDownloadCount = downloadJobs.filter((job) => job.status === "downloading").length;
-    const activeCount = activeUploadCount + activeDownloadCount;
-    const totalCount = uploadJobs.length + downloadJobs.length;
+    const activeCount = uploadJobs.filter((job) => job.status === "queued" || job.status === "uploading").length;
+    const totalCount = uploadJobs.length;
     const trayMaximized = fullscreen || maximized;
 
     const leaveFullscreen = () => {
@@ -1055,7 +1045,7 @@ export default function UploadJobsTray({
         `}</style>
 
         {trayMaximized && !fullscreen && <div className="fixed inset-0 z-[250] bg-black/60 backdrop-blur-sm" aria-hidden="true" style={{visibility: "visible", pointerEvents: "auto"}}/>}
-        <aside aria-label="Task tray"
+        <aside aria-label="Upload tray"
                style={{visibility: "visible", pointerEvents: "auto"}}
                className={`min-w-0 overflow-hidden bg-[#111713] ${fullscreen
                    ? "flex h-[100dvh] w-full flex-col"
@@ -1067,7 +1057,7 @@ export default function UploadJobsTray({
                         className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[#18221b]"
                         aria-label="Expand task tray">
                     <Icon name="checklist" className="text-[19px] text-[#3ecf8e]"/>
-                    <span className="text-sm font-medium">Task tray</span>
+                    <span className="text-sm font-medium">Upload tray</span>
                     <span className="ml-auto text-xs text-[#9bbba7]">{activeCount} active · {totalCount} total</span>
                     <Icon name="expand_less" className="text-[18px] text-[#9bbba7]"/>
                 </button>
@@ -1075,7 +1065,7 @@ export default function UploadJobsTray({
                 <header className="flex items-center justify-between gap-3 border-b border-[#29362e] bg-[#151d18] px-4 py-3">
                     <div className="flex min-w-0 items-center gap-2.5">
                         <Icon name="checklist" className="text-[19px] text-[#3ecf8e]"/>
-                        <h2 className="text-base font-medium text-[#f3f7f4]">Task tray</h2>
+                        <h2 className="text-base font-medium text-[#f3f7f4]">Upload tray</h2>
                         {activeCount > 0 &&
                             <span className="rounded-full border border-[#2b4938] bg-[#1c2c22] px-2 py-0.5 text-[12px] tabular-nums text-[#b0c8b9]">
                                 {activeCount} active
@@ -1110,31 +1100,22 @@ export default function UploadJobsTray({
                                 aria-label="Minimize task tray">
                             <Icon name={minimized ? "expand_less" : "minimize"} className="text-[17px]"/>
                         </button>
-                        {!readOnlyDownloads && typeof clearTasks === "function" && <button type="button" onClick={() => clearTasks()}
+                        {typeof clearTasks === "function" && <button type="button" onClick={() => clearTasks()}
                                 className="rounded-md px-2 py-1 text-[12px] text-[#b0c8b9] transition-colors hover:bg-white/5 hover:text-[#f3f7f4]"
-                                title="Cancel active tasks and clear task history">
-                            Clear tasks
+                                title="Cancel active uploads and clear upload history">
+                            Clear uploads
                         </button>}
                     </div>
                 </header>
 
                 <div className={`upload-tray-scrollbar min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2 ${trayMaximized ? "" : "max-h-[min(62dvh,36rem)]"}`}>
-                    {!uploadJobs.length && !downloadJobs.length && <div className="flex min-h-48 flex-col items-center justify-center px-4 py-10 text-center">
+                    {!uploadJobs.length && <div className="flex min-h-48 flex-col items-center justify-center px-4 py-10 text-center">
                         <Icon name="checklist" className="text-3xl text-[#3b5144]"/>
-                        <p className="mt-3 text-sm text-[#c6d2ca]">No tasks yet</p>
-                        <p className="mt-1 text-xs text-[#718477]">Uploads and downloads will appear here with live progress.</p>
+                        <p className="mt-3 text-sm text-[#c6d2ca]">No uploads yet</p>
+                        <p className="mt-1 text-xs text-[#718477]">Uploads and imports will appear here with live progress.</p>
                     </div>}
                     {uploadJobs.slice().reverse().map((job) => <UploadJobCard key={job.jobId} job={job} onSelectFiles={openSelection}
                                                                               onCancel={cancelUploadJob} onDismiss={dismissUploadJob}/>)}
-                    {downloadJobs.length > 0 && <DownloadJobsTray
-                        jobs={downloadJobs}
-                        onPause={pauseDownload}
-                        onResume={resumeDownload}
-                        onRemove={removeDownload}
-                        onClearCompleted={clearCompletedDownloads}
-                        readOnly={readOnlyDownloads}
-                        embedded
-                    />}
                 </div>
             </>}
 

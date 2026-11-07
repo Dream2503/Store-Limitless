@@ -925,7 +925,7 @@ export default function UploadJobsTray({
     traySide = "right",
     trayPosition = "bottom",
 }) {
-    const navigate = useNavigate();    const navigate = useNavigate();
+    const navigate = useNavigate();
     const location = useLocation();
     const [maximized, setMaximized] = useState(false);
     const [minimized, setMinimized] = useState(false);

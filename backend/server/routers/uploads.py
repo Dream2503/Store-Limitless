@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from asyncio import CancelledError, Task, create_task
 from contextlib import aclosing
-from datetime import datetime, timezone, UTC
+from datetime import datetime, timezone
 from mimetypes import guess_type
 from pathlib import Path
 from time import time
@@ -93,7 +93,7 @@ async def upload_file(
         name=file_name,
         type=guess_type(file_name)[0] or "application/octet-stream",
         size=0,
-        modified_at=datetime.now(UTC),
+        modified_at=datetime.now(timezone.utc),
         links=[],
         data_center=data_center,
         username=user.username
@@ -890,7 +890,7 @@ async def upload_link(
         name=link_name,
         type="application/octet-stream",
         size=0,
-        modified_at=datetime.now(UTC),
+        modified_at=datetime.now(timezone.utc),
         links=[],
         data_center=data_center,
         username=user.username

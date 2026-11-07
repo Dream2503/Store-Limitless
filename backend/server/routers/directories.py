@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, UTC
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
@@ -75,7 +75,7 @@ async def create_folder(directory: str, name: str, user: User = Depends(get_curr
 
     folder: Directory = Directory(
         path=Path(perform_validation(directory, "directory")) / perform_validation(name, "file_name"),
-        modified_at=datetime.now(UTC),
+        modified_at=datetime.now(timezone.utc),
         username=user.username,
     )
     await folder.save()

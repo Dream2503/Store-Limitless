@@ -6,7 +6,7 @@ from asyncio import CancelledError, Queue, Task, create_task, gather, sleep, to_
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import datetime, timezone, UTC
+from datetime import datetime, timezone
 from functools import partial
 from html import unescape
 import inspect
@@ -1167,7 +1167,7 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
                     name=name,
                     type=guess_type(name)[0] or "application/octet-stream",
                     size=max(0, local_path.stat().st_size),
-                    modified_at=datetime.now(UTC),
+                    modified_at=datetime.now(timezone.utc),
                     links=[],
                     data_center=file.data_center,
                     username=file.username,
@@ -1690,7 +1690,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                     torrent_file.name = target_name
                     torrent_file.type = guess_type(target_name)[0] or "application/octet-stream"
                     torrent_file.size = local_size
-                    torrent_file.modified_at = datetime.now(UTC)
+                    torrent_file.modified_at = datetime.now(timezone.utc)
                     torrent_file.links = []
                 else:
                     torrent_file = File(
@@ -1698,7 +1698,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                         name=target_name,
                         type=guess_type(target_name)[0] or "application/octet-stream",
                         size=local_size,
-                        modified_at=datetime.now(UTC),
+                        modified_at=datetime.now(timezone.utc),
                         links=[],
                         data_center=file.data_center,
                         username=file.username,

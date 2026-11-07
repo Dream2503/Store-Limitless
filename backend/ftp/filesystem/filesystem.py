@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from asyncio import AbstractEventLoop
-from datetime import datetime, timezone, UTC
+from datetime import datetime, timezone
 from mimetypes import guess_type
 from os import stat_result
 from pathlib import Path
@@ -180,7 +180,7 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
         if directory is None:
             raise OSError(2, "No such file or directory", parent)
 
-        self.run(Directory(path=directory.path / name, modified_at=datetime.now(UTC), username=self.user.username).save())
+        self.run(Directory(path=directory.path / name, modified_at=datetime.now(timezone.utc), username=self.user.username).save())
         write_log("INFO", Database, "FTP FILESYSTEM", self.user.username, f"Created directory path={path}")
 
     def remove(self, path: str) -> None:
@@ -270,7 +270,7 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
                 directory_id=cast("int", directory.id),
                 name=name, type=guess_type(name)[0] or "application/octet-stream",
                 size=0,
-                modified_at=datetime.now(UTC),
+                modified_at=datetime.now(timezone.utc),
                 links=[],
                 data_center=getattr(self.user, "data_center", None) or "Discord",
                 username=self.user.username

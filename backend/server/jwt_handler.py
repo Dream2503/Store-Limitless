@@ -1,6 +1,6 @@
 """Create and validate bearer tokens and resolve authenticated users."""
 
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from secrets import token_urlsafe
 
 from fastapi import Depends, HTTPException
@@ -19,7 +19,7 @@ def create_access_token(data: dict[str, str], expires_delta: timedelta | None = 
 
     to_encode: dict[str, str | datetime] = data.copy()
     to_encode.update({
-        "exp": datetime.now(UTC) + (expires_delta or timedelta(hours=24)),
+        "exp": datetime.now(timezone.utc) + (expires_delta or timedelta(hours=24)),
         # Ensure two logins for the same account never share a revocation identity.
         "jti": token_urlsafe(16),
     })

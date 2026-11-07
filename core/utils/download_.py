@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from asyncio import Task, create_task, sleep, to_thread
-from datetime import datetime, timezone, UTC
+from datetime import datetime, timezone
 from email.message import Message
 from mimetypes import guess_type
 from pathlib import Path
@@ -84,7 +84,7 @@ async def download_processed_link(file: File, link: str, selected_torrent_files:
         update_progress_name(file, output.name, progress_state)
         file.size = output.stat().st_size
         file.type = guess_type(file.name)[0] or "application/octet-stream"
-        file.modified_at = datetime.now(UTC)
+        file.modified_at = datetime.now(timezone.utc)
         yield progress_state.current
 
         async for progress_value in file_upload(file, output, intermediate=True):
@@ -231,7 +231,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
 
         file.size = output.stat().st_size
         file.type = guess_type(file.name)[0] or response_type or "application/octet-stream"
-        file.modified_at = datetime.now(UTC)
+        file.modified_at = datetime.now(timezone.utc)
         write_log(
             "INFO", data_center, "UPLOAD", file.username,
             f"Direct-link original chunks uploaded name={file.name!r} size={file.size}.",

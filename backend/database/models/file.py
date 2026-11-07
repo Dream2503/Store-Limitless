@@ -2,7 +2,7 @@
 File model and persistence operations. File metadata is stored in PostgreSQL and mirrored in Redis for lookup, listing, trash, and restore operations.
 """
 
-from datetime import datetime, timedelta, timezone, UTC
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
 
@@ -23,7 +23,7 @@ class File(BaseModel):
     name: str
     type: str
     size: int
-    modified_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    modified_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     deleted_at: datetime | None = None
     data_center: str
     links: list[str]
@@ -195,7 +195,7 @@ class File(BaseModel):
         if self.id is None:
             raise ValueError("File has no ID")
 
-        self.modified_at = datetime.now(UTC)
+        self.modified_at = datetime.now(timezone.utc)
         self.deleted_at = self.modified_at
         await self.update()
 
@@ -230,7 +230,7 @@ class File(BaseModel):
             raise ValueError("File has no ID")
 
         self.deleted_at = None
-        self.modified_at = datetime.now(UTC)
+        self.modified_at = datetime.now(timezone.utc)
         await self.update()
 
     @classmethod
@@ -238,7 +238,7 @@ class File(BaseModel):
         """Permanently delete files that have remained in the user’s trash longer than older_than_days, removing their Redis entries too."""
 
         files: list[File] = cast("list[File]", await Redis.get(f"user:{username}:files", "File"))
-        cutoff: datetime = datetime.now(UTC) - timedelta(days=older_than_days)
+        cutoff: datetime = datetime.now(timezone.utc) - timedelta(days=older_than_days)
         expired: list[File] = [file for file in files if file.deleted_at is not None and file.deleted_at < cutoff]
 
         if not expired:

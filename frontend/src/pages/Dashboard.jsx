@@ -129,7 +129,7 @@ export default function DashboardPage({active = true} = {}) {
     } = useDashboardData(currentFolder, navigate);
     const {searchResults, searchLoading, searchError} = useGlobalFileSearch(searchQuery, activeTab, files);
     const {uploadJobs, dismissUploadJob, cancelUploadJob, clearAllUploadJobs} = useUploadJobs(refreshDirectory);
-    const [showFolderModal, setShowFolderModal] = useState(false);    const [showFolderModal, setShowFolderModal] = useState(false);
+    const [showFolderModal, setShowFolderModal] = useState(false);
     const [showUploadModal, setShowUploadModal] = useState(false);
     const [shareDialog, setShareDialog] = useState(null);
     const [shareCopyStatus, setShareCopyStatus] = useState("");

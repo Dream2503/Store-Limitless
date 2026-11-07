@@ -1055,7 +1055,7 @@ export default function UploadJobsTray({
             {minimized && !fullscreen ? (
                 <button type="button" onClick={() => setMinimized(false)}
                         className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[#18221b]"
-                        aria-label="Expand task tray">
+                        aria-label="Expand upload tray">
                     <Icon name="checklist" className="text-[19px] text-[#3ecf8e]"/>
                     <span className="text-sm font-medium">Upload tray</span>
                     <span className="ml-auto text-xs text-[#9bbba7]">{activeCount} active · {totalCount} total</span>
@@ -1082,8 +1082,8 @@ export default function UploadJobsTray({
                                     }
                                 }}
                                 className="flex h-7 w-7 items-center justify-center rounded-md text-[#9bbba7] transition-colors hover:bg-white/5 hover:text-[#f3f7f4]"
-                                title={trayMaximized ? "Restore task tray" : "Maximize task tray"}
-                                aria-label={trayMaximized ? "Restore task tray" : "Maximize task tray"}>
+                                title={trayMaximized ? "Restore upload tray" : "Maximize upload tray"}
+                                aria-label={trayMaximized ? "Restore upload tray" : "Maximize upload tray"}>
                             <Icon name={trayMaximized ? "close_fullscreen" : "open_in_full"} className="text-[17px]"/>
                         </button>
                         <button type="button"
@@ -1096,8 +1096,8 @@ export default function UploadJobsTray({
                                     }
                                 }}
                                 className="flex h-7 w-7 items-center justify-center rounded-md text-[#9bbba7] transition-colors hover:bg-white/5 hover:text-[#f3f7f4]"
-                                title="Minimize task tray"
-                                aria-label="Minimize task tray">
+                                title="Minimize upload tray"
+                                aria-label="Minimize upload tray">
                             <Icon name={minimized ? "expand_less" : "minimize"} className="text-[17px]"/>
                         </button>
                         {typeof clearTasks === "function" && <button type="button" onClick={() => clearTasks()}

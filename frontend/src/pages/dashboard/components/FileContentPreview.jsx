@@ -36,6 +36,27 @@ async function getPreviewUrl(fileId, publicToken) {
 }
 
 /**
+ * Select only the visible file contents for Ctrl+A / Cmd+A.
+ * Stop propagation so the dashboard's global select-all shortcut does not
+ * replace the browser text selection with a selection of every file.
+ * @param {import("react").KeyboardEvent<HTMLElement>} event
+ */
+function selectAllPreviewContent(event) {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "a") return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const selection = window.getSelection();
+    if (!selection) return;
+
+    const range = document.createRange();
+    range.selectNodeContents(event.currentTarget);
+    selection.removeAllRanges();
+    selection.addRange(range);
+}
+
+/**
  * Render a plain text file or a small safe Markdown subset.
  * @param {{fileId: string, kind: "text" | "markdown", navigate: Function}} props
  */
@@ -190,7 +211,12 @@ export default function FileContentPreview({fileId, kind, navigate, publicToken}
         /> : kind === "text" ? <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-auto overscroll-contain bg-[#111111] p-4 sm:p-6"
                                   style={{WebkitOverflowScrolling: "touch", scrollbarGutter: "stable"}}>
             <div className="mx-auto min-h-full w-max min-w-full max-w-6xl rounded-xl border border-[#2e2e2e] bg-[#171717]">
-                <pre className="overflow-visible whitespace-pre p-4 text-sm leading-6 text-[#d4d4d4]"><code>{content}</code></pre>
+                <pre
+                    tabIndex={0}
+                    aria-label="File contents"
+                    onKeyDown={selectAllPreviewContent}
+                    className="overflow-visible whitespace-pre p-4 text-sm leading-6 text-[#d4d4d4] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#3ecf8e]/40"
+                ><code>{content}</code></pre>
             </div>
         </div> : <div className="min-h-0 w-full flex-1 overflow-hidden">
             <MarkdownPreview content={content}/>
@@ -276,8 +302,13 @@ function MarkdownPreview({content}) {
             <br/>}{inline(part)}</span>)}</p>);
     }
 
-    return <article className="h-full min-h-0 w-full overflow-y-auto overflow-x-auto overscroll-contain bg-[#151515] px-5 py-8 sm:px-10"
-                    style={{WebkitOverflowScrolling: "touch", scrollbarGutter: "stable"}}>
+    return <article
+        tabIndex={0}
+        aria-label="Markdown file contents"
+        onKeyDown={selectAllPreviewContent}
+        className="h-full min-h-0 w-full overflow-y-auto overflow-x-auto overscroll-contain bg-[#151515] px-5 py-8 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#3ecf8e]/40 sm:px-10"
+        style={{WebkitOverflowScrolling: "touch", scrollbarGutter: "stable"}}
+    >
         <div
             className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-4 rounded-xl border border-[#2e2e2e] bg-[#1b1b1b] p-5 sm:p-8">{blocks}</div>
     </article>;

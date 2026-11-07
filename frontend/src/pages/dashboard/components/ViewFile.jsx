@@ -1021,5 +1021,5 @@ export default function ViewFile({active = true} = {}) {
                         </div>
                     </div>)}
         </main>
-    </div>);    </div>);
+    </div>);
 }

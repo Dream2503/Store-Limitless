@@ -843,23 +843,25 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     if (cancelToken.cancelled) continue;
 
                     setQueueProgress({current: index + 1, total: filesWithPaths.length});
-                    await publishBatch({
-                        items: [{...queueItems[index], status: "queued", message: "Queued in browser"}],
-                        total_items: 1,
-                        status: "uploading",
-                        current_index: 0,
-                        completed_items: 0,
-                        current_job_id: "",
-                        current_name: relativePath,
-                        item_index: 0,
-                        item_status: "uploading",
-                        item_message: "Uploading",
-                        message: `Uploading ${index + 1} of ${queueTotal}`
-                    });
                     const parts = relativePath.split("/").filter(Boolean);
                     parts.pop();
                     const destinationDirectory = parts.length ? `${directory.replace(/\/$/, "")}/${parts.join("/")}` : directory;
                     try {
+                        // Keep startup inside this item's catch block so a cancellation
+                        // during the status update cannot stop the remaining queue.
+                        await publishBatch({
+                            items: [{...queueItems[index], status: "queued", message: "Queued in browser"}],
+                            total_items: 1,
+                            status: "uploading",
+                            current_index: 0,
+                            completed_items: 0,
+                            current_job_id: "",
+                            current_name: relativePath,
+                            item_index: 0,
+                            item_status: "uploading",
+                            item_message: "Uploading",
+                            message: `Uploading ${index + 1} of ${queueTotal}`
+                        });
                         await createJob(selectedFile, "", destinationDirectory, relativePath, index + 1);
                         successfulItems++;
                         await publishBatch({
@@ -874,19 +876,27 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             message: `Completed ${successfulItems} of ${queueTotal}`
                         });
                     } catch (error) {
-                        if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) throw new Error("Upload task was cancelled.");
+                        if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) {
+                            // Cancellation belongs to this file only. Continue with its siblings.
+                            continue;
+                        }
                         const failureMessage = error instanceof Error ? error.message : "Upload failed";
-                        await publishBatch({
-                            status: "error",
-                            current_index: 0,
-                            completed_items: 0,
-                            current_job_id: "",
-                            current_name: "",
-                            item_index: 0,
-                            item_status: "error",
-                            item_message: failureMessage,
-                            message: failureMessage
-                        });
+                        try {
+                            await publishBatch({
+                                status: "error",
+                                current_index: 0,
+                                completed_items: 0,
+                                current_job_id: "",
+                                current_name: "",
+                                item_index: 0,
+                                item_status: "error",
+                                item_message: failureMessage,
+                                message: failureMessage
+                            });
+                        } catch (publishError) {
+                            if (cancelToken.cancelled || /cancelled/i.test(publishError instanceof Error ? publishError.message : "")) continue;
+                            throw publishError;
+                        }
                     }
                 }
             } else {
@@ -899,20 +909,21 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     if (cancelToken.cancelled) continue;
 
                     setQueueProgress({current: index + 1, total: links.length});
-                    await publishBatch({
-                        items: [{...queueItems[index], name: selectedLink, status: "queued", message: "Queued in browser"}],
-                        total_items: 1,
-                        status: "uploading",
-                        current_index: 0,
-                        completed_items: 0,
-                        current_job_id: "",
-                        current_name: selectedLink,
-                        item_index: 0,
-                        item_status: "uploading",
-                        item_message: "Queued in browser",
-                        message: `Queued ${index + 1} of ${queueTotal}`
-                    });
                     try {
+                        // Keep task startup inside this item's catch block as well.
+                        await publishBatch({
+                            items: [{...queueItems[index], name: selectedLink, status: "queued", message: "Queued in browser"}],
+                            total_items: 1,
+                            status: "uploading",
+                            current_index: 0,
+                            completed_items: 0,
+                            current_job_id: "",
+                            current_name: selectedLink,
+                            item_index: 0,
+                            item_status: "uploading",
+                            item_message: "Queued in browser",
+                            message: `Queued ${index + 1} of ${queueTotal}`
+                        });
                         await createJob(null, selectedLink, directory, selectedLink, index + 1);
                         successfulItems++;
                         await publishBatch({
@@ -927,26 +938,33 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             message: `Completed ${successfulItems} of ${queueTotal}`
                         });
                     } catch (error) {
-                        if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) throw new Error("Upload task was cancelled.");
+                        if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) {
+                            // Cancelling one link import leaves following links queued.
+                            continue;
+                        }
                         const failureMessage = error instanceof Error ? error.message : "Import failed";
-                        await publishBatch({
-                            status: "error",
-                            current_index: 0,
-                            completed_items: 0,
-                            current_job_id: "",
-                            current_name: "",
-                            item_index: 0,
-                            item_status: "error",
-                            item_message: failureMessage,
-                            message: failureMessage
-                        });
+                        try {
+                            await publishBatch({
+                                status: "error",
+                                current_index: 0,
+                                completed_items: 0,
+                                current_job_id: "",
+                                current_name: "",
+                                item_index: 0,
+                                item_status: "error",
+                                item_message: failureMessage,
+                                message: failureMessage
+                            });
+                        } catch (publishError) {
+                            if (cancelToken.cancelled || /cancelled/i.test(publishError instanceof Error ? publishError.message : "")) continue;
+                            throw publishError;
+                        }
                     }
                 }
             }
 
-            if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
-            // Every item has already written its own terminal state. Do not overwrite
-            // the last item based on the aggregate result of the complete queue.
+            // Every item has already written its own terminal state. A cancelled
+            // item is consumed by its own loop and does not cancel later queue items.
         } catch (error) {
             const detail = error instanceof Error ? error.message : "Upload task failed";
             const wasCancelled = Boolean(batchTransfer?.cancelToken.cancelled) || /cancelled/i.test(detail);
@@ -957,8 +975,9 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     for (let index = activeQueueIndex; index < batchIds.length; index += 1) {
                         const taskId = batchIds[index];
                         const taskTransfer = window.__storeLimitlessUploadTransfers?.get(taskId);
-                        // Preserve queued items that were cancelled individually.
-                        if (index > activeQueueIndex && taskTransfer?.cancelToken.cancelled && !wasCancelled) continue;
+                        // Never propagate a single-file cancellation to queued siblings.
+                        if (wasCancelled && index > activeQueueIndex) continue;
+                        if (index > activeQueueIndex && taskTransfer?.cancelToken.cancelled) continue;
                         if (wasCancelled && taskTransfer) taskTransfer.cancelToken.cancelled = true;
                         try {
                             await fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(taskId)}`, {
@@ -970,7 +989,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                     current_name: "",
                                     message: index === activeQueueIndex
                                         ? (wasCancelled ? "Upload task cancelled" : detail)
-                                        : (wasCancelled ? "Queue cancelled before this item started" : "Not started because an earlier queue step failed"),
+                                        : "Not started because an earlier queue step failed",
                                 }),
                             });
                         } catch (publishError) {

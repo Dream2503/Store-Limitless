@@ -6,6 +6,7 @@ from hashlib import sha256
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from backend.database.models import Directory, File, User
 from backend.database.redis_server import Redis
@@ -15,6 +16,13 @@ from core.data_center import Database
 from core.utils import write_log
 
 router: APIRouter = APIRouter()
+
+
+class LoginRequest(BaseModel):
+    """Credentials sent in the POST body instead of the URL query string."""
+
+    username: str
+    password: str
 
 
 @router.post("/register")
@@ -34,8 +42,11 @@ async def register(user: User) -> JSONResponse:
 
 
 @router.post("/login")
-async def login(username: str, password: str) -> tuple[dict[str, str], dict[str, str], Directory]:
+async def login(credentials: LoginRequest) -> tuple[dict[str, str], dict[str, str], Directory]:
     """Authenticate a user and return its token, profile, and home directory."""
+
+    username = credentials.username
+    password = credentials.password
 
     await Redis.delete(f"user:{username}", "User")
     await Redis.delete(f"user:{username}:directories", "Directory")

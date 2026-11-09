@@ -1020,7 +1020,7 @@ supplied frontend and server modules.
 | Method and path                              | Purpose                                                                                                                                                                                    |
 |----------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `POST /auth/register`                        | Validate details, hash the password, create the account, and create `/home`.                                                                                                               |
-| `POST /auth/login?username=...&password=...` | Verify credentials and return the bearer token, profile, and home directory.                                                                                                               |
+| `POST /auth/login` with JSON `{username, password}` | Verify credentials and return the bearer token, profile, and home directory. Credentials are sent in the request body, not the URL.                                                                                                               |
 | `GET /auth/metadata`                         | Return account metadata including the calculated storage usage.                                                                                                                            |
 | `GET /auth/tree`                             | Return the authenticated user's active/trashed directories and file metadata, plus total storage usage, in one response. Remote file-part `links` are omitted from this full-tree payload. |
 

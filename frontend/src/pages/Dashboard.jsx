@@ -823,10 +823,11 @@ export default function DashboardPage({active = true} = {}) {
             && actionItems.length > 0
             && actionItems.every((item) => item && ["file", "folder"].includes(item.type) && !item.is_deleted)
             && (multiSelection || actionItems.some((item) => item.type === "folder"));
-        const menuHeight = payload.kind === "background" ? 80
-            : payload.item?.is_deleted ? 80
-                : multiSelection ? canDownloadZip ? 120 : 80
-                    : payload.item?.type === "folder" ? canDownloadZip ? 200 : 160 : 160;
+        const menuItemCount = payload.kind === "background" ? 2
+            : payload.item?.is_deleted ? 3
+                : multiSelection ? 3 + (canDownloadZip ? 1 : 0)
+                    : payload.item?.type === "folder" ? 4 + (canDownloadZip ? 1 : 0) : 6;
+        const menuHeight = menuItemCount * 36 + 8;
         setContextMenu({
             ...payload,
             canDownloadZip,

@@ -1,0 +1,2 @@
+# Keep executable shell scripts Unix-formatted even on Windows-configured Git clients.
+*.sh text eol=lf

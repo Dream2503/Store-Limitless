@@ -780,11 +780,13 @@ function describeJob(job) {
         || browserFileUpload
         || /downloading and uploading file/i.test(String(job.message || ""))
     );
-    const downloadPercent = reportedDownloadTotal > 0
-        ? Math.max(0, Math.min(100, reportedDownloadTransfer * 100 / reportedDownloadTotal))
-        : fallbackDownloadPercent ?? (downloadTotal > 0
-            ? Math.max(0, Math.min(100, downloadTransfer * 100 / downloadTotal))
-            : 0);
+    const downloadPercent = reportedDownloadTransfer > 0 || fallbackDownloadPercent == null
+        ? (reportedDownloadTotal > 0
+            ? Math.max(0, Math.min(100, reportedDownloadTransfer * 100 / reportedDownloadTotal))
+            : downloadTotal > 0
+                ? Math.max(0, Math.min(100, downloadTransfer * 100 / downloadTotal))
+                : 0)
+        : fallbackDownloadPercent;
 
     const storageTotal = reportedStorageTotal || (browserFileUpload ? num(singleItem.size) || num(singleItem.total) : total);
     const storagePercent = reportedStorageTransfer > 0 || fallbackStoragePercent == null

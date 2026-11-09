@@ -745,7 +745,16 @@ function describeJob(job) {
 
     const downloadTransfer = num(job.downloadTransfer);
     const downloadTotal = hasTorrentItems ? (allItemSizesKnown ? num(job.downloadTotal) : 0) : num(job.downloadTotal);
-    const downloadActive = Boolean(job.downloadActive) || job.ingestionType === "google_drive_folder";
+    // Keep the separate source-download and storage-upload bars visible if a
+    // status refresh temporarily omits download_active. The counters and the
+    // simultaneous-transfer stage message are independent evidence of that phase.
+    const downloadActive = Boolean(
+        job.downloadActive
+        || job.ingestionType === "google_drive_folder"
+        || downloadTotal > 0
+        || downloadTransfer > 0
+        || /downloading and uploading file/i.test(String(job.message || ""))
+    );
     const downloadPercent = downloadTotal > 0
         ? Math.max(0, Math.min(100, downloadTransfer * 100 / downloadTotal))
         : 0;

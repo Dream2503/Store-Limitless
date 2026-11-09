@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from ipaddress import IPv4Address
 from asyncio import CancelledError, Task, create_task, gather, get_running_loop, run, sleep, to_thread, wait_for
 from os import environ, execv, kill, replace
 from pathlib import Path
@@ -210,7 +211,11 @@ async def main() -> None:
 
         discord_thread = Thread(target=Discord.main, daemon=True, name="storelimitless-discord")
         ftp_server = StoreLimitlessFTPServer(get_running_loop())
-        ip: str = get_local_ip()
+        configured_local_ip = environ.get("STORELIMITLESS_LOCAL_IP", "").strip()
+        try:
+            ip: str = str(IPv4Address(configured_local_ip)) if configured_local_ip else get_local_ip()
+        except ValueError as error:
+            raise ValueError("STORELIMITLESS_LOCAL_IP must be a valid IPv4 address.") from error
 
         if HOST == "CLOUD":
             api_tunnel, api_url = await to_thread(start_cloudflare_tunnel, "http://127.0.0.1:8000", "API")
@@ -238,7 +243,11 @@ async def main() -> None:
             environ["VITE_API_URL"] = api_url
             app.add_middleware(
                 CORSMiddleware,
-                allow_origins=[website_url],
+                allow_origins=[
+                    website_url,
+                    "http://localhost:5173",
+                    "http://127.0.0.1:5173",
+                ],
                 allow_credentials=True,
                 allow_methods=["*"],
                 allow_headers=["*"],
@@ -352,6 +361,8 @@ async def main() -> None:
             print("Servers started")
             print("=" * 50)
             print(f"FastAPI   : {api_url}")
+            if HOST == "LOCAL":
+                print("Local API : follows the browser hostname on port 8000")
 
             if HOST == "CLOUD":
                 print("Stable API: https://storelimitlessbackend.vercel.app")

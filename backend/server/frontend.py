@@ -5,7 +5,9 @@ import sys
 from os import environ
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+
+from core.config import HOST
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
 
@@ -18,10 +20,18 @@ frontend_app: FastAPI = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @frontend_app.get("/config.js")
-async def runtime_config() -> Response:
-    """Return runtime JavaScript configuration for the frontend."""
+async def runtime_config(request: Request) -> Response:
+    """Return the API URL for the hostname the browser used to open this LOCAL app."""
 
-    api_url: str = environ.get("STORELIMITLESS_API_URL", "http://127.0.0.1:8000")
+    if HOST == "LOCAL":
+        # Follow the incoming browser hostname instead of any stale Cloudflare
+        # URL or build-time VITE_API_URL. LAN clients therefore reach this host.
+        hostname = request.url.hostname or "127.0.0.1"
+        if ":" in hostname:
+            hostname = f"[{hostname.strip('[]')}]"
+        api_url = f"{request.url.scheme}://{hostname}:8000"
+    else:
+        api_url = environ.get("STORELIMITLESS_API_URL", "http://127.0.0.1:8000")
 
     return Response(
         content=(f"window.STORELIMITLESS_CONFIG = {{ API_URL: {json.dumps(api_url)} }};"),

@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
 set -Eeuo pipefail
 
@@ -63,9 +63,226 @@ RELEASE_ROOT="$ROOT/releases"
 LINUX_RELEASE_DIR="$RELEASE_ROOT/linux"
 WINDOWS_RELEASE_DIR="$RELEASE_ROOT/windows"
 
-command -v python3 >/dev/null 2>&1 || die "python3 is required."
-command -v file >/dev/null 2>&1 || die "'file' is required."
-command -v npm >/dev/null 2>&1 || die "npm is required to build the frontend."
+# Install native build prerequisites on common Linux distributions.
+# Node is managed separately below so Vite always gets a supported version.
+run_privileged() {
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        die "Installing build prerequisites needs root access. Install sudo or rerun this script as root."
+    fi
+}
+
+package_installed() {
+    local manager="$1"
+    local package="$2"
+
+    case "$manager" in
+        apt) dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed' ;;
+        dnf|zypper) rpm -q "$package" >/dev/null 2>&1 ;;
+        pacman) pacman -Q "$package" >/dev/null 2>&1 ;;
+        apk) apk info -e "$package" >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+install_missing_packages() {
+    local manager="$1"
+    shift
+    local -a packages=("$@")
+    local -a missing=()
+    local package
+
+    for package in "${packages[@]}"; do
+        if ! package_installed "$manager" "$package"; then
+            missing+=("$package")
+        fi
+    done
+
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+        echo "==> Native build packages already installed"
+        return
+    fi
+
+    echo "==> Installing native build packages: ${missing[*]}"
+    case "$manager" in
+        apt)
+            run_privileged apt-get update
+            run_privileged apt-get install -y "${missing[@]}"
+            ;;
+        dnf)
+            run_privileged dnf install -y "${missing[@]}"
+            ;;
+        pacman)
+            run_privileged pacman -Sy --needed --noconfirm "${missing[@]}"
+            ;;
+        zypper)
+            run_privileged zypper --non-interactive refresh
+            run_privileged zypper --non-interactive install --no-recommends "${missing[@]}"
+            ;;
+        apk)
+            run_privileged apk add --no-cache "${missing[@]}"
+            ;;
+    esac
+}
+
+install_system_prerequisites() {
+    local manager
+    local -a packages=()
+
+    if command -v apt-get >/dev/null 2>&1; then
+        manager="apt"
+        packages=(python3 python3-venv python3-dev build-essential file curl wget ca-certificates libffi-dev libssl-dev pkg-config xz-utils coreutils)
+        if [[ "$BUILD_WINDOWS" == "1" ]]; then
+            packages+=(wine wine64 winbind)
+        fi
+    elif command -v dnf >/dev/null 2>&1; then
+        manager="dnf"
+        packages=(python3 python3-devel gcc gcc-c++ make file curl wget ca-certificates libffi-devel openssl-devel pkgconf-pkg-config xz coreutils)
+        if [[ "$BUILD_WINDOWS" == "1" ]]; then
+            packages+=(wine winbind)
+        fi
+    elif command -v pacman >/dev/null 2>&1; then
+        manager="pacman"
+        packages=(python python-pip base-devel file curl wget ca-certificates openssl libffi pkgconf xz coreutils)
+        if [[ "$BUILD_WINDOWS" == "1" ]]; then
+            packages+=(wine winetricks)
+        fi
+    elif command -v zypper >/dev/null 2>&1; then
+        manager="zypper"
+        packages=(python3 python3-devel gcc gcc-c++ make file curl wget ca-certificates libffi-devel libopenssl-devel pkg-config xz coreutils)
+        if [[ "$BUILD_WINDOWS" == "1" ]]; then
+            packages+=(wine wine-32bit winbind)
+        fi
+    elif command -v apk >/dev/null 2>&1; then
+        manager="apk"
+        packages=(python3 py3-pip py3-virtualenv python3-dev build-base file curl wget ca-certificates libffi-dev openssl-dev pkgconf xz coreutils)
+        if [[ "$BUILD_WINDOWS" == "1" ]]; then
+            packages+=(wine)
+        fi
+    else
+        # On uncommon distributions, allow users who already have every tool
+        # to build without forcing an unsupported package-manager operation.
+        for tool in python3 file curl wget tar xz sha256sum; do
+            command -v "$tool" >/dev/null 2>&1 || die "No supported package manager was found and '$tool' is missing."
+        done
+        if [[ "$BUILD_WINDOWS" == "1" ]]; then
+            for tool in wine wineboot winepath; do
+                command -v "$tool" >/dev/null 2>&1 || die "Windows builds require '$tool'. Install Wine manually."
+            done
+        fi
+        echo "==> No supported package manager detected; existing build tools will be used"
+        return
+    fi
+
+    install_missing_packages "$manager" "${packages[@]}"
+
+    for tool in python3 file curl wget tar xz sha256sum; do
+        command -v "$tool" >/dev/null 2>&1 || die "'$tool' is still unavailable after prerequisite installation."
+    done
+
+    python3 - <<'PY'
+import sys
+if sys.version_info < (3, 10):
+    raise SystemExit("Python 3.10 or newer is required to build StoreLimitless.")
+PY
+
+    if [[ "$BUILD_WINDOWS" == "1" ]]; then
+        for tool in wine wineboot winepath; do
+            command -v "$tool" >/dev/null 2>&1 || die "Windows builds require '$tool'. It was not found after installing Wine packages."
+        done
+    fi
+}
+
+node_supports_vite() {
+    command -v node >/dev/null 2>&1 || return 1
+    command -v npm >/dev/null 2>&1 || return 1
+
+    node --version | python3 -c '
+import sys
+parts = sys.stdin.read().strip().lstrip("v").split(".")
+try:
+    major, minor = int(parts[0]), int(parts[1])
+except (ValueError, IndexError):
+    raise SystemExit(1)
+supported = (major == 20 and minor >= 19) or (major == 22 and minor >= 12) or major > 22
+raise SystemExit(0 if supported else 1)
+'
+}
+
+ensure_node_runtime() {
+    if node_supports_vite; then
+        echo "==> Node $(node --version) and npm $(npm --version) are ready"
+        return
+    fi
+
+    echo "==> Installing a supported Node.js LTS runtime locally for this build"
+    local node_version="${NODE_RUNTIME_VERSION:-}"
+    local node_arch
+    local archive_name
+    local archive_path
+    local expected_sha
+    local node_dir="$ROOT/build/node-runtime"
+
+    if [[ -z "$node_version" ]]; then
+        node_version="$(curl -fsSL --retry 3 https://nodejs.org/dist/index.json | python3 -c '
+import json, sys
+for release in json.load(sys.stdin):
+    version = release.get("version", "")
+    major = int(version.lstrip("v").split(".")[0]) if version else 0
+    if release.get("lts") and major >= 22:
+        print(version)
+        break
+')"
+    fi
+    [[ -n "$node_version" ]] || die "Could not determine a supported Node.js LTS release. Set NODE_RUNTIME_VERSION explicitly."
+
+    [[ "$node_version" == v* ]] || node_version="v$node_version"
+    [[ "$node_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Invalid NODE_RUNTIME_VERSION '$node_version'."
+
+    case "$(uname -m)" in
+        x86_64|amd64) node_arch="x64" ;;
+        aarch64|arm64) node_arch="arm64" ;;
+        *) die "Automatic Node.js installation does not support architecture $(uname -m)." ;;
+    esac
+
+    archive_name="node-${node_version}-linux-${node_arch}.tar.xz"
+    archive_path="$ROOT/build/$archive_name"
+    curl -fsSL --retry 3 "https://nodejs.org/dist/${node_version}/${archive_name}" -o "$archive_path" \
+        || die "Could not download Node.js ${node_version}."
+    expected_sha="$(curl -fsSL --retry 3 "https://nodejs.org/dist/${node_version}/SHASUMS256.txt" | awk -v filename="$archive_name" '$2 == filename {print $1; exit}')"
+    [[ "$expected_sha" =~ ^[a-fA-F0-9]{64}$ ]] || die "Could not find the official SHA-256 checksum for ${archive_name}."
+    printf '%s  %s\n' "$expected_sha" "$archive_path" | sha256sum -c - \
+        || die "Node.js archive checksum validation failed."
+
+    rm -rf -- "$node_dir"
+    mkdir -p "$node_dir"
+    tar -xJf "$archive_path" -C "$node_dir" --strip-components=1
+    export PATH="$node_dir/bin:$PATH"
+
+    node_supports_vite || die "Downloaded Node.js is not compatible with the installed frontend toolchain."
+    echo "==> Node $(node --version) and npm $(npm --version) are ready"
+}
+
+ensure_build_prerequisites() {
+    mkdir -p "$ROOT/build"
+    install_system_prerequisites
+    ensure_node_runtime
+
+    if [[ "$BUILD_LINUX" == "1" ]]; then
+        local probe_dir
+        probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/storelimitless-venv-check.XXXXXX")"
+        if ! python3 -m venv "$probe_dir/venv"; then
+            rm -rf -- "$probe_dir"
+            die "Python venv support is missing. Install the Python venv package for your interpreter, then retry."
+        fi
+        rm -rf -- "$probe_dir"
+    fi
+}
+
+ensure_build_prerequisites
 
 [[ -f "$SPEC" ]] || die "Missing PyInstaller spec: $SPEC"
 [[ -f "$REQUIREMENTS" ]] || die "Missing requirements.txt: $REQUIREMENTS"
@@ -212,12 +429,16 @@ echo "==> Building React frontend"
     else
         npm install
     fi
-    npm run build
+    env -u VITE_API_URL npm run build
 )
 
 [[ -f "$FRONTEND_DIST/index.html" ]] \
     || die "Frontend build failed: frontend/dist/index.html not found."
-echo "==> Frontend build ready: $FRONTEND_DIST"
+[[ -f "$FRONTEND_DIST/config.js" ]] \
+    || die "Frontend build failed: frontend/dist/config.js is missing; check frontend/public/config.js."
+grep -q 'src="/config.js"' "$FRONTEND_DIST/index.html" \
+    || die "Frontend build failed: index.html does not load the runtime API config."
+echo "==> Frontend build ready: $FRONTEND_DIST (runtime API configuration enabled)"
 
 # --------------------------------------------------
 # Linux server: package LOCAL and CLOUD independently using a dedicated

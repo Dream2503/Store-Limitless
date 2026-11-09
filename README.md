@@ -1324,10 +1324,11 @@ With no arguments, the script builds only the Linux `CLOUD` executable. When arg
 the second selects Windows. Each argument must be `0` or `1`, and at least one must be `1`; every selected operating system then builds both `LOCAL`
 and `CLOUD` variants. The `VERSION` environment variable defaults to `0.1.0` and is incorporated into output filenames.
 
-The script requires Python 3, `file`, and npm. For a Windows build it also requires Wine, `wineboot`, `winepath`, and `wget`; it installs a 64-bit
-Windows Python runtime inside its Wine prefix. If pip is unavailable after installing Windows Python, the script tries `ensurepip` and then the
-official
-`get-pip.py` bootstrap before installing dependencies.
+The script automatically installs missing Linux build prerequisites on supported package managers (APT, DNF, Pacman, Zypper, and APK),
+including Python/venv support, compiler tools, file, curl, and wget. If system Node.js is absent or too old for Vite 7, it downloads a supported
+Node LTS archive into the temporary build directory and verifies its official SHA-256 checksum before using it. Windows builds also install Wine
+packages when the selected package manager provides them, then create a 64-bit Wine prefix and install Windows Python. Package installation may ask
+for your sudo password. The temporary Node runtime, Python environments, and Wine prefix are removed after a successful build.
 
 ### Build variants and output layout
 
@@ -1414,8 +1415,10 @@ frontend dependencies and regenerates `frontend/dist`. The Next.js dependencies/
 
 ### Frontend runtime by build mode
 
-- **LOCAL frozen executable:** PyInstaller includes `frontend/dist`; `backend/server/frontend.py` serves the SPA entry point and static assets, and
-  `/config.js` exposes `window.STORELIMITLESS_CONFIG.API_URL` at runtime.
+- **LOCAL frozen executable:** PyInstaller includes `frontend/dist`; index.html loads `/config.js` before the app module, and
+  `backend/server/frontend.py` injects the API address at runtime. The API host follows the hostname used to open the app, so opening
+  `http://192.168.10.6:5173` routes requests to `http://192.168.10.6:8000` rather than the Cloudflare/Vercel gateway. For machines with
+  multiple network interfaces, set `STORELIMITLESS_LOCAL_IP=192.168.10.6` before launching to override the advertised LAN address.
 - **LOCAL source mode:** FastAPI runs alongside the Vite development server on port `5173`. Missing frontend dependencies are installed on startup.
 - **CLOUD executable:** frontend assets are excluded by setting `INCLUDE_FRONTEND=0`. The application points users to the Vercel-hosted website and
   starts a Cloudflare tunnel only for the API. It must not attempt to serve a missing local `frontend/dist`. The separate Next.js proxy in

@@ -743,26 +743,58 @@ function describeJob(job) {
     const icon = isError ? "error" : isCancelled ? "cancel" : isComplete ? "check_circle" : isQueued ? "schedule" : "upload_file";
     const iconTone = tone === "muted" ? (isQueued ? TEXT.success : "text-[#779184]") : TEXT[tone];
 
-    const downloadTransfer = num(job.downloadTransfer);
-    const downloadTotal = hasTorrentItems ? (allItemSizesKnown ? num(job.downloadTotal) : 0) : num(job.downloadTotal);
-    // Keep the separate source-download and storage-upload bars visible if a
-    // status refresh temporarily omits download_active. The counters and the
-    // simultaneous-transfer stage message are independent evidence of that phase.
+    const reportedDownloadTransfer = num(job.downloadTransfer);
+    const reportedDownloadTotal = hasTorrentItems
+        ? (allItemSizesKnown ? num(job.downloadTotal) : 0)
+        : num(job.downloadTotal);
+    const reportedStorageTransfer = num(job.transfer);
+    const reportedStorageTotal = hasTorrentItems
+        ? (allItemSizesKnown ? (num(job.total) || total) : 0)
+        : num(job.total) || total;
+
+    // A normal browser file upload has two phases:
+    // 0-50% is the browser sending bytes to this server, and 50-99.5% is the
+    // storage provider accepting those bytes. Use that already-published item
+    // progress to keep both bars accurate while the backend worker is waiting
+    // for a storage queue slot or its first progress sample.
+    const browserFileUpload = job.kind === "file" && Boolean(singleItem) && !hasTorrentItems;
+    const combinedItemProgress = browserFileUpload && singleItem.progress != null
+        ? Math.max(0, Math.min(99.5, num(singleItem.progress)))
+        : null;
+    const fallbackDownloadPercent = combinedItemProgress == null
+        ? null
+        : Math.min(100, combinedItemProgress * 2);
+    const fallbackStoragePercent = combinedItemProgress == null
+        ? null
+        : Math.max(0, Math.min(100, (combinedItemProgress - 50) * 100 / 49.5));
+
+    const downloadTotal = reportedDownloadTotal || (browserFileUpload ? num(singleItem.size) || num(singleItem.total) : 0);
+    const downloadTransfer = reportedDownloadTransfer > 0 || combinedItemProgress == null
+        ? reportedDownloadTransfer
+        : downloadTotal * (fallbackDownloadPercent || 0) / 100;
     const downloadActive = Boolean(
         job.downloadActive
         || job.ingestionType === "google_drive_folder"
-        || downloadTotal > 0
-        || downloadTransfer > 0
+        || reportedDownloadTotal > 0
+        || reportedDownloadTransfer > 0
+        || browserFileUpload
         || /downloading and uploading file/i.test(String(job.message || ""))
     );
-    const downloadPercent = downloadTotal > 0
-        ? Math.max(0, Math.min(100, downloadTransfer * 100 / downloadTotal))
-        : 0;
-    const storageTransfer = num(job.transfer);
-    const storageTotal = hasTorrentItems ? (allItemSizesKnown ? (num(job.total) || total) : 0) : num(job.total) || total;
-    const storagePercent = storageTotal > 0
-        ? Math.max(0, Math.min(100, storageTransfer * 100 / storageTotal))
-        : 0;
+    const downloadPercent = reportedDownloadTotal > 0
+        ? Math.max(0, Math.min(100, reportedDownloadTransfer * 100 / reportedDownloadTotal))
+        : fallbackDownloadPercent ?? (downloadTotal > 0
+            ? Math.max(0, Math.min(100, downloadTransfer * 100 / downloadTotal))
+            : 0);
+
+    const storageTotal = reportedStorageTotal || (browserFileUpload ? num(singleItem.size) || num(singleItem.total) : total);
+    const storagePercent = reportedStorageTransfer > 0 || fallbackStoragePercent == null
+        ? storageTotal > 0
+            ? Math.max(0, Math.min(100, reportedStorageTransfer * 100 / storageTotal))
+            : 0
+        : fallbackStoragePercent;
+    const storageTransfer = reportedStorageTransfer > 0 || fallbackStoragePercent == null
+        ? reportedStorageTransfer
+        : storageTotal * storagePercent / 100;
 
     return {
         isQueued, isActive, itemCount, title, statusText, statusTone: TEXT[tone], icon, iconTone, percent, transfer, total,

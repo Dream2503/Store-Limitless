@@ -13,8 +13,6 @@ die() {
     exit 1
 }
 
-# Catch line-ending damage when the script is invoked through bash explicitly.
-if LC_ALL=C grep -q 
 usage() {
     cat <<USAGE
 Usage: $0 [<linux_server:0|1> <windows_server:0|1>]

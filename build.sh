@@ -227,6 +227,19 @@ ensure_node_runtime() {
     local expected_sha
     local node_dir="$ROOT/build/node-runtime"
 
+    # Reuse an already unpacked Node runtime before checking the network for
+    # a newer release. The runtime is only replaced when it is unavailable or
+    # no longer meets Vite's supported Node.js version requirements.
+    if [[ -x "$node_dir/bin/node" && -x "$node_dir/bin/npm" ]]; then
+        local previous_path="$PATH"
+        export PATH="$node_dir/bin:$PATH"
+        if node_supports_vite; then
+            echo "==> Reusing cached Node $(node --version) and npm $(npm --version)"
+            return
+        fi
+        export PATH="$previous_path"
+    fi
+
     if [[ -z "$node_version" ]]; then
         node_version="$(curl -fsSL --retry 3 https://nodejs.org/dist/index.json | python3 -c '
 import json, sys
@@ -251,8 +264,12 @@ for release in json.load(sys.stdin):
 
     archive_name="node-${node_version}-linux-${node_arch}.tar.xz"
     archive_path="$ROOT/build/$archive_name"
-    curl -fsSL --retry 3 "https://nodejs.org/dist/${node_version}/${archive_name}" -o "$archive_path" \
-        || die "Could not download Node.js ${node_version}."
+    if [[ ! -s "$archive_path" ]]; then
+        curl -fsSL --retry 3 "https://nodejs.org/dist/${node_version}/${archive_name}" -o "$archive_path" \
+            || die "Could not download Node.js ${node_version}."
+    else
+        echo "==> Reusing cached Node.js archive: $archive_path"
+    fi
     expected_sha="$(curl -fsSL --retry 3 "https://nodejs.org/dist/${node_version}/SHASUMS256.txt" | awk -v filename="$archive_name" '$2 == filename {print $1; exit}')"
     [[ "$expected_sha" =~ ^[a-fA-F0-9]{64}$ ]] || die "Could not find the official SHA-256 checksum for ${archive_name}."
     printf '%s  %s\n' "$expected_sha" "$archive_path" | sha256sum -c - \
@@ -428,11 +445,9 @@ echo
 echo "==> Building React frontend"
 (
     cd "$FRONTEND"
-    if [[ -f package-lock.json ]]; then
-        npm ci
-    else
-        npm install
-    fi
+    # npm install keeps an existing node_modules tree and reuses npm's cache.
+    # Unlike npm ci, it does not delete and recreate all installed packages.
+    npm install --prefer-offline --no-audit --no-fund
     env -u VITE_API_URL npm run build
 )
 
@@ -470,8 +485,10 @@ if [[ "$BUILD_LINUX" == "1" ]]; then
 
         LINUX_WORKPATH="$ROOT/build/pyi-linux-$host"
         LINUX_DISTPATH="$ROOT/build/dist-linux-$host"
-        rm -rf -- "$LINUX_WORKPATH" "$LINUX_DISTPATH"
-        mkdir -p "$LINUX_DISTPATH"
+        # Preserve PyInstaller's analysis/cache files in workpath. Only clear
+        # distpath so stale executables can never be mistaken for new outputs.
+        rm -rf -- "$LINUX_DISTPATH"
+        mkdir -p "$LINUX_WORKPATH" "$LINUX_DISTPATH"
 
         if [[ "$host" == "LOCAL" ]]; then
             INCLUDE_FRONTEND=1
@@ -480,7 +497,6 @@ if [[ "$BUILD_LINUX" == "1" ]]; then
         fi
 
         INCLUDE_FRONTEND="$INCLUDE_FRONTEND" "$LINUX_VENV/bin/python" -m PyInstaller \
-            --clean \
             --noconfirm \
             --workpath "$LINUX_WORKPATH" \
             --distpath "$LINUX_DISTPATH" \
@@ -609,7 +625,9 @@ if [[ "$BUILD_WINDOWS" == "1" ]]; then
 
         WINDOWS_WORKPATH_UNIX="$ROOT/build/pyi-windows-$host"
         WINDOWS_DISTPATH_UNIX="$ROOT/build/dist-windows-$host"
-        rm -rf -- "$WINDOWS_WORKPATH_UNIX" "$WINDOWS_DISTPATH_UNIX"
+        # Keep the per-HOST PyInstaller analysis cache; rebuild only the
+        # distributable output directory to avoid stale executable reuse.
+        rm -rf -- "$WINDOWS_DISTPATH_UNIX"
         mkdir -p "$WINDOWS_WORKPATH_UNIX" "$WINDOWS_DISTPATH_UNIX"
 
         WINDOWS_WORKPATH="$(winepath -w "$WINDOWS_WORKPATH_UNIX")"
@@ -622,7 +640,6 @@ if [[ "$BUILD_WINDOWS" == "1" ]]; then
         fi
 
         INCLUDE_FRONTEND="$INCLUDE_FRONTEND" "$WINE_BIN" "$WINDOWS_PYTHON" -m PyInstaller \
-            --clean \
             --noconfirm \
             --workpath "$WINDOWS_WORKPATH" \
             --distpath "$WINDOWS_DISTPATH" \
@@ -665,34 +682,16 @@ echo
 echo "==> SDK LOCAL binaries:"
 find "$SDK_BIN_ROOT" -maxdepth 2 -type f -name 'StoreLimitlessServer*' -print 2>/dev/null | sort || true
 
-# Remove regeneratable artifacts only after all selected builds succeed.
+# Keep reusable build state for the next run. In particular, build/ contains
+# the Linux virtualenv, downloaded Node/Windows Python installers, Wine prefix,
+# Windows Python environment, and per-platform/per-HOST PyInstaller work caches.
+# frontend/node_modules and backend dependencies are retained as well.
 echo
-echo "==> Removing temporary build artifacts"
-rm -rf -- "$ROOT/build" "$FRONTEND/node_modules" "$FRONTEND_DIST"
-
-# Next.js output and installed packages can be recreated from the lockfile.
-BACKEND_STORELIMITLESSBACKEND="$ROOT/backend/storelimitlessbackend"
-if [[ -d "$BACKEND_STORELIMITLESSBACKEND" ]]; then
-    echo "==> Removing regeneratable backend/storelimitlessbackend artifacts"
-    rm -rf -- \
-        "$BACKEND_STORELIMITLESSBACKEND/.next" \
-        "$BACKEND_STORELIMITLESSBACKEND/node_modules" \
-        "$BACKEND_STORELIMITLESSBACKEND/.turbo" \
-        "$BACKEND_STORELIMITLESSBACKEND/coverage"
-fi
-
-echo "==> Removing Python bytecode caches"
-find "$ROOT" \
-    -type d \( -name .git -o -name .venv -o -name venv -o -name node_modules -o -name .next \) -prune -o \
-    -type d -name '__pycache__' -prune -exec rm -rf -- {} +
-find "$ROOT" \
-    -type d \( -name .git -o -name .venv -o -name venv -o -name node_modules -o -name .next \) -prune -o \
-    -type f \( -name '*.pyc' -o -name '*.pyo' \) -exec rm -f -- {} +
-
-echo "==> Removed build/, frontend build/dependencies, backend Next.js build/dependencies, and project bytecode caches"
+echo "==> Reusable build caches preserved"
+echo "    - build/ (toolchains, virtualenvs, Wine prefix, PyInstaller work caches)"
+echo "    - frontend/node_modules and frontend/dist"
+echo "    - backend/storelimitlessbackend dependencies and build outputs"
+echo "    - Python bytecode caches"
 echo "==> Release executables are in releases/linux/ and releases/windows/"
-echo "==> Kept the selected release variants and LOCAL SDK binary copies"
-echo "==> Build cleanup complete"
-
-# This log is useful on failures, but not needed after a successful build.
-rm -f -- "$ROOT/build.log"
+echo "==> Selected release variants and LOCAL SDK binary copies are ready"
+echo "==> Build finished; build.log has been retained"

@@ -586,6 +586,12 @@ if [[ "$BUILD_WINDOWS" == "1" ]]; then
     "$WINE_BIN" "$WINDOWS_PYTHON" -m pip install --upgrade pip
     WINDOWS_REQUIREMENTS="$(winepath -w "$REQUIREMENTS")"
     "$WINE_BIN" "$WINDOWS_PYTHON" -m pip install -r "$WINDOWS_REQUIREMENTS"
+    # libtorrent on Windows dynamically loads OpenSSL DLLs that are not part of
+    # the main wheel. Install the companion DLL package before freezing.
+    "$WINE_BIN" "$WINDOWS_PYTHON" -m pip install libtorrent-windows-dll
+    # Catch missing native dependencies before PyInstaller creates a broken EXE.
+    "$WINE_BIN" "$WINDOWS_PYTHON" -c "import libtorrent; print(\"libtorrent\", libtorrent.version)" \\
+        || die "Windows libtorrent could not load its native DLL dependencies."
     "$WINE_BIN" "$WINDOWS_PYTHON" -m pip install pyinstaller
     echo "==> Windows PyInstaller:"
     "$WINE_BIN" "$WINDOWS_PYTHON" -m PyInstaller --version
@@ -1263,6 +1269,12 @@ if [[ "$BUILD_WINDOWS" == "1" ]]; then
     "$WINE_BIN" "$WINDOWS_PYTHON" -m pip install --upgrade pip
     WINDOWS_REQUIREMENTS="$(winepath -w "$REQUIREMENTS")"
     "$WINE_BIN" "$WINDOWS_PYTHON" -m pip install -r "$WINDOWS_REQUIREMENTS"
+    # libtorrent on Windows dynamically loads OpenSSL DLLs that are not part of
+    # the main wheel. Install the companion DLL package before freezing.
+    "$WINE_BIN" "$WINDOWS_PYTHON" -m pip install libtorrent-windows-dll
+    # Catch missing native dependencies before PyInstaller creates a broken EXE.
+    "$WINE_BIN" "$WINDOWS_PYTHON" -c "import libtorrent; print(\"libtorrent\", libtorrent.version)" \\
+        || die "Windows libtorrent could not load its native DLL dependencies."
     "$WINE_BIN" "$WINDOWS_PYTHON" -m pip install pyinstaller
     echo "==> Windows PyInstaller:"
     "$WINE_BIN" "$WINDOWS_PYTHON" -m PyInstaller --version

@@ -31,6 +31,10 @@ libtorrent_hiddenimports: list[str]
 libtorrent_datas, libtorrent_binaries, libtorrent_hiddenimports = collect_all("libtorrent")
 libtorrent_datas += copy_metadata("libtorrent")
 
+# The Windows libtorrent wheel depends on OpenSSL DLLs supplied by the
+# libtorrent-windows-dll companion package. collect_all("libtorrent") above
+# gathers those DLLs from the shared libtorrent package namespace as binaries.
+
 a: Any = Analysis(
     ["core/main.py"],
     pathex=[str(ROOT)],

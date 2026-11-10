@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from backend.database.models import Directory, File, User
 from backend.database.redis_server import Redis
 from backend.server.jwt_handler import get_current_user
-from backend.server.security import verify_public_stream_token, verify_public_zip_token
+from backend.server.security import resolve_public_share_id, verify_public_stream_token, verify_public_zip_token
 from backend.server.zip_stream import ZipStreamEntry, stream_zip64, zip64_stored_content_length
 from core.data_center import Database
 from core.stream import Stream
@@ -262,7 +262,16 @@ async def _owned_public_file(token: str, request: Request) -> File:
         payload: dict[str, object] = verify_public_stream_token(token)
 
     except ValueError as error:
-        raise HTTPException(status_code=404, detail="Invalid public download link", headers=_public_cors_headers(request)) from error
+        # New public URLs use a short, random database-backed ID. Retain support for
+        # existing signed tokens so links already shared by users do not break.
+        short_link = resolve_public_share_id(token)
+        if short_link is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Invalid public download link",
+                headers=_public_cors_headers(request),
+            ) from error
+        payload = short_link
 
     await _ensure_private_link_session_active(payload, request)
     file = await File.get(cast("str", payload["username"]), fid=int(cast("int", payload["file_id"])))

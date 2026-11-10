@@ -5,12 +5,16 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from hashlib import sha256
 from hmac import compare_digest
 from json import JSONDecodeError, dumps, loads
+from secrets import token_urlsafe
 from time import time
+
+from psycopg.errors import UniqueViolation
 
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 
 from backend.database.models import File
+from backend.database.connection import POOL
 from backend.server.jwt_handler import ALGORITHM, SECRET_KEY
 
 pwd_context: CryptContext = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -109,6 +113,56 @@ def verify_public_zip_token(token: str) -> dict[str, object]:
     except (ValueError, KeyError, TypeError, JSONDecodeError) as error:
         raise ValueError("Invalid or expired ZIP download token") from error
 
+
+def create_public_share_id(file: File, username: str) -> str:
+    """Return a persistent, opaque 11-character public share ID for an owned file."""
+
+    if file.id is None:
+        raise ValueError("Cannot create a public link for a file without an ID")
+
+    # Reuse the same permanent link for a file. The database unique constraint makes
+    # simultaneous share requests converge on one ID. A slug collision with another
+    # file is retried rather than exposing any owner/file identifiers.
+    for _ in range(10):
+        share_id = token_urlsafe(8)
+
+        try:
+            with POOL.connection() as connection:
+                row = connection.execute(
+                    """
+                    INSERT INTO public_links (slug, file_id, username)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (file_id, username)
+                    DO UPDATE SET username = EXCLUDED.username
+                    RETURNING slug;
+                    """,
+                    (share_id, file.id, username),
+                ).fetchone()
+                connection.commit()
+
+            if row is not None:
+                return str(row["slug"])
+
+        except UniqueViolation:
+            # The randomly generated slug was already assigned to another file.
+            continue
+
+    raise RuntimeError("Could not allocate a unique public share ID")
+
+
+def resolve_public_share_id(share_id: str) -> dict[str, str | int] | None:
+    """Resolve a short public share ID to its owner and file ID."""
+
+    with POOL.connection() as connection:
+        row = connection.execute(
+            "SELECT file_id, username FROM public_links WHERE slug = %s;",
+            (share_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return {"file_id": int(row["file_id"]), "username": str(row["username"])}
 
 def create_public_stream_token(file: File, username: str) -> str:
     """Create a signed token binding a public stream to a file and owner."""

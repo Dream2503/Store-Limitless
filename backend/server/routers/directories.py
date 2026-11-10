@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from backend.database.models import Directory, File, User
 from backend.server.jwt_handler import OAuth2_scheme, get_current_user
-from backend.server.security import create_public_stream_token, create_public_zip_token, create_session_bound_stream_token
+from backend.server.security import create_public_share_id, create_public_stream_token, create_public_zip_token, create_session_bound_stream_token
 from backend.server.utils import perform_validation
 from core.config import TRANSFER_PATH
 from core.data_center import Database
@@ -715,8 +715,19 @@ async def create_public_link(fid: int, user: User = Depends(get_current_user)) -
     if file.username != user.username:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    write_log("INFO", Database, "PUBLIC LINK", user.username, f"Created public stream link file_id={fid} name={file.name!r}")
-    return {"public_token": create_public_stream_token(file=file, username=file.username)}
+    share_id = create_public_share_id(file, user.username)
+    legacy_public_token = create_public_stream_token(file=file, username=file.username)
+
+    write_log(
+        "INFO",
+        Database,
+        "PUBLIC LINK",
+        user.username,
+        f"Created public share link file_id={fid} share_id={share_id} name={file.name!r}",
+    )
+    # Keep public_token during the transition so older deployed frontends continue
+    # to work. New clients should use the opaque share_id and /s/{share_id} route.
+    return {"share_id": share_id, "public_token": legacy_public_token}
 
 @router.post("/file/{fid}/private-stream-link")
 async def create_private_stream_link(

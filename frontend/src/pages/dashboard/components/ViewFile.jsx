@@ -689,7 +689,7 @@ export default function ViewFile({active = true} = {}) {
     const navigate = useNavigate();
     const isNumericFileId = /^\d+$/.test(String(routeId || ""));
     const fileId = isNumericFileId ? routeId : null;
-    // Keep old query-token links working while accepting the shorter /view/<token> form.
+    // Keep legacy query-token links and support signed /view/{token} plus compact /s/{share_id} links.
     const publicToken = searchParams.get("public_token") || (!isNumericFileId ? routeId : null);
     const [publicFile, setPublicFile] = useState(null);
     const [publicFileError, setPublicFileError] = useState("");
@@ -915,17 +915,25 @@ export default function ViewFile({active = true} = {}) {
     }, [fileId, navigate]);
 
     const copyShareLink = useCallback(async () => {
-        if (!fileId || publicToken || sharePending) return;
+        if (sharePending) return;
 
         setSharePending(true);
         setShareStatus("");
         setShareError("");
 
         try {
-            const shareId = await createPublicShareId();
-            const shareUrl = new URL(`/s/${encodeURIComponent(shareId)}`, window.location.origin).toString();
-            const copied = await copyTextToClipboard(shareUrl);
+            let shareUrl;
+            if (publicToken && location.pathname.startsWith("/s/")) {
+                // A recipient can re-share the same durable short link without logging in.
+                shareUrl = new URL(`/s/${encodeURIComponent(routeId)}`, window.location.origin).toString();
+            } else if (fileId && !publicToken) {
+                const shareId = await createPublicShareId();
+                shareUrl = new URL(`/s/${encodeURIComponent(shareId)}`, window.location.origin).toString();
+            } else {
+                throw new Error("This legacy public link cannot be shortened from the viewer.");
+            }
 
+            const copied = await copyTextToClipboard(shareUrl);
             setShareStatus(copied ? "Copied!" : "Copy failed");
             if (!copied) setShareError("The browser did not allow clipboard access.");
         } catch (error) {
@@ -939,7 +947,7 @@ export default function ViewFile({active = true} = {}) {
                 setShareError("");
             }, 3500);
         }
-    }, [createPublicShareId, fileId, publicToken, sharePending]);
+    }, [createPublicShareId, fileId, location.pathname, publicToken, routeId, sharePending]);
 
     const copyStreamLink = useCallback(async () => {
         let streamUrl = source?.streamUrl;
@@ -1040,7 +1048,7 @@ export default function ViewFile({active = true} = {}) {
                     <span className={`material-symbols-outlined text-[17px]${downloadPending ? " animate-spin" : ""}`} aria-hidden="true">{downloadPending ? "progress_activity" : "download"}</span>
                     {downloadPending ? "Preparing…" : "Download"}
                 </button>
-                {fileId && !publicToken && (<button
+                {((fileId && !publicToken) || (publicToken && location.pathname.startsWith("/s/"))) && (<button
                     type="button"
                     onClick={copyShareLink}
                     disabled={sharePending || privateFilePending || !privateFile}

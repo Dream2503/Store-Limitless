@@ -1470,9 +1470,8 @@ This project should be treated as a self-hosted application that requires securi
 
 1. **Rotate committed secrets.** The shared source contains hardcoded credentials/configuration values. Treat them as exposed, rotate them, and
    replace hardcoded constants with environment-based configuration or a secret manager.
-2. **Move login credentials out of query strings.** The current frontend sends the username and password as query parameters for the login request.
-   URLs may be retained by browser history, proxy/server logs, and monitoring systems. Change login to accept a JSON request body and update the
-   frontend and backend together.
+2. **Keep login credentials out of URLs.** Login credentials are sent in a JSON request body, not query parameters, to avoid exposing them
+   through browser history, proxy/server logs, and monitoring systems.
 3. **Keep Redis private.** Redis listens on the local host and is an internal coordination service. Do not expose it directly to the internet.
 4. **Do not use plain FTP over untrusted networks.** Add FTPS or another secure transport and configure passive data ports/firewall rules correctly
    before public use.

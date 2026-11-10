@@ -256,7 +256,7 @@ async def _ensure_private_link_session_active(payload: dict[str, object], reques
 
 
 async def _owned_public_file(token: str, request: Request) -> File:
-    """Resolve a signed token to its original owner's file record."""
+    """Resolve either a legacy signed token or a short share ID to its owner's file record."""
 
     try:
         payload: dict[str, object] = verify_public_stream_token(token)

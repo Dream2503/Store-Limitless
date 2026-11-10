@@ -705,7 +705,7 @@ async def replace_text_file_content(
 
 @router.post("/file/{fid}/public-link")
 async def create_public_link(fid: int, user: User = Depends(get_current_user)) -> dict[str, str]:
-    """Create a signed public stream token for an owned file."""
+    """Create or reuse a short public share ID for an owned file."""
 
     file: File | None = await File.get(user.username, fid=fid)
 

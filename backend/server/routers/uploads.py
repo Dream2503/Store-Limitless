@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from backend.database.models import Directory, File, User
 from backend.database.redis_server import Redis
 from backend.server.jwt_handler import get_current_user
+from backend.server.security import resolve_public_share_id, verify_public_stream_token
 from backend.server.utils import perform_validation
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter, Database
@@ -56,6 +57,27 @@ from .upload_state import (
 
 router: APIRouter = APIRouter()
 public_router: APIRouter = APIRouter()
+
+
+def _storelimitless_share_token(raw_link: str) -> str | None:
+    """Extract a token from a StoreLimitless short share, legacy view, or public stream URL."""
+
+    try:
+        parsed = urlsplit(raw_link)
+    except ValueError:
+        return None
+
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if len(segments) == 2 and segments[0] in {"s", "view"}:
+        return unquote(segments[1])
+
+    if len(segments) == 3 and segments[0] == "public" and segments[1] in {"stream", "download"}:
+        return unquote(segments[2])
+
+    return None
 
 
 @router.post("/upload")
@@ -808,6 +830,7 @@ async def upload_chunk(
 async def torrent_preview(link: str, user: User = Depends(get_current_user)) -> JSONResponse:
     """Return torrent file names and sizes without downloading their payload."""
     raw_link: str = link.strip()
+    storelimitless_token = _storelimitless_share_token(raw_link)
     parsed_link: SplitResult = urlsplit(raw_link)
     query: dict[str, list[str]] = {cast("str", key.lower()): cast("list[str]", values) for key, values in parse_qs(parsed_link.query).items()}
     has_info_hash: bool = any(topic.lower().startswith(("urn:btih:", "urn:btmh:")) for topic in query.get("xt", []))
@@ -887,6 +910,85 @@ async def upload_link(
 
     if directory_obj is None:
         raise HTTPException(status_code=404, detail="Directory not found")
+
+    if storelimitless_token:
+        # These links use an existing StoreLimitless storage record. Create a separate
+        # recipient-owned database row while reusing the original provider message links.
+        try:
+            share_payload: dict[str, str | int] = verify_public_stream_token(storelimitless_token)
+        except ValueError:
+            share_payload = resolve_public_share_id(storelimitless_token) or {}
+
+        if not share_payload:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "This StoreLimitless share was not found in this database. "
+                    "Direct database copies work only for shares created by this StoreLimitless instance."
+                ),
+            )
+
+        # Session-bound private links are not public shares and must not be imported.
+        if share_payload.get("type") is not None:
+            raise HTTPException(status_code=403, detail="Private StoreLimitless links cannot be imported as public shares")
+
+        source_username = share_payload.get("username")
+        source_file_id = share_payload.get("file_id")
+        if (
+            not isinstance(source_username, str)
+            or not source_username
+            or not isinstance(source_file_id, int)
+            or isinstance(source_file_id, bool)
+            or source_file_id <= 0
+        ):
+            raise HTTPException(status_code=404, detail="Invalid StoreLimitless share link")
+
+        source_file = await File.get(source_username, fid=source_file_id)
+        if source_file is None or source_file.username != source_username:
+            raise HTTPException(status_code=404, detail="The shared StoreLimitless file no longer exists")
+
+        copied_file = File(
+            directory_id=cast("int", directory_obj.id),
+            name=source_file.name,
+            type=source_file.type,
+            size=source_file.size,
+            modified_at=source_file.modified_at,
+            deleted_at=None,
+            data_center=source_file.data_center,
+            links=list(source_file.links),
+            username=user.username,
+        )
+        await copied_file.save()
+
+        job_id = str(uuid4())
+        progress = Progress(copied_file.name, f"StoreLimitless copy complete (file id={copied_file.id})", 0)
+        await Redis.set(job_id, progress)
+        await register_upload_job(
+            job_id,
+            username=user.username,
+            name=copied_file.name,
+            kind="link",
+            directory=str(directory_obj.path),
+            data_center=copied_file.data_center,
+            total=0,
+            batch_id=batch_id,
+        )
+        write_log(
+            "INFO",
+            Database,
+            "STORELIMITLESS COPY",
+            user.username,
+            f"Copied file metadata source_user={source_username!r} source_file_id={source_file_id} "
+            f"new_file_id={copied_file.id} name={copied_file.name!r} shared_parts={len(copied_file.links)} "
+            f"directory={directory_obj.path}",
+        )
+        return JSONResponse({
+            "job_id": job_id,
+            "import_type": "storelimitless-copy",
+            "file_id": copied_file.id,
+            "file_name": copied_file.name,
+            "file_size": copied_file.size,
+        })
 
     file: File = File(
         directory_id=cast("int", directory_obj.id),

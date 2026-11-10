@@ -457,7 +457,7 @@ scratch space whose staging folders are isolated and cleaned asynchronously when
 
 ### Remote-link imports
 
-`POST /auth/upload-link` starts a background import job for **one remote source URL**. Link mode intentionally accepts one HTTP(S) URL or one valid
+`POST /auth/upload-link` starts a background import job for **one remote source URL**. It also accepts StoreLimitless `/s/{id}` share links and legacy signed `/view/{token}` links from the same database: these create a new `files` row for the importing account with the same name, type, size, provider, and complete `links` array, reusing the original stored parts without downloading or uploading bytes. A share link from another StoreLimitless database cannot use this metadata-copy path. Link mode intentionally accepts one HTTP(S) URL or one valid
 torrent magnet URI per task. It no longer treats newline-separated URLs as a multi-link batch; start another import for each additional source. Local
 multi-file and nested-folder uploads remain batch operations.
 

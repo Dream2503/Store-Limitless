@@ -16,6 +16,15 @@ const isTelegramMessageUrl = (value) => {
         return false;
     }
 };
+const isStoreLimitlessShareUrl = (value) => {
+    try {
+        const pathname = new URL(String(value ?? "").trim()).pathname;
+        return /^\/(?:s|view)\/[^/]+\/?$/.test(pathname)
+            || /^\/public\/(?:stream|download)\/[^/]+\/?$/.test(pathname);
+    } catch {
+        return false;
+    }
+};
 
 // Each chunk is its own PUT; the server writes it to disk as it arrives.
 const CHUNK_SIZE = 1024 * 1024;
@@ -372,7 +381,9 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             name: relativePath, size: file.size
         })) : links.map((value, index) => ({
             // Do not publish pending URLs to the server before their turn starts.
-            name: isTelegramMessageUrl(value) ? `Telegram message ${index + 1}` : `Link ${index + 1}`,
+            name: isStoreLimitlessShareUrl(value)
+                ? `StoreLimitless copy ${index + 1}`
+                : isTelegramMessageUrl(value) ? `Telegram message ${index + 1}` : `Link ${index + 1}`,
             size: 0,
         }));
         const queueTotal = queueItems.length;
@@ -720,19 +731,33 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     throw new Error(`${selectedFile?.name ? `${selectedFile.name}: ` : ""}${errorMessage}`);
                 }
 
-                const {job_id: jobId} = await response.json();
+                const jobResult = await response.json();
+                const {job_id: jobId} = jobResult;
                 if (!jobId) throw new Error("The server did not return an upload job ID.");
+                const resolvedDisplayName = String(jobResult.file_name || displayName);
+                const isStoreLimitlessCopy = jobResult.import_type === "storelimitless-copy";
                 batchTransfer.activeJobId = jobId;
                 const telegramProcessing = uploadMode === "link" && isTelegramMessageUrl(selectedLink);
                 await publishBatch({
                     status: "uploading",
                     current_index: itemNumber - 1,
                     current_job_id: jobId,
-                    current_name: displayName,
+                    current_name: resolvedDisplayName,
                     item_index: itemNumber - 1,
                     item_status: "uploading",
-                    item_message: telegramProcessing ? "Processing Telegram message" : "Uploading",
-                    message: telegramProcessing ? "Processing Telegram message" : `Uploading ${itemNumber} of ${queueTotal}`
+                    item_message: isStoreLimitlessCopy
+                        ? "Copying existing storage references"
+                        : telegramProcessing ? "Processing Telegram message" : "Uploading",
+                    items: [{
+                        ...(queueItems[itemNumber - 1] || {}),
+                        name: resolvedDisplayName,
+                        size: Math.max(0, Number(jobResult.file_size) || 0),
+                        status: "uploading",
+                        message: isStoreLimitlessCopy ? "Copying existing storage references" : "Uploading",
+                    }],
+                    message: isStoreLimitlessCopy
+                        ? "Copying StoreLimitless file reference"
+                        : telegramProcessing ? "Processing Telegram message" : `Uploading ${itemNumber} of ${queueTotal}`
                 });
 
                 const publishCurrentFileProgress = (progress, immediate = false) => {
@@ -786,6 +811,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         batchTransfer.activeJobId = "";
                     }
                 }
+                return jobResult;
             };
 
             let successfulItems = 0;
@@ -924,8 +950,10 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             item_message: "Queued in browser",
                             message: `Queued ${index + 1} of ${queueTotal}`
                         });
-                        await createJob(null, selectedLink, directory, selectedLink, index + 1);
+                        const jobResult = await createJob(null, selectedLink, directory, selectedLink, index + 1);
                         successfulItems++;
+                        const wasStoreLimitlessCopy = jobResult?.import_type === "storelimitless-copy";
+                        const completedName = String(jobResult?.file_name || selectedLink);
                         await publishBatch({
                             status: "completed",
                             current_index: 1,
@@ -934,7 +962,14 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             current_name: "",
                             item_index: 0,
                             item_status: "completed",
-                            item_message: "Uploaded successfully",
+                            item_message: wasStoreLimitlessCopy ? "Copied existing storage references" : "Uploaded successfully",
+                            items: [{
+                                ...(queueItems[index] || {}),
+                                name: completedName,
+                                size: Math.max(0, Number(jobResult?.file_size) || 0),
+                                status: "completed",
+                                message: wasStoreLimitlessCopy ? "Copied existing storage references" : "Uploaded successfully",
+                            }],
                             message: `Completed ${successfulItems} of ${queueTotal}`
                         });
                     } catch (error) {
@@ -1366,7 +1401,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                         Import from Link
                                     </p>
                                     <p className="text-xs text-[#898989]">
-                                        Paste multiple URLs or torrent magnets, one per line.
+                                        Paste multiple URLs or torrent magnets, one per line. StoreLimitless shares can be copied without transferring the file again.
                                     </p>
                                 </div>
                             </div>
@@ -1404,7 +1439,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                 <p className="text-xs">{links.length} link{links.length === 1 ? "" : "s"} ready to import sequentially</p>
                             </div>)}
                             <p className="mt-3 text-xs leading-relaxed text-[#707070]">
-                                Each non-empty line is added to the queue and imported one at a time, in order. Telegram links must point to a public post with a downloadable attachment. Private /c/ links, invite-only chats, and messages without a file attachment are rejected with a specific error. Torrent magnets can be queued together with other links; choose torrent files when prompted.
+                                Each non-empty line is added to the queue and imported one at a time, in order. Telegram links must point to a public post with a downloadable attachment. Private /c/ links, invite-only chats, and messages without a file attachment are rejected with a specific error. Torrent magnets can be queued together with other links; choose torrent files when prompted. StoreLimitless share links from this same database create a separate file entry that reuses the original storage parts; links from another StoreLimitless database cannot use this direct-copy path.
                             </p>
                         </div>
                     </div>)}

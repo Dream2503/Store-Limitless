@@ -13,5 +13,5 @@ const localApiUrl = window.location.port === "5173"
 const configuredApiUrl = runtimeApiUrl || localApiUrl || import.meta.env.VITE_API_URL;
 
 export const API_URL = String(
-    configuredApiUrl || "https://storelimitlessbackend.vercel.app"
+    configuredApiUrl || "https://cdn-storelimitless.vercel.app"
 ).replace(/\/+$/, "");

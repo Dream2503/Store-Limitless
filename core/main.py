@@ -371,7 +371,7 @@ async def main() -> None:
                 print("Local API : follows the browser hostname on port 8000")
 
             if HOST == "CLOUD":
-                print("Stable API: https://storelimitlessbackend.vercel.app")
+                print("Stable API: https://cdn-storelimitless.vercel.app")
 
             print(f"Website   : {website_url}")
             print(f"FTP       : ftp://{ip}:2121")

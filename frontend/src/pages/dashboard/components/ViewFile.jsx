@@ -4,6 +4,36 @@ import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
 import {endAuthSession, getFileKind, getToken} from "../utils.js";
 import {API_URL} from "../../../api.js";
 
+async function copyTextToClipboard(value) {
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(value);
+            return true;
+        }
+    } catch {
+        // Fall back for non-secure origins or clipboard permission failures.
+    }
+
+    const textArea = document.createElement("textarea");
+    textArea.value = value;
+    textArea.setAttribute("readonly", "");
+    Object.assign(textArea.style, {
+        position: "fixed",
+        opacity: "0",
+        pointerEvents: "none",
+    });
+    document.body.appendChild(textArea);
+    textArea.select();
+
+    try {
+        return document.execCommand("copy");
+    } catch {
+        return false;
+    } finally {
+        textArea.remove();
+    }
+}
+
 /**
  * @typedef {{name: string}} PreviewFile
  */
@@ -642,7 +672,7 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
  */
 export default function ViewFile({active = true} = {}) {
     const location = useLocation();
-    const viewRouteMatch = location.pathname.match(/^\/view\/([^/]+)\/?$/);
+    const viewRouteMatch = location.pathname.match(/^\/(?:view|s)\/([^/]+)\/?$/);
     const lastViewContextRef = useRef(null);
     if (viewRouteMatch) {
         lastViewContextRef.current = {
@@ -669,6 +699,10 @@ export default function ViewFile({active = true} = {}) {
     const [downloadUrl, setDownloadUrl] = useState("");
     const [downloadPending, setDownloadPending] = useState(true);
     const [downloadError, setDownloadError] = useState("");
+    const [sharePending, setSharePending] = useState(false);
+    const [shareStatus, setShareStatus] = useState("");
+    const [shareError, setShareError] = useState("");
+    const shareCopyTimer = useRef(null);
     const privateFile = privateFileMetadata?.routeId === String(fileId) ? privateFileMetadata : null;
     const name = searchParams.get("name") || publicFile?.name || privateFile?.name || "Untitled";
     const kind = searchParams.get("kind") || getFileKind(publicFile?.name || privateFile?.name || name);
@@ -853,50 +887,88 @@ export default function ViewFile({active = true} = {}) {
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, [active, navigate]);
 
-    const copyStreamLink = useCallback(async () => {
-        const streamUrl = source?.streamUrl;
-        if (!streamUrl) return;
+    const createPublicShareId = useCallback(async () => {
+        if (!fileId) throw new Error("Open an owned file to create a public link.");
 
-        const copyUsingFallback = () => {
-            const textArea = document.createElement("textarea");
-            textArea.value = streamUrl;
-            textArea.setAttribute("readonly", "");
-            textArea.style.position = "fixed";
-            textArea.style.opacity = "0";
-            textArea.style.pointerEvents = "none";
-            document.body.appendChild(textArea);
-            textArea.select();
+        const sessionToken = getToken();
+        if (!sessionToken) throw new Error("Sign in to create a public link.");
 
-            let copied = false;
-            try {
-                copied = document.execCommand("copy");
-            } catch {
-                copied = false;
-            } finally {
-                textArea.remove();
-            }
-            return copied;
-        };
+        const response = await fetch(
+            `${API_URL}/auth/file/${encodeURIComponent(fileId)}/public-link`,
+            {
+                method: "POST",
+                headers: {Authorization: `Bearer ${sessionToken}`},
+            },
+        );
+        const data = await response.json().catch(() => ({}));
 
-        let copied = false;
-        try {
-            if (navigator.clipboard?.writeText) {
-                await navigator.clipboard.writeText(streamUrl);
-                copied = true;
-            } else {
-                copied = copyUsingFallback();
-            }
-        } catch {
-            // Clipboard API can be unavailable in insecure contexts or denied by browser permissions.
-            copied = copyUsingFallback();
+        if (response.status === 401) {
+            if (getToken() === sessionToken && endAuthSession(sessionToken)) navigate("/");
+            throw new Error("Your login session has expired.");
+        }
+        if (!response.ok) throw new Error(data.detail || "Could not create a public link.");
+        if (typeof data.share_id !== "string" || !data.share_id) {
+            throw new Error("The server did not return a short share ID. Update the backend and try again.");
         }
 
-        setCopyStatus(copied ? "Copied!" : "Copy failed");
+        return data.share_id;
+    }, [fileId, navigate]);
+
+    const copyShareLink = useCallback(async () => {
+        if (!fileId || publicToken || sharePending) return;
+
+        setSharePending(true);
+        setShareStatus("");
+        setShareError("");
+
+        try {
+            const shareId = await createPublicShareId();
+            const shareUrl = new URL(`/s/${encodeURIComponent(shareId)}`, window.location.origin).toString();
+            const copied = await copyTextToClipboard(shareUrl);
+
+            setShareStatus(copied ? "Copied!" : "Copy failed");
+            if (!copied) setShareError("The browser did not allow clipboard access.");
+        } catch (error) {
+            setShareStatus("Share failed");
+            setShareError(error instanceof Error ? error.message : "Could not create a public link.");
+        } finally {
+            setSharePending(false);
+            clearTimeout(shareCopyTimer.current);
+            shareCopyTimer.current = window.setTimeout(() => {
+                setShareStatus("");
+                setShareError("");
+            }, 3500);
+        }
+    }, [createPublicShareId, fileId, publicToken, sharePending]);
+
+    const copyStreamLink = useCallback(async () => {
+        let streamUrl = source?.streamUrl;
+        if (!streamUrl) return;
+
+        try {
+            if (fileId && !publicToken) {
+                // Never copy a private/session-bound URL. Use the permanent short public ID.
+                const shareId = await createPublicShareId();
+                streamUrl = `${API_URL}/public/stream/${encodeURIComponent(shareId)}`;
+            } else if (publicToken && location.pathname.startsWith("/s/")) {
+                streamUrl = `${API_URL}/public/stream/${encodeURIComponent(routeId)}`;
+            }
+
+            const copied = await copyTextToClipboard(streamUrl);
+            setCopyStatus(copied ? "Copied!" : "Copy failed");
+        } catch (error) {
+            console.error("Could not copy the public stream URL:", error);
+            setCopyStatus("Copy failed");
+        }
+
         clearTimeout(copyTimer.current);
         copyTimer.current = window.setTimeout(() => setCopyStatus(""), 2500);
-    }, [source?.streamUrl]);
+    }, [createPublicShareId, fileId, location.pathname, publicToken, routeId, source?.streamUrl]);
 
-    useEffect(() => () => clearTimeout(copyTimer.current), []);
+    useEffect(() => () => {
+        clearTimeout(copyTimer.current);
+        clearTimeout(shareCopyTimer.current);
+    }, []);
 
     useEffect(() => {
         if (kind !== "video") return;
@@ -968,10 +1040,21 @@ export default function ViewFile({active = true} = {}) {
                     <span className={`material-symbols-outlined text-[17px]${downloadPending ? " animate-spin" : ""}`} aria-hidden="true">{downloadPending ? "progress_activity" : "download"}</span>
                     {downloadPending ? "Preparing…" : "Download"}
                 </button>
+                {fileId && !publicToken && (<button
+                    type="button"
+                    onClick={copyShareLink}
+                    disabled={sharePending || privateFilePending || !privateFile}
+                    title={shareError || "Copy a short public view link"}
+                    aria-live="polite"
+                    className="flex shrink-0 items-center gap-1.5 rounded-md border border-[#2e8058] bg-[#17643d] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#1d794a] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
+                >
+                    <span className="material-symbols-outlined text-[17px]" aria-hidden="true">{sharePending ? "progress_activity" : shareStatus === "Copied!" ? "check" : "share"}</span>
+                    {sharePending ? "Sharing…" : shareStatus || "Share"}
+                </button>)}
                 {source?.streamUrl && kind === "video" && (<button
                     type="button"
                     onClick={copyStreamLink}
-                    title="Copy the raw stream URL to open in VLC"
+                    title="Copy a short public stream URL to open in VLC"
                     aria-live="polite"
                     className="flex shrink-0 items-center gap-2 rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#fafafa] transition-colors hover:bg-[#2a2a2a] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
                 >

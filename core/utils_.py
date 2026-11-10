@@ -193,7 +193,7 @@ def register_vercel_backend_tunnel(api_url: str) -> None:
 
     payload: bytes = json.dumps({"url": api_url.rstrip("/")}).encode("utf-8")
     request: URLRequest = URLRequest(
-        "https://storelimitlessbackend.vercel.app/api/register",
+        "https://cdn-storelimitless.vercel.app/api/register",
         data=payload,
         headers={
             "Authorization": f"Bearer {STORELIMITLESS_PROXY_TOKEN}",
@@ -216,7 +216,7 @@ def register_vercel_backend_tunnel(api_url: str) -> None:
             BackEnd,
             "REGISTER VERCEL BACKEND TUNNEL",
             "",
-            "Vercel backend proxy registered the current Cloudflare API tunnel. Stable API URL: https://storelimitlessbackend.vercel.app",
+            "Vercel backend proxy registered the current Cloudflare API tunnel. Stable API URL: https://cdn-storelimitless.vercel.app",
         )
 
     except HTTPError as exc:

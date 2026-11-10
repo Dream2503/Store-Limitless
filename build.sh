@@ -396,17 +396,20 @@ echo "========================================"
 mkdir -p "$ROOT/build" "$RELEASE_ROOT" "$SDK_BIN_ROOT"
 
 # --------------------------------------------------
-# Clear old release outputs and SDK binaries before starting this build.
-# Keep the releases/ and bin/ root directories, but remove their contents.
+# Clear only the selected platform outputs. A Windows-only rebuild must not
+# delete previously completed Linux releases (or vice versa).
 # --------------------------------------------------
 
 echo
-echo "==> Clearing previous release outputs and SDK binaries"
+echo "==> Clearing selected platform release outputs and SDK binaries"
 
-for output_dir in "$RELEASE_ROOT" "$SDK_BIN_ROOT"; do
-    mkdir -p "$output_dir"
-    find "$output_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-done
+if [[ "$BUILD_LINUX" == "1" ]]; then
+    rm -rf -- "$LINUX_RELEASE_DIR" "$SDK_BIN_ROOT/linux"
+fi
+
+if [[ "$BUILD_WINDOWS" == "1" ]]; then
+    rm -rf -- "$WINDOWS_RELEASE_DIR" "$SDK_BIN_ROOT/windows"
+fi
 
 mkdir -p \
     "$LINUX_RELEASE_DIR" \
@@ -414,7 +417,7 @@ mkdir -p \
     "$SDK_BIN_ROOT/linux" \
     "$SDK_BIN_ROOT/windows"
 
-echo "==> Previous release outputs and SDK binaries cleared"
+echo "==> Selected platform outputs cleared"
 
 # --------------------------------------------------
 # Build the frontend once. Both HOST variants share the same browser assets;

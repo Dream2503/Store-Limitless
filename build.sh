@@ -230,7 +230,7 @@ ensure_node_runtime() {
     # Reuse an already unpacked Node runtime before checking the network for
     # a newer release. The runtime is only replaced when it is unavailable or
     # no longer meets Vite's supported Node.js version requirements.
-    if [[ -x "$node_dir/bin/node" && -x "$node_dir/bin/npm" ]]; then
+    if [[ -z "$node_version" && -x "$node_dir/bin/node" && -x "$node_dir/bin/npm" ]]; then
         local previous_path="$PATH"
         export PATH="$node_dir/bin:$PATH"
         if node_supports_vite; then

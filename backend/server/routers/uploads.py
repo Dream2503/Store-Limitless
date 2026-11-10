@@ -830,7 +830,6 @@ async def upload_chunk(
 async def torrent_preview(link: str, user: User = Depends(get_current_user)) -> JSONResponse:
     """Return torrent file names and sizes without downloading their payload."""
     raw_link: str = link.strip()
-    storelimitless_token = _storelimitless_share_token(raw_link)
     parsed_link: SplitResult = urlsplit(raw_link)
     query: dict[str, list[str]] = {cast("str", key.lower()): cast("list[str]", values) for key, values in parse_qs(parsed_link.query).items()}
     has_info_hash: bool = any(topic.lower().startswith(("urn:btih:", "urn:btmh:")) for topic in query.get("xt", []))
@@ -862,6 +861,7 @@ async def upload_link(
     """Start a background job that imports an HTTP(S), YouTube, or torrent magnet link."""
 
     raw_link: str = link.strip()
+    storelimitless_token = _storelimitless_share_token(raw_link)
     initial_hostname: str = (urlsplit(raw_link).hostname or "").lower()
     is_telegram_message_link: bool = initial_hostname in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}
     parsed_link: SplitResult = urlsplit(raw_link)

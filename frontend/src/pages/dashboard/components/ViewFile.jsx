@@ -663,7 +663,31 @@ export default function ViewFile({active = true} = {}) {
     const [sharePending, setSharePending] = useState(false);
     const [shareStatus, setShareStatus] = useState("");
     const [shareError, setShareError] = useState("");
+    const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
+    const [previewActions, setPreviewActions] = useState(null);
     const shareCopyTimer = useRef(null);
+    const mobileActionsRef = useRef(null);
+    const registerPreviewActions = useCallback((actions) => setPreviewActions(actions), []);
+
+    useEffect(() => {
+        setMobileActionsOpen(false);
+    }, [fileId, publicToken, location.pathname]);
+
+    useEffect(() => {
+        if (!mobileActionsOpen) return undefined;
+        const handlePointerDown = (event) => {
+            if (!mobileActionsRef.current?.contains(event.target)) setMobileActionsOpen(false);
+        };
+        const handleKeyDown = (event) => {
+            if (event.key === "Escape") setMobileActionsOpen(false);
+        };
+        document.addEventListener("pointerdown", handlePointerDown);
+        document.addEventListener("keydown", handleKeyDown);
+        return () => {
+            document.removeEventListener("pointerdown", handlePointerDown);
+            document.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [mobileActionsOpen]);
     const privateFile = privateFileMetadata?.routeId === String(fileId) ? privateFileMetadata : null;
     const name = searchParams.get("name") || publicFile?.name || privateFile?.name || "Untitled";
     const kind = searchParams.get("kind") || getFileKind(publicFile?.name || privateFile?.name || name);
@@ -991,13 +1015,97 @@ export default function ViewFile({active = true} = {}) {
                      visibility: active ? "visible" : "hidden",
                      pointerEvents: active ? "auto" : "none",
                  }}>
-        <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-[#243229] bg-[#0b0f0c] px-5 py-3">
-            <div
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#3ecf8e]/20 bg-[#3ecf8e]/10 text-[#3ecf8e]">
+        <header className="relative z-30 flex min-h-14 shrink-0 items-center gap-3 border-b border-[#243229] bg-[#0b0f0c] px-4 py-2.5 sm:px-5">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#3ecf8e]/20 bg-[#3ecf8e]/10 text-[#3ecf8e]">
                 <span className="material-symbols-outlined text-[19px]"
                       aria-hidden="true">{kind === "pdf" ? "picture_as_pdf" : kind === "text" ? "code" : kind === "markdown" ? "article" : kind === "audio" ? "audio_file" : "movie"}</span>
             </div>
-            <h1 className="min-w-0 flex-1 whitespace-normal break-words text-sm font-medium leading-5 [overflow-wrap:anywhere]">{name}</h1>
+            <h1 className="min-w-0 flex-1 truncate text-sm font-medium leading-5" title={name}>{name}</h1>
+
+            <div className="hidden shrink-0 items-center gap-2 lg:flex">
+                {previewActions?.saveError && <span role="alert" className="max-w-56 truncate text-xs text-[#ff7278]" title={previewActions.saveError}>{previewActions.saveError}</span>}
+                <button type="button" onClick={startBrowserDownload} disabled={downloadPending || !downloadUrl}
+                        title={downloadError || (downloadPending ? "Preparing download" : "Download this file")}
+                        className={`flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e] ${downloadUrl && !downloadPending ? "border-[#2e8058] bg-[#17643d] text-white hover:bg-[#1d794a]" : "cursor-not-allowed border-[#3a3a3a] bg-[#252525] text-[#808080]"}`}>
+                    <span className={`material-symbols-outlined text-[17px]${downloadPending ? " animate-spin" : ""}`} aria-hidden="true">{downloadPending ? "progress_activity" : "download"}</span>
+                    {downloadPending ? "Preparing…" : "Download"}
+                </button>
+                {((fileId && !publicToken) || (publicToken && location.pathname.startsWith("/s/"))) && <button
+                    type="button" onClick={copyShareLink}
+                    disabled={sharePending || (Boolean(fileId && !publicToken) && (privateFilePending || !privateFile))}
+                    title={shareError || "Copy a short public view link"} aria-live="polite"
+                    className="flex shrink-0 items-center gap-1.5 rounded-md border border-[#2e8058] bg-[#17643d] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#1d794a] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]">
+                    <span className="material-symbols-outlined text-[17px]" aria-hidden="true">{sharePending ? "progress_activity" : shareStatus === "Copied!" ? "check" : "share"}</span>
+                    {sharePending ? "Sharing…" : shareStatus || "Share"}
+                </button>}
+                {source?.streamUrl && kind === "video" && <button
+                    type="button" onClick={copyStreamLink}
+                    title="Copy a short public stream URL to open in VLC" aria-live="polite"
+                    className="flex shrink-0 items-center gap-2 rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#fafafa] transition-colors hover:bg-[#2a2a2a] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]">
+                    <span className="material-symbols-outlined text-[17px]" aria-hidden="true">{copyStatus === "Copied!" ? "check" : copyStatus === "Copy failed" ? "error" : "content_copy"}</span>
+                    {copyStatus || "Copy stream URL"}
+                </button>}
+                {previewActions?.canEdit && (previewActions.editing ? <>
+                    <button type="button" onClick={previewActions.onCancel} disabled={previewActions.saving}
+                            className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#c6d2ca] hover:bg-white/5 disabled:opacity-50">Cancel</button>
+                    <button type="button" onClick={() => void previewActions.onSave()} disabled={previewActions.saving}
+                            className="flex items-center gap-1.5 rounded-md border border-[#2e8058] bg-[#17643d] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#1d794a] disabled:cursor-wait disabled:opacity-60">
+                        {previewActions.saving && <span className="material-symbols-outlined animate-spin text-[15px]" aria-hidden="true">progress_activity</span>}
+                        {previewActions.saving ? "Saving…" : "Save"}
+                    </button>
+                </> : <button type="button" onClick={previewActions.onEdit}
+                             className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#e7eee9] hover:border-[#3ecf8e]/50 hover:bg-white/5">Edit</button>)}
+            </div>
+
+            <div className="relative ml-auto shrink-0 lg:hidden" ref={mobileActionsRef}>
+                <button type="button" aria-label="More file actions" aria-haspopup="menu" aria-expanded={mobileActionsOpen}
+                        onClick={() => setMobileActionsOpen((open) => !open)}
+                        className="flex h-9 w-9 items-center justify-center rounded-md border border-[#344239] text-[#e7eee9] transition-colors hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]">
+                    <span className="material-symbols-outlined" aria-hidden="true">more_vert</span>
+                </button>
+                {mobileActionsOpen && <div role="menu" aria-label="File actions"
+                    className="absolute right-0 top-full mt-2 w-56 overflow-hidden rounded-lg border border-[#344239] bg-[#151d18] p-1.5 shadow-xl shadow-black/40">
+                    <button role="menuitem" type="button" onClick={() => { setMobileActionsOpen(false); startBrowserDownload(); }}
+                            disabled={downloadPending || !downloadUrl}
+                            className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm text-[#e7eee9] hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-45">
+                        <span className="material-symbols-outlined text-[18px]" aria-hidden="true">{downloadPending ? "progress_activity" : "download"}</span>
+                        {downloadPending ? "Preparing download…" : "Download"}
+                    </button>
+                    {((fileId && !publicToken) || (publicToken && location.pathname.startsWith("/s/"))) && <button
+                        role="menuitem" type="button" onClick={() => { setMobileActionsOpen(false); void copyShareLink(); }}
+                        disabled={sharePending || (Boolean(fileId && !publicToken) && (privateFilePending || !privateFile))}
+                        className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm text-[#e7eee9] hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-45">
+                        <span className="material-symbols-outlined text-[18px]" aria-hidden="true">share</span>
+                        {sharePending ? "Sharing…" : shareStatus || "Share / Copy link"}
+                    </button>}
+                    {source?.streamUrl && kind === "video" && <button role="menuitem" type="button"
+                        onClick={() => { setMobileActionsOpen(false); void copyStreamLink(); }}
+                        className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm text-[#e7eee9] hover:bg-white/5">
+                        <span className="material-symbols-outlined text-[18px]" aria-hidden="true">content_copy</span>
+                        {copyStatus || "Copy stream URL"}
+                    </button>}
+                    {previewActions?.canEdit && <div className="my-1 border-t border-[#344239]" />}
+                    {previewActions?.canEdit && (previewActions.editing ? <>
+                        <button role="menuitem" type="button" onClick={() => { setMobileActionsOpen(false); void previewActions.onSave(); }}
+                                disabled={previewActions.saving}
+                                className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm text-[#e7eee9] hover:bg-white/5 disabled:opacity-45">
+                            <span className="material-symbols-outlined text-[18px]" aria-hidden="true">save</span>
+                            {previewActions.saving ? "Saving…" : "Save"}
+                        </button>
+                        <button role="menuitem" type="button" onClick={() => { setMobileActionsOpen(false); previewActions.onCancel(); }}
+                                disabled={previewActions.saving}
+                                className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm text-[#e7eee9] hover:bg-white/5 disabled:opacity-45">
+                            <span className="material-symbols-outlined text-[18px]" aria-hidden="true">close</span>
+                            Cancel editing
+                        </button>
+                    </> : <button role="menuitem" type="button" onClick={() => { setMobileActionsOpen(false); previewActions.onEdit(); }}
+                                 className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm text-[#e7eee9] hover:bg-white/5">
+                        <span className="material-symbols-outlined text-[18px]" aria-hidden="true">edit</span>
+                        Edit
+                    </button>)}
+                    {previewActions?.saveError && <div role="alert" className="border-t border-[#344239] px-3 py-2 text-xs text-[#ff7278]">{previewActions.saveError}</div>}
+                </div>}
+            </div>
         </header>
 
         <main className="min-h-0 flex-1 overflow-hidden p-0">
@@ -1021,7 +1129,7 @@ export default function ViewFile({active = true} = {}) {
                     <span className="material-symbols-outlined text-[40px] text-[#ff6369]" aria-hidden="true">error</span>
                     <p className="text-sm text-[#ff6369]">{publicFileError}</p>
                 </div>
-            ) : kind === "text" || kind === "markdown" ? <FileContentPreview fileId={fileId} kind={kind} navigate={navigate} publicToken={publicToken}/> : kind === "pdf" ?
+            ) : kind === "text" || kind === "markdown" ? <FileContentPreview fileId={fileId} kind={kind} navigate={navigate} publicToken={publicToken} onRegisterActions={registerPreviewActions}/> : kind === "pdf" ?
                 <MediaPreview fileId={fileId} navigate={navigate} type="pdf" publicToken={publicToken}/> : kind === "audio" ?
                     <MediaPreview fileId={fileId} navigate={navigate} type="audio" publicToken={publicToken}/> : kind !== "video" ? (
                         <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-[#898989]">
@@ -1039,39 +1147,5 @@ export default function ViewFile({active = true} = {}) {
                         </div>
                     </div>)}
         </main>
-        <footer className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-[#243229] bg-[#0b0f0c] px-4 py-3">
-            <button
-                type="button"
-                onClick={startBrowserDownload}
-                disabled={downloadPending || !downloadUrl}
-                title={downloadError || (downloadPending ? "Preparing download" : "Download this file")}
-                className={`flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e] ${downloadUrl && !downloadPending ? "border-[#2e8058] bg-[#17643d] text-white hover:bg-[#1d794a]" : "cursor-not-allowed border-[#3a3a3a] bg-[#252525] text-[#808080]"}`}
-            >
-                <span className={`material-symbols-outlined text-[17px]${downloadPending ? " animate-spin" : ""}`} aria-hidden="true">{downloadPending ? "progress_activity" : "download"}</span>
-                {downloadPending ? "Preparing…" : "Download"}
-            </button>
-            {((fileId && !publicToken) || (publicToken && location.pathname.startsWith("/s/"))) && (<button
-                type="button"
-                onClick={copyShareLink}
-                disabled={sharePending || privateFilePending || !privateFile}
-                title={shareError || "Copy a short public view link"}
-                aria-live="polite"
-                className="flex shrink-0 items-center gap-1.5 rounded-md border border-[#2e8058] bg-[#17643d] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#1d794a] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
-            >
-                <span className="material-symbols-outlined text-[17px]" aria-hidden="true">{sharePending ? "progress_activity" : shareStatus === "Copied!" ? "check" : "share"}</span>
-                {sharePending ? "Sharing…" : shareStatus || "Share"}
-            </button>)}
-            {source?.streamUrl && kind === "video" && (<button
-                type="button"
-                onClick={copyStreamLink}
-                title="Copy a short public stream URL to open in VLC"
-                aria-live="polite"
-                className="flex shrink-0 items-center gap-2 rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#fafafa] transition-colors hover:bg-[#2a2a2a] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
-            >
-                <span className="material-symbols-outlined text-[17px]"
-                      aria-hidden="true">{copyStatus === "Copied!" ? "check" : copyStatus === "Copy failed" ? "error" : "content_copy"}</span>
-                {copyStatus || "Copy stream URL"}
-            </button>)}
-        </footer>
     </div>);
 }

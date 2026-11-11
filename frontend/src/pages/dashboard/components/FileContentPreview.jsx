@@ -1,4 +1,4 @@
-import {useEffect, useState} from "react";
+import {useCallback, useEffect, useState} from "react";
 import {API_URL} from "../../../api.js";
 import {endAuthSession} from "../utils.js";
 
@@ -60,7 +60,7 @@ function selectAllPreviewContent(event) {
  * Render a plain text file or a small safe Markdown subset.
  * @param {{fileId: string, kind: "text" | "markdown", navigate: Function}} props
  */
-export default function FileContentPreview({fileId, kind, navigate, publicToken}) {
+export default function FileContentPreview({fileId, kind, navigate, publicToken, onRegisterActions}) {
     const [content, setContent] = useState("");
     const [draft, setDraft] = useState("");
     const [loading, setLoading] = useState(true);
@@ -109,20 +109,20 @@ export default function FileContentPreview({fileId, kind, navigate, publicToken}
 
     const canEdit = Boolean(fileId && !publicToken);
 
-    const beginEditing = () => {
+    const beginEditing = useCallback(() => {
         setDraft(content);
         setSaveError("");
         setSaveMessage("");
         setEditing(true);
-    };
+    }, [content]);
 
-    const cancelEditing = () => {
+    const cancelEditing = useCallback(() => {
         setDraft(content);
         setSaveError("");
         setEditing(false);
-    };
+    }, [content]);
 
-    const saveContent = async () => {
+    const saveContent = useCallback(async () => {
         if (!canEdit || saving) return;
         const sessionToken = localStorage.getItem("token");
         if (!sessionToken) {
@@ -168,7 +168,21 @@ export default function FileContentPreview({fileId, kind, navigate, publicToken}
         } finally {
             setSaving(false);
         }
-    };
+    }, [canEdit, draft, fileId, navigate, saving]);
+
+    useEffect(() => {
+        onRegisterActions?.({
+            canEdit,
+            editing,
+            saving,
+            saveError,
+            onEdit: beginEditing,
+            onCancel: cancelEditing,
+            onSave: saveContent,
+        });
+    }, [onRegisterActions, canEdit, editing, saving, saveError, beginEditing, cancelEditing, saveContent]);
+
+    useEffect(() => () => onRegisterActions?.(null), [onRegisterActions]);
 
     if (loading) return <PreviewMessage message="Loading file…"/>;
     if (error) return <PreviewMessage message={error}/>;
@@ -204,23 +218,6 @@ export default function FileContentPreview({fileId, kind, navigate, publicToken}
         </div> : <div className="min-h-0 w-full flex-1 overflow-hidden">
             <MarkdownPreview content={content}/>
         </div>}
-        {(saveError || canEdit) && <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-[#2e2e2e] bg-[#171717] px-4 py-2.5">
-            {saveError ? <span role="alert" className="max-w-[min(32rem,100%)] text-xs text-[#ff7278]">{saveError}</span> : <span />}
-            {canEdit && (editing ? <div className="flex items-center gap-2">
-                <button type="button" onClick={cancelEditing} disabled={saving}
-                        className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#c6d2ca] hover:bg-white/5 disabled:opacity-50">
-                    Cancel
-                </button>
-                <button type="button" onClick={() => void saveContent()} disabled={saving}
-                        className="flex items-center gap-1.5 rounded-md border border-[#2e8058] bg-[#17643d] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#1d794a] disabled:cursor-wait disabled:opacity-60">
-                    {saving && <span className="material-symbols-outlined animate-spin text-[15px]" aria-hidden="true">progress_activity</span>}
-                    {saving ? "Saving…" : "Save"}
-                </button>
-            </div> : <button type="button" onClick={beginEditing}
-                         className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#e7eee9] hover:border-[#3ecf8e]/50 hover:bg-white/5">
-                Edit
-            </button>)}
-        </footer>}
     </div>;
 }
 

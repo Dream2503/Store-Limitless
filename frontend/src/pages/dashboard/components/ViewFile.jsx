@@ -51,15 +51,14 @@ async function copyTextToClipboard(value) {
  * @param {VideoPlayerProps} props
  * @returns {import("react").ReactElement}
  */
-const PLAYER_STYLES = ".ytp-player{--accent:#3ecf8e;position:relative;isolation:isolate;display:block;width:100%;max-height:100%;aspect-ratio:16/9;overflow:hidden;border-radius:12px;background:#000;color:#fff;font-family:Roboto,Arial,system-ui,sans-serif;user-select:none;outline:none;box-shadow:0 12px 38px #0003;margin:auto}.ytp-player:focus-visible{outline:2px solid #fff;outline-offset:3px}.ytp-player:fullscreen,.ytp-player:-webkit-full-screen{width:100vw;height:100vh;max-height:none;max-width:none;aspect-ratio:auto;border-radius:0;margin:0}.ytp-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;cursor:pointer}.ytp-controls{position:absolute;z-index:20;inset:auto 0 0;padding:24px 12px 8px;background:linear-gradient(0deg,rgba(0,0,0,.94),rgba(0,0,0,.66) 42%,transparent);opacity:1;transition:opacity .22s ease;pointer-events:auto}.ytp-controls-hidden .ytp-controls{opacity:0;pointer-events:none}.ytp-controls-hidden,.ytp-controls-hidden .ytp-video{cursor:none}.ytp-controls-row{display:flex;align-items:center;gap:8px;min-width:0}.ytp-button{width:34px;height:34px;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:4px;color:#fff;background:transparent;cursor:pointer;transition:background .16s ease;outline:none;padding:0}.ytp-button:hover{background:#3ecf8e1a}.ytp-button:focus-visible,.ytp-speed:focus-visible,.ytp-quality:focus-visible{outline:2px solid #3ecf8e;outline-offset:2px}.ytp-button:disabled{opacity:.35;cursor:not-allowed}.ytp-volume{display:flex;align-items:center;gap:2px;flex:0 0 auto}.ytp-volume-slider{width:0;max-width:0;opacity:0;overflow:hidden;accent-color:#fff;transition:width .18s ease,max-width .18s ease,opacity .18s ease;cursor:pointer;height:3px}.ytp-volume:hover .ytp-volume-slider,.ytp-volume:focus-within .ytp-volume-slider,.ytp-player.ytp-volume-expanded .ytp-volume-slider{width:68px;max-width:68px;opacity:1}.ytp-time{font-size:12px;white-space:nowrap;color:#eee;font-variant-numeric:tabular-nums;margin-left:2px}.ytp-spacer{flex:1 1 auto;min-width:3px}.ytp-progress{position:relative;height:14px;margin:0 5px 7px;display:flex;align-items:center;cursor:pointer;touch-action:none;outline:none}.ytp-track{position:absolute;inset-inline:0;height:3px;background:#ffffff47;transition:height .12s ease}.ytp-progress:hover .ytp-track,.ytp-progress:focus-visible .ytp-track,.ytp-progress.ytp-dragging .ytp-track{height:5px}.ytp-buffered,.ytp-played{position:absolute;left:0;top:0;height:100%;pointer-events:none}.ytp-buffered{background:#ffffff85}.ytp-played{background:var(--accent)}.ytp-knob{position:absolute;top:50%;width:12px;height:12px;border-radius:50%;background:var(--accent);transform:translate(-50%,-50%) scale(0);transition:transform .12s ease;pointer-events:none}.ytp-progress:hover .ytp-knob,.ytp-progress:focus-visible .ytp-knob,.ytp-progress.ytp-dragging .ytp-knob{transform:translate(-50%,-50%) scale(1)}.ytp-tooltip{position:absolute;bottom:19px;transform:translateX(-50%);padding:5px 7px;border-radius:3px;background:#101611f5;color:#fff;font-size:12px;white-space:nowrap;box-shadow:0 2px 8px #0008;pointer-events:none;font-variant-numeric:tabular-nums}.ytp-center{position:absolute;z-index:8;left:50%;top:50%;width:66px;height:66px;display:flex;align-items:center;justify-content:center;transform:translate(-50%,-50%);border:1px solid #ffffff36;border-radius:50%;background:#111a;box-shadow:0 4px 24px #0007;backdrop-filter:blur(4px);color:#fff;cursor:pointer;transition:opacity .2s ease,transform .2s ease,background .18s ease;opacity:0}.ytp-center:hover{background:#303030e8;transform:translate(-50%,-50%) scale(1.06)}.ytp-center:focus-visible{opacity:1;outline:2px solid #fff;outline-offset:3px}.ytp-player:not(.ytp-playing) .ytp-center{opacity:1}.ytp-player.ytp-controls-hidden.ytp-playing .ytp-center{pointer-events:none}.ytp-feedback{position:absolute;z-index:12;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;gap:9px;min-width:80px;min-height:80px;padding:14px;border-radius:50%;background:#0009;box-shadow:0 5px 28px #0005;animation:ytp-feedback .75s ease both;pointer-events:none}.ytp-feedback span{font-size:14px;font-weight:600;white-space:nowrap}.ytp-seek{position:absolute;z-index:10;top:50%;transform:translateY(-50%);width:30%;min-width:90px;height:42%;display:flex;align-items:center;justify-content:center;gap:8px;border-radius:50%;background:radial-gradient(ellipse at center,#0009 0,transparent 72%);pointer-events:none;animation:ytp-feedback .78s ease both}.ytp-seek.left{left:2%}.ytp-seek.right{right:2%}.ytp-seek span{font-size:15px;font-weight:600;text-shadow:0 2px 4px #000}.ytp-spinner{position:absolute;z-index:11;left:50%;top:50%;width:44px;height:44px;margin:-22px;border:4px solid #ffffff36;border-top-color:#fff;border-radius:50%;animation:ytp-spin .8s linear infinite;pointer-events:none}.ytp-settings-area{position:relative;display:flex;align-items:center}.ytp-settings-menu{position:absolute;right:0;bottom:43px;z-index:35;width:248px;max-height:min(62vh,420px);overflow:auto;border-radius:10px;background:#111713f8;box-shadow:0 8px 30px #0009;padding:12px;color:#fff;border:1px solid #ffffff12}.ytp-menu-heading{font-size:13px;font-weight:600;color:#e4eee8;margin:2px 0 8px}.ytp-menu-section+.ytp-menu-section{margin-top:12px;padding-top:11px;border-top:1px solid #ffffff1f}.ytp-speed-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}.ytp-speed,.ytp-quality{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:7px 8px;border:0;border-radius:5px;background:transparent;color:#eee;font-size:12px;cursor:pointer;text-align:left}.ytp-speed{justify-content:center}.ytp-speed:hover,.ytp-quality:hover{background:#ffffff19}.ytp-speed[aria-pressed=true],.ytp-quality[aria-pressed=true]{background:#3ecf8e1c;color:#3ecf8e}.ytp-quality-list{display:grid;gap:2px}.ytp-modal-backdrop{position:absolute;z-index:50;inset:0;display:flex;align-items:center;justify-content:center;padding:16px;background:#000b;backdrop-filter:blur(3px)}.ytp-modal{width:min(590px,100%);max-height:90%;overflow:auto;padding:18px 20px;border:1px solid #ffffff20;border-radius:12px;background:#111713;color:#fff;box-shadow:0 16px 50px #000a}.ytp-modal-header{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:13px}.ytp-modal-title{font-size:18px;font-weight:600}.ytp-shortcuts{display:grid;grid-template-columns:1fr 1fr;gap:0 24px}.ytp-shortcut{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid #ffffff12;font-size:12px;color:#e6e6e6}.ytp-keys{display:flex;gap:4px;flex:0 0 auto}.ytp-keys kbd{min-width:23px;padding:4px 6px;border:1px solid #ffffff2e;border-radius:4px;background:#ffffff12;color:#fff;text-align:center;font:600 11px Roboto,Arial,sans-serif}@keyframes ytp-spin{to{transform:rotate(360deg)}}@keyframes ytp-feedback{0%{opacity:0;scale:.88}16%{opacity:1;scale:1}68%{opacity:1;scale:1}100%{opacity:0;scale:1.04}}@media(max-width:560px){.ytp-player{border-radius:7px}.ytp-controls{padding:21px 6px 5px}.ytp-controls-row{gap:2px}.ytp-button{width:30px;height:32px}.ytp-time{font-size:10px;margin-left:1px}.ytp-volume-slider{width:44px;max-width:44px;opacity:1}.ytp-volume:hover .ytp-volume-slider,.ytp-volume:focus-within .ytp-volume-slider,.ytp-player.ytp-volume-expanded .ytp-volume-slider{width:44px;max-width:44px}.ytp-center{width:56px;height:56px}.ytp-feedback{min-width:68px;min-height:68px}.ytp-shortcuts{grid-template-columns:1fr}.ytp-modal{padding:14px}.ytp-progress{margin-inline:3px}.ytp-settings-menu{right:-4px;width:228px}}@media(max-width:390px){.ytp-time{display:none}.ytp-controls-row{gap:1px}.ytp-volume-slider{width:34px;max-width:34px}.ytp-volume:hover .ytp-volume-slider,.ytp-volume:focus-within .ytp-volume-slider,.ytp-player.ytp-volume-expanded .ytp-volume-slider{width:34px;max-width:34px}.ytp-button{width:28px}}@media(prefers-reduced-motion:reduce){.ytp-player *{animation-duration:.01ms!important;transition-duration:.01ms!important}}";
+const PLAYER_STYLES = ".ytp-player{--accent:#3ecf8e;position:relative;isolation:isolate;display:block;width:100%;max-height:100%;aspect-ratio:16/9;overflow:hidden;border-radius:12px;background:#000;color:#fff;font-family:Roboto,Arial,system-ui,sans-serif;user-select:none;outline:none;box-shadow:0 12px 38px #0003;margin:auto}.ytp-player:focus-visible{outline:2px solid #fff;outline-offset:3px}.ytp-player:fullscreen,.ytp-player:-webkit-full-screen{width:100vw;height:100vh;max-height:none;max-width:none;aspect-ratio:auto;border-radius:0;margin:0}.ytp-video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;cursor:pointer}.ytp-controls{position:absolute;z-index:20;inset:auto 0 0;padding:24px 12px 8px;background:linear-gradient(0deg,rgba(0,0,0,.94),rgba(0,0,0,.66) 42%,transparent);opacity:1;transition:opacity .22s ease;pointer-events:auto}.ytp-controls-hidden .ytp-controls{opacity:0;pointer-events:none}.ytp-controls-hidden,.ytp-controls-hidden .ytp-video{cursor:none}.ytp-controls-row{display:flex;align-items:center;gap:8px;min-width:0}.ytp-button{width:34px;height:34px;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:4px;color:#fff;background:transparent;cursor:pointer;transition:background .16s ease;outline:none;padding:0}.ytp-button:hover{background:#3ecf8e1a}.ytp-button:focus-visible{outline:2px solid #3ecf8e;outline-offset:2px}.ytp-button:disabled{opacity:.35;cursor:not-allowed}.ytp-volume{display:flex;align-items:center;gap:2px;flex:0 0 auto}.ytp-volume-slider{width:0;max-width:0;opacity:0;overflow:hidden;accent-color:#fff;transition:width .18s ease,max-width .18s ease,opacity .18s ease;cursor:pointer;height:3px}.ytp-volume:hover .ytp-volume-slider,.ytp-volume:focus-within .ytp-volume-slider,.ytp-player.ytp-volume-expanded .ytp-volume-slider{width:68px;max-width:68px;opacity:1}.ytp-time{font-size:12px;white-space:nowrap;color:#eee;font-variant-numeric:tabular-nums;margin-left:2px}.ytp-spacer{flex:1 1 auto;min-width:3px}.ytp-progress{position:relative;height:14px;margin:0 5px 7px;display:flex;align-items:center;cursor:pointer;touch-action:none;outline:none}.ytp-track{position:absolute;inset-inline:0;height:3px;background:#ffffff47;transition:height .12s ease}.ytp-progress:hover .ytp-track,.ytp-progress:focus-visible .ytp-track,.ytp-progress.ytp-dragging .ytp-track{height:5px}.ytp-buffered,.ytp-played{position:absolute;left:0;top:0;height:100%;pointer-events:none}.ytp-buffered{background:#ffffff85}.ytp-played{background:var(--accent)}.ytp-knob{position:absolute;top:50%;width:12px;height:12px;border-radius:50%;background:var(--accent);transform:translate(-50%,-50%) scale(0);transition:transform .12s ease;pointer-events:none}.ytp-progress:hover .ytp-knob,.ytp-progress:focus-visible .ytp-knob,.ytp-progress.ytp-dragging .ytp-knob{transform:translate(-50%,-50%) scale(1)}.ytp-tooltip{position:absolute;bottom:19px;transform:translateX(-50%);padding:5px 7px;border-radius:3px;background:#101611f5;color:#fff;font-size:12px;white-space:nowrap;box-shadow:0 2px 8px #0008;pointer-events:none;font-variant-numeric:tabular-nums}.ytp-center{position:absolute;z-index:8;left:50%;top:50%;width:66px;height:66px;display:flex;align-items:center;justify-content:center;transform:translate(-50%,-50%);border:1px solid #ffffff36;border-radius:50%;background:#111a;box-shadow:0 4px 24px #0007;backdrop-filter:blur(4px);color:#fff;cursor:pointer;transition:opacity .2s ease,transform .2s ease,background .18s ease;opacity:0}.ytp-center:hover{background:#303030e8;transform:translate(-50%,-50%) scale(1.06)}.ytp-center:focus-visible{opacity:1;outline:2px solid #fff;outline-offset:3px}.ytp-player:not(.ytp-playing) .ytp-center{opacity:1}.ytp-player.ytp-controls-hidden.ytp-playing .ytp-center{pointer-events:none}.ytp-feedback{position:absolute;z-index:12;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;gap:9px;min-width:80px;min-height:80px;padding:14px;border-radius:50%;background:#0009;box-shadow:0 5px 28px #0005;animation:ytp-feedback .75s ease both;pointer-events:none}.ytp-feedback span{font-size:14px;font-weight:600;white-space:nowrap}.ytp-seek{position:absolute;z-index:10;top:50%;transform:translateY(-50%);width:30%;min-width:90px;height:42%;display:flex;align-items:center;justify-content:center;gap:8px;border-radius:50%;background:radial-gradient(ellipse at center,#0009 0,transparent 72%);pointer-events:none;animation:ytp-feedback .78s ease both}.ytp-seek.left{left:2%}.ytp-seek.right{right:2%}.ytp-seek span{font-size:15px;font-weight:600;text-shadow:0 2px 4px #000}.ytp-spinner{position:absolute;z-index:11;left:50%;top:50%;width:44px;height:44px;margin:-22px;border:4px solid #ffffff36;border-top-color:#fff;border-radius:50%;animation:ytp-spin .8s linear infinite;pointer-events:none}.ytp-modal-backdrop{position:absolute;z-index:50;inset:0;display:flex;align-items:center;justify-content:center;padding:16px;background:#000b;backdrop-filter:blur(3px)}.ytp-modal{width:min(590px,100%);max-height:90%;overflow:auto;padding:18px 20px;border:1px solid #ffffff20;border-radius:12px;background:#111713;color:#fff;box-shadow:0 16px 50px #000a}.ytp-modal-header{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:13px}.ytp-modal-title{font-size:18px;font-weight:600}.ytp-shortcuts{display:grid;grid-template-columns:1fr 1fr;gap:0 24px}.ytp-shortcut{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid #ffffff12;font-size:12px;color:#e6e6e6}.ytp-keys{display:flex;gap:4px;flex:0 0 auto}.ytp-keys kbd{min-width:23px;padding:4px 6px;border:1px solid #ffffff2e;border-radius:4px;background:#ffffff12;color:#fff;text-align:center;font:600 11px Roboto,Arial,sans-serif}@keyframes ytp-spin{to{transform:rotate(360deg)}}@keyframes ytp-feedback{0%{opacity:0;scale:.88}16%{opacity:1;scale:1}68%{opacity:1;scale:1}100%{opacity:0;scale:1.04}}@media(max-width:560px){.ytp-player{border-radius:7px}.ytp-controls{padding:21px 6px 5px}.ytp-controls-row{gap:2px}.ytp-button{width:30px;height:32px}.ytp-time{font-size:10px;margin-left:1px}.ytp-volume-slider{width:44px;max-width:44px;opacity:1}.ytp-volume:hover .ytp-volume-slider,.ytp-volume:focus-within .ytp-volume-slider,.ytp-player.ytp-volume-expanded .ytp-volume-slider{width:44px;max-width:44px}.ytp-center{width:56px;height:56px}.ytp-feedback{min-width:68px;min-height:68px}.ytp-shortcuts{grid-template-columns:1fr}.ytp-modal{padding:14px}.ytp-progress{margin-inline:3px}}@media(max-width:390px){.ytp-time{display:none}.ytp-controls-row{gap:1px}.ytp-volume-slider{width:34px;max-width:34px}.ytp-volume:hover .ytp-volume-slider,.ytp-volume:focus-within .ytp-volume-slider,.ytp-player.ytp-volume-expanded .ytp-volume-slider{width:34px;max-width:34px}.ytp-button{width:28px}}@media(prefers-reduced-motion:reduce){.ytp-player *{animation-duration:.01ms!important;transition-duration:.01ms!important}}";
 
 const PLAYER_SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 
-function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(file?.sources) ? file.sources : []}) {
+function VideoPlayer({file, streamUrl, active = true}) {
     const wrapRef = useRef(null);
     const videoRef = useRef(null);
     const progressRef = useRef(null);
-    const settingsRef = useRef(null);
     const controlsTimerRef = useRef(null);
     const feedbackTimerRef = useRef(null);
     const seekTimerRef = useRef(null);
@@ -98,7 +97,6 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
     const [controlsVisible, setControlsVisible] = useState(true);
     const [volumeExpanded, setVolumeExpanded] = useState(false);
     const [buffering, setBuffering] = useState(false);
-    const [showSettings, setShowSettings] = useState(false);
     const [showShortcuts, setShowShortcuts] = useState(false);
     const [textTracks, setTextTracks] = useState([]);
     const [captionsOn, setCaptionsOn] = useState(false);
@@ -109,12 +107,6 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
     const [seekFeedback, setSeekFeedback] = useState(null);
     const [activeSource, setActiveSource] = useState(streamUrl);
 
-    const qualityOptions = (Array.isArray(sources) ? sources : [])
-        .map((source, index) => ({
-            label: source.label || source.quality || source.resolution || ("Quality " + (index + 1)),
-            src: source.src || source.url,
-        }))
-        .filter((source) => typeof source.src === "string" && source.src.length > 0);
     const formatTime = (value) => {
         if (!Number.isFinite(value) || value < 0) return "0:00";
         const hours = Math.floor(value / 3600);
@@ -146,12 +138,12 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
     const revealControls = useCallback(() => {
         setControlsVisible(true);
         window.clearTimeout(controlsTimerRef.current);
-        if (videoRef.current && !videoRef.current.paused && !showShortcuts && !showSettings) {
+        if (videoRef.current && !videoRef.current.paused && !showShortcuts) {
             controlsTimerRef.current = window.setTimeout(() => {
-                if (videoRef.current && !videoRef.current.paused && !showShortcuts && !showSettings) setControlsVisible(false);
+                if (videoRef.current && !videoRef.current.paused && !showShortcuts) setControlsVisible(false);
             }, 3000);
         }
-    }, [showShortcuts, showSettings]);
+    }, [showShortcuts]);
 
     const togglePlayback = useCallback(() => {
         const video = videoRef.current;
@@ -366,14 +358,12 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
 
         if (key === "Escape") {
             if (showShortcuts) { event.preventDefault(); setShowShortcuts(false); }
-            else if (showSettings) { event.preventDefault(); setShowSettings(false); }
             else if (fullscreen || document.fullscreenElement) { event.preventDefault(); void toggleFullscreen(); }
             return;
         }
         if (event.shiftKey && (key === "?" || key === "/")) {
             event.preventDefault();
             setShowShortcuts(true);
-            setShowSettings(false);
             setControlsVisible(true);
             return;
         }
@@ -433,7 +423,7 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
         if (key === "," && video.paused) { event.preventDefault(); seekBy(-1 / 30, false); return; }
         if (key === "." && video.paused) event.preventDefault(), seekBy(1 / 30, false);
     }, [
-        active, revealControls, seekBy, seekTo, showSettings, showShortcuts, showCenterFeedback,
+        active, revealControls, seekBy, seekTo, showShortcuts, showCenterFeedback,
         textTracks.length, toggleCaptions, toggleFullscreen, toggleMute,
     ]);
 
@@ -476,25 +466,17 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
     }, []);
 
     useEffect(() => {
-        const handleOutsidePointer = (event) => {
-            if (settingsRef.current && !settingsRef.current.contains(event.target)) setShowSettings(false);
-        };
-        document.addEventListener("pointerdown", handleOutsidePointer);
-        return () => document.removeEventListener("pointerdown", handleOutsidePointer);
-    }, []);
-
-    useEffect(() => {
-        if (playing && !showShortcuts && !showSettings) {
+        if (playing && !showShortcuts) {
             window.clearTimeout(controlsTimerRef.current);
             controlsTimerRef.current = window.setTimeout(() => {
-                if (videoRef.current && !videoRef.current.paused && !showShortcuts && !showSettings) setControlsVisible(false);
+                if (videoRef.current && !videoRef.current.paused && !showShortcuts) setControlsVisible(false);
             }, 3000);
         } else {
             window.clearTimeout(controlsTimerRef.current);
             if (!playing) setControlsVisible(true);
         }
         return () => window.clearTimeout(controlsTimerRef.current);
-    }, [playing, showSettings, showShortcuts]);
+    }, [playing, showShortcuts]);
 
     useEffect(() => {
         return () => {
@@ -508,7 +490,6 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
 
     useEffect(() => { setActiveSource(streamUrl); }, [streamUrl]);
 
-    const activeQuality = qualityOptions.find((option) => option.src === activeSource)?.label || "Auto";
     const bufferedWidth = Math.max(0, Math.min(100, bufferedPercent));
     const playedWidth = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
     const icon = (name, size = 24) => {
@@ -519,7 +500,6 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
         case "pause": shape = <><path d="M7 5h4v14H7z" fill="currentColor" stroke="none" /><path d="M15 5h4v14h-4z" fill="currentColor" stroke="none" /></>; break;
         case "volume": shape = <><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor" stroke="none" /><path d="M15.5 8.5a5 5 0 0 1 0 7M18 5.5a9 9 0 0 1 0 13" /></>; break;
         case "muted": shape = <><path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor" stroke="none" /><path d="m16 9 5 6m0-6-5 6" /></>; break;
-        case "settings": shape = <><circle cx="12" cy="12" r="3" /><path d="m19 13 2 1-2 4-2-1-2 1v2h-5v-2l-2-1-2 1-2-4 2-1v-2l-2-1 2-4 2 1 2-1V4h5v2l2 1 2-1 2 4-2 1z" /></>; break;
         case "fullscreen": shape = <path d="M8 4H4v4M16 4h4v4M4 16v4h4M20 16v4h-4" />; break;
         case "exitFullscreen": shape = <path d="M4 8h4V4M16 4v4h4M20 16h-4v4M8 20v-4H4" />; break;
         case "close": shape = <path d="m6 6 12 12M18 6 6 18" />; break;
@@ -530,14 +510,6 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
         default: shape = <circle cx="12" cy="12" r="8" />;
         }
         return <svg {...attrs}>{shape}</svg>;
-    };
-
-    const changeQuality = (option) => {
-        const video = videoRef.current;
-        if (!video || option.src === activeSource) { setShowSettings(false); return; }
-        restorePlaybackRef.current = {time: video.currentTime, playing: !video.paused};
-        setActiveSource(option.src);
-        setShowSettings(false);
     };
 
     return (
@@ -553,7 +525,7 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
                 if (videoRef.current && !videoRef.current.paused) {
                     window.clearTimeout(controlsTimerRef.current);
                     controlsTimerRef.current = window.setTimeout(() => {
-                        if (!showShortcuts && !showSettings) setControlsVisible(false);
+                        if (!showShortcuts) setControlsVisible(false);
                     }, 3000);
                 }
                 setHoverProgress((state) => ({...state, visible: false}));
@@ -638,17 +610,6 @@ function VideoPlayer({file, streamUrl, active = true, sources = Array.isArray(fi
                     <div className="ytp-spacer" />
 
                     {textTracks.length > 0 && <button type="button" className="ytp-button" aria-label={captionsOn ? "Turn captions off" : "Turn captions on"} aria-pressed={captionsOn} title={captionsOn ? "Turn captions off (C)" : "Turn captions on (C)"} onClick={toggleCaptions}><span style={{fontSize:12,fontWeight:800,letterSpacing:"-.5px",border:captionsOn?"1px solid #fff":"1px solid transparent",borderRadius:3,padding:"2px 3px"}}>CC</span></button>}
-
-                    <div className="ytp-settings-area" ref={settingsRef}>
-                        <button type="button" className="ytp-button" aria-label="Settings" aria-expanded={showSettings} title="Settings" onClick={() => { setShowSettings((value) => !value); setControlsVisible(true); }}>{icon("settings")}</button>
-                        {showSettings && <div className="ytp-settings-menu" role="dialog" aria-label="Player settings">
-                            <div className="ytp-menu-section">
-                                <div className="ytp-menu-heading">Playback speed</div>
-                                <div className="ytp-speed-grid">{PLAYER_SPEED_OPTIONS.map((rate) => <button key={rate} type="button" className="ytp-speed" aria-label={"Playback speed " + rate + "x"} aria-pressed={playbackRate === rate} onClick={() => { setPlaybackRate(rate); if (videoRef.current) videoRef.current.playbackRate = rate; setShowSettings(false); showCenterFeedback("speed", rate + "×"); }}>{rate === 1 ? "Normal" : rate + "×"}{playbackRate === rate && <span>{icon("check", 13)}</span>}</button>)}</div>
-                            </div>
-                            {qualityOptions.length > 1 && <div className="ytp-menu-section"><div className="ytp-menu-heading">Quality <span style={{fontWeight:400,color:"#aaa"}}>· {activeQuality}</span></div><div className="ytp-quality-list">{qualityOptions.map((option) => <button key={option.src} type="button" className="ytp-quality" aria-label={"Video quality " + option.label} aria-pressed={activeSource === option.src} onClick={() => changeQuality(option)}><span>{option.label}</span>{activeSource === option.src && icon("check", 14)}</button>)}</div></div>}
-                        </div>}
-                    </div>
 
                     <button type="button" className="ytp-button" aria-label={fullscreen ? "Exit fullscreen" : "Full screen"} title={fullscreen ? "Exit fullscreen (F)" : "Full screen (F)"} onClick={() => void toggleFullscreen()}>{icon(fullscreen ? "exitFullscreen" : "fullscreen")}</button>
                 </div>

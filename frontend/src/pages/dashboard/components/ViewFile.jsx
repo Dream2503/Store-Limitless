@@ -1020,7 +1020,7 @@ export default function ViewFile({active = true} = {}) {
                 <span className="material-symbols-outlined text-[19px]"
                       aria-hidden="true">{kind === "pdf" ? "picture_as_pdf" : kind === "text" ? "code" : kind === "markdown" ? "article" : kind === "audio" ? "audio_file" : "movie"}</span>
             </div>
-            <h1 className="min-w-0 flex-1 truncate text-sm font-medium leading-5" title={name}>{name}</h1>
+            <h1 className="min-w-0 flex-1 whitespace-normal break-words text-sm font-medium leading-5 [overflow-wrap:anywhere] lg:truncate" title={name}>{name}</h1>
 
             <div className="hidden shrink-0 items-center gap-2 lg:flex">
                 {previewActions?.saveError && <span role="alert" className="max-w-56 truncate text-xs text-[#ff7278]" title={previewActions.saveError}>{previewActions.saveError}</span>}

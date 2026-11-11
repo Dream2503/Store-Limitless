@@ -172,7 +172,7 @@ export default function FileContentPreview({fileId, kind, navigate, publicToken,
 
     useEffect(() => {
         onRegisterActions?.({
-            canEdit,
+            canEdit: Boolean(canEdit && !loading && !error),
             editing,
             saving,
             saveError,
@@ -180,7 +180,7 @@ export default function FileContentPreview({fileId, kind, navigate, publicToken,
             onCancel: cancelEditing,
             onSave: saveContent,
         });
-    }, [onRegisterActions, canEdit, editing, saving, saveError, beginEditing, cancelEditing, saveContent]);
+    }, [onRegisterActions, canEdit, editing, saving, saveError, loading, error, beginEditing, cancelEditing, saveContent]);
 
     useEffect(() => () => onRegisterActions?.(null), [onRegisterActions]);
 

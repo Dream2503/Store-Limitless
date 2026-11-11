@@ -671,6 +671,7 @@ export default function ViewFile({active = true} = {}) {
 
     useEffect(() => {
         setMobileActionsOpen(false);
+        setPreviewActions(null);
     }, [fileId, publicToken, location.pathname]);
 
     useEffect(() => {

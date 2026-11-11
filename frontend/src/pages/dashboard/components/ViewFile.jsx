@@ -991,47 +991,13 @@ export default function ViewFile({active = true} = {}) {
                      visibility: active ? "visible" : "hidden",
                      pointerEvents: active ? "auto" : "none",
                  }}>
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-[#243229] bg-[#0b0f0c] px-5">
+        <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-[#243229] bg-[#0b0f0c] px-5 py-3">
             <div
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#3ecf8e]/20 bg-[#3ecf8e]/10 text-[#3ecf8e]">
                 <span className="material-symbols-outlined text-[19px]"
                       aria-hidden="true">{kind === "pdf" ? "picture_as_pdf" : kind === "text" ? "code" : kind === "markdown" ? "article" : kind === "audio" ? "audio_file" : "movie"}</span>
             </div>
-            <h1 className="min-w-0 truncate text-sm font-medium">{name}</h1>
-            <div className="ml-auto flex shrink-0 items-center gap-2">
-                <button
-                    type="button"
-                    onClick={startBrowserDownload}
-                    disabled={downloadPending || !downloadUrl}
-                    title={downloadError || (downloadPending ? "Preparing download" : "Download this file")}
-                    className={`flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e] ${downloadUrl && !downloadPending ? "border-[#2e8058] bg-[#17643d] text-white hover:bg-[#1d794a]" : "cursor-not-allowed border-[#3a3a3a] bg-[#252525] text-[#808080]"}`}
-                >
-                    <span className={`material-symbols-outlined text-[17px]${downloadPending ? " animate-spin" : ""}`} aria-hidden="true">{downloadPending ? "progress_activity" : "download"}</span>
-                    {downloadPending ? "Preparing…" : "Download"}
-                </button>
-                {((fileId && !publicToken) || (publicToken && location.pathname.startsWith("/s/"))) && (<button
-                    type="button"
-                    onClick={copyShareLink}
-                    disabled={sharePending || privateFilePending || !privateFile}
-                    title={shareError || "Copy a short public view link"}
-                    aria-live="polite"
-                    className="flex shrink-0 items-center gap-1.5 rounded-md border border-[#2e8058] bg-[#17643d] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#1d794a] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
-                >
-                    <span className="material-symbols-outlined text-[17px]" aria-hidden="true">{sharePending ? "progress_activity" : shareStatus === "Copied!" ? "check" : "share"}</span>
-                    {sharePending ? "Sharing…" : shareStatus || "Share"}
-                </button>)}
-                {source?.streamUrl && kind === "video" && (<button
-                    type="button"
-                    onClick={copyStreamLink}
-                    title="Copy a short public stream URL to open in VLC"
-                    aria-live="polite"
-                    className="flex shrink-0 items-center gap-2 rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#fafafa] transition-colors hover:bg-[#2a2a2a] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
-                >
-                    <span className="material-symbols-outlined text-[17px]"
-                          aria-hidden="true">{copyStatus === "Copied!" ? "check" : copyStatus === "Copy failed" ? "error" : "content_copy"}</span>
-                    {copyStatus || "Copy stream URL"}
-                </button>)}
-            </div>
+            <h1 className="min-w-0 flex-1 whitespace-normal break-words text-sm font-medium leading-5 [overflow-wrap:anywhere]">{name}</h1>
         </header>
 
         <main className="min-h-0 flex-1 overflow-hidden p-0">
@@ -1073,5 +1039,39 @@ export default function ViewFile({active = true} = {}) {
                         </div>
                     </div>)}
         </main>
+        <footer className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-[#243229] bg-[#0b0f0c] px-4 py-3">
+            <button
+                type="button"
+                onClick={startBrowserDownload}
+                disabled={downloadPending || !downloadUrl}
+                title={downloadError || (downloadPending ? "Preparing download" : "Download this file")}
+                className={`flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e] ${downloadUrl && !downloadPending ? "border-[#2e8058] bg-[#17643d] text-white hover:bg-[#1d794a]" : "cursor-not-allowed border-[#3a3a3a] bg-[#252525] text-[#808080]"}`}
+            >
+                <span className={`material-symbols-outlined text-[17px]${downloadPending ? " animate-spin" : ""}`} aria-hidden="true">{downloadPending ? "progress_activity" : "download"}</span>
+                {downloadPending ? "Preparing…" : "Download"}
+            </button>
+            {((fileId && !publicToken) || (publicToken && location.pathname.startsWith("/s/"))) && (<button
+                type="button"
+                onClick={copyShareLink}
+                disabled={sharePending || privateFilePending || !privateFile}
+                title={shareError || "Copy a short public view link"}
+                aria-live="polite"
+                className="flex shrink-0 items-center gap-1.5 rounded-md border border-[#2e8058] bg-[#17643d] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#1d794a] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
+            >
+                <span className="material-symbols-outlined text-[17px]" aria-hidden="true">{sharePending ? "progress_activity" : shareStatus === "Copied!" ? "check" : "share"}</span>
+                {sharePending ? "Sharing…" : shareStatus || "Share"}
+            </button>)}
+            {source?.streamUrl && kind === "video" && (<button
+                type="button"
+                onClick={copyStreamLink}
+                title="Copy a short public stream URL to open in VLC"
+                aria-live="polite"
+                className="flex shrink-0 items-center gap-2 rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#fafafa] transition-colors hover:bg-[#2a2a2a] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
+            >
+                <span className="material-symbols-outlined text-[17px]"
+                      aria-hidden="true">{copyStatus === "Copied!" ? "check" : copyStatus === "Copy failed" ? "error" : "content_copy"}</span>
+                {copyStatus || "Copy stream URL"}
+            </button>)}
+        </footer>
     </div>);
 }

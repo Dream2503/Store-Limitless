@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState} from "react";
 import {useNavigate, useSearchParams} from "react-router-dom";
 import {getFilesFromDrop, getUploadRelativePath} from "../uploadFiles.js";
+import {formatFileSize} from "../utils.js";
 import {API_URL} from "../../../api.js";
 
 /** @typedef {{cancelled: boolean}} UploadCancelToken */
@@ -47,26 +48,6 @@ const directoryToRoute = (directory) => {
     const segments = (directory || "/home").split("/").filter(Boolean);
     const relativeSegments = segments[0] === "home" ? segments.slice(1) : segments;
     return `/home${relativeSegments.length ? `/${relativeSegments.map(encodeURIComponent).join("/")}` : ""}`;
-};
-
-/**
- * Format a file size using binary units.
- * @param {number} bytes
- * @returns {string}
- */
-const formatBytes = (bytes) => {
-    if (bytes < 1000) return `${bytes} B`;
-
-    const units = ["KB", "MB", "GB", "TB"];
-    let value = bytes;
-    let unit = -1;
-
-    do {
-        value /= 1000;
-        unit++;
-    } while (value >= 1000 && unit < units.length - 1);
-
-    return `${value.toFixed(1)} ${units[unit]}`;
 };
 
 /**
@@ -1369,7 +1350,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                         <div className="min-w-0 flex-1">
                                             <p className="truncate text-sm text-[#fafafa]"
                                                title={getUploadRelativePath(selectedFile)}>{getUploadRelativePath(selectedFile)}</p>
-                                            <p className="text-xs text-[#898989]">{formatBytes(selectedFile.size)}</p>
+                                            <p className="text-xs text-[#898989]">{formatFileSize(selectedFile.size)}</p>
                                         </div>
                                         <button type="button" disabled={status === "uploading"}
                                                 onClick={() => setFiles((current) => current.filter((_, fileIndex) => fileIndex !== index))}

@@ -15,7 +15,7 @@ import useDashboardData, {clearDashboardTreeCache} from "./dashboard/hooks/useDa
 import useGlobalFileSearch from "./dashboard/hooks/useGlobalFileSearch.js";
 import useUploadJobs from "./dashboard/hooks/useUploadJobs.js";
 import {API_URL, DASHBOARD_SELECTION_STORAGE_KEY, DASHBOARD_SELECTIONS_BY_VIEW_KEY,} from "./dashboard/constants.js";
-import {decodePathSegment, endAuthSession, folderPathToRoute, getFileIcon, getFileKind, getToken, makeSelectionViewKey} from "./dashboard/utils.js";
+import {decodePathSegment, endAuthSession, folderPathToRoute, formatFileSize, getFileIcon, getFileKind, getToken, makeSelectionViewKey} from "./dashboard/utils.js";
 
 /** @typedef {"files" | "trash"} DashboardTab */
 /** @typedef {{icon: string, color: string}} FileIconStyle */
@@ -2626,12 +2626,6 @@ function MultiSelectionDetailsModal({items, onClose}) {
     // top-level selected folders, and do not add explicitly selected files inside them.
     const knownBytes = topLevelFolders.reduce((sum, item) => sum + (getFolderBytes(item) ?? 0), 0)
         + files.filter((item) => !fileIsInsideSelectedFolder(item)).reduce((sum, item) => sum + getFileBytes(item), 0);
-    const formatBytes = (bytes) => {
-        if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-        const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-        const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-        return `${(bytes / (1024 ** unit)).toLocaleString(undefined, {maximumFractionDigits: 2})} ${units[unit]}`;
-    };
     const uniqueTypes = [...new Set(files.map((item) => String(item.name || "").split(".").pop().toLowerCase()).filter(Boolean))];
 
     // Focus does not always enter a newly opened modal. Listen at window level so
@@ -2677,7 +2671,7 @@ function MultiSelectionDetailsModal({items, onClose}) {
                         className="mt-1 text-sm font-medium text-[#e8f0eb]">{files.length} files · {folders.length} folders</p></div>
                     <div className="col-span-2 rounded-lg border border-[#293b30] bg-[#0c110e] p-3"><p className="text-xs text-[#8ca296]">Known total
                         file size</p><p
-                        className="mt-1 text-xl font-semibold tabular-nums text-[#3ecf8e]">{formatBytes(knownBytes)}</p>{folders.length > 0 &&
+                        className="mt-1 text-xl font-semibold tabular-nums text-[#3ecf8e]">{formatFileSize(knownBytes)}</p>{folders.length > 0 &&
                         <p className="mt-1 text-[11px] leading-relaxed text-[#718477]">Includes known sizes throughout selected folders. Nested selections and files inside selected folders are counted only once.</p>}</div>
                     <div className="rounded-lg border border-[#293b30] bg-[#0c110e] p-3"><p className="text-xs text-[#8ca296]">File types</p><p
                         className="mt-1 break-words text-sm text-[#dce9e0]">{uniqueTypes.length ? uniqueTypes.map((type) => `.${type}`).join(", ") : "None"}</p>

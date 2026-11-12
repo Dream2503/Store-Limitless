@@ -2685,9 +2685,9 @@ function MultiSelectionDetailsModal({items, onClose}) {
                         <span className="material-symbols-outlined text-[16px] text-[#3ecf8e]">{item.type === "folder" ? "folder" : "draft"}</span>
                         <span className="min-w-0 flex-1 truncate text-xs text-[#c6d2ca]" title={item.name}>{item.name}</span>
                         {item.type === "file" && <span
-                            className="shrink-0 text-[11px] tabular-nums text-[#8ca296]">{formatBytes(getFileBytes(item))}</span>}
+                            className="shrink-0 text-[11px] tabular-nums text-[#8ca296]">{formatFileSize(getFileBytes(item))}</span>}
                         {item.type === "folder" && <span
-                            className="shrink-0 text-[11px] tabular-nums text-[#8ca296]">{getFolderBytes(item) === null ? "Unknown" : formatBytes(getFolderBytes(item))}</span>}
+                            className="shrink-0 text-[11px] tabular-nums text-[#8ca296]">{getFolderBytes(item) === null ? "Unknown" : formatFileSize(getFolderBytes(item))}</span>}
                     </div>)}
                 </div>
             </div>

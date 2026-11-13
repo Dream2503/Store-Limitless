@@ -31,8 +31,7 @@ from yt_dlp import YoutubeDL
 from backend.database.models import Directory, File
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter
-from backend.server.mime_types import get_file_mime_type
-from core.utils import JsonObject, sanitize_sensitive_urls, write_log
+from core.utils import JsonObject, get_file_mime_type, sanitize_sensitive_urls, write_log
 from core.utils.progress import Progress
 from core.utils.upload_manager import (
     IngestionUploadTicket,

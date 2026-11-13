@@ -6,7 +6,6 @@ import json
 from asyncio import CancelledError, Task, create_task
 from contextlib import aclosing
 from datetime import datetime, timezone
-from mimetypes import guess_type
 from pathlib import Path
 from time import time
 from typing import cast
@@ -22,6 +21,7 @@ from backend.database.redis_server import Redis
 from backend.server.jwt_handler import get_current_user
 from backend.server.security import resolve_public_share_id, verify_public_stream_token
 from backend.server.utils import perform_validation
+from backend.server.mime_types import get_file_mime_type
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter, Database
 from core.transfer import link_upload
@@ -113,7 +113,7 @@ async def upload_file(
     file: File = File(
         directory_id=cast("int", directory_obj.id),
         name=file_name,
-        type=guess_type(file_name)[0] or "application/octet-stream",
+        type=get_file_mime_type(file_name),
         size=0,
         modified_at=datetime.now(timezone.utc),
         links=[],
@@ -1074,7 +1074,7 @@ async def upload_link(
                     f"Resolved message link job_id={job_id} filename={resolved_name!r} download_url_received={bool(download_link)}",
                 )
                 file.name = resolved_name
-                file.type = guess_type(file.name)[0] or "application/octet-stream"
+                file.type = get_file_mime_type(file.name)
                 await Redis.set(job_id, Progress(file.name, "Starting download", 0))
 
                 latest_metadata = await get_upload_job_metadata(job_id)

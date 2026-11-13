@@ -196,7 +196,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
         range_header = None
         stream = Stream(file, None)
 
-    content_type = file.type or get_file_mime_type(file.name)
+    content_type = get_file_mime_type(file.name, file.type or "application/octet-stream")
     headers: dict[str, str] = {
         "Accept-Ranges": "bytes",
         "Content-Type": content_type,

@@ -5,9 +5,10 @@ from __future__ import annotations
 import re
 from contextvars import ContextVar, Token
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
 from urllib.parse import urlsplit, urlunsplit
+from mimetypes import guess_type
+from pathlib import Path
 
 JsonObject: TypeAlias = dict[str, object]
 
@@ -89,6 +90,7 @@ def sanitize_sensitive_urls(value: str) -> str:
             return "<redacted-url>" + trailing
 
     return re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE).sub(redact, value)
+
 
 from mimetypes import guess_type
 from pathlib import Path

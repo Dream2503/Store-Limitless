@@ -13,7 +13,6 @@ import inspect
 import math
 import os
 import re
-from mimetypes import guess_type
 from pathlib import Path, PurePosixPath
 from shutil import rmtree
 from re import fullmatch
@@ -32,6 +31,7 @@ from yt_dlp import YoutubeDL
 from backend.database.models import Directory, File
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter
+from backend.server.mime_types import get_file_mime_type
 from core.utils import JsonObject, sanitize_sensitive_urls, write_log
 from core.utils.progress import Progress
 from core.utils.upload_manager import (
@@ -1165,7 +1165,7 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
                 remote_file = File(
                     directory_id=cast("int", target_directory.id),
                     name=name,
-                    type=guess_type(name)[0] or "application/octet-stream",
+                    type=get_file_mime_type(name),
                     size=max(0, local_path.stat().st_size),
                     modified_at=datetime.now(timezone.utc),
                     links=[],
@@ -1688,7 +1688,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                     torrent_file: File = file
                     torrent_file.directory_id = cast("int", target_directory.id)
                     torrent_file.name = target_name
-                    torrent_file.type = guess_type(target_name)[0] or "application/octet-stream"
+                    torrent_file.type = get_file_mime_type(target_name)
                     torrent_file.size = local_size
                     torrent_file.modified_at = datetime.now(timezone.utc)
                     torrent_file.links = []
@@ -1696,7 +1696,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                     torrent_file = File(
                         directory_id=cast("int", target_directory.id),
                         name=target_name,
-                        type=guess_type(target_name)[0] or "application/octet-stream",
+                        type=get_file_mime_type(target_name),
                         size=local_size,
                         modified_at=datetime.now(timezone.utc),
                         links=[],

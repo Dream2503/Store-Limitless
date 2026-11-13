@@ -18,8 +18,7 @@ from requests import Response, get
 from backend.database.models import File
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter
-from core.utils import sanitize_sensitive_urls, write_log
-from backend.server.mime_types import get_file_mime_type
+from core.utils import get_file_mime_type, sanitize_sensitive_urls, write_log
 from core.utils.binaries import get_ffmpeg_path
 from core.utils.download_utils import (
     download_torrent,

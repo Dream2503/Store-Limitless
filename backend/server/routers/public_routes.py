@@ -149,7 +149,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
     range_header = request.headers.get("range")
     if_range = request.headers.get("if-range")
     if not file.links and int(file.size) == 0:
-        content_type = file.type or get_file_mime_type(file.name)
+        content_type = get_file_mime_type(file.name, file.type or "application/octet-stream")
         headers = {
             "Accept-Ranges": "bytes",
             "Content-Type": content_type,

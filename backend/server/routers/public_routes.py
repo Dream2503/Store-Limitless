@@ -7,7 +7,6 @@ import re
 import unicodedata
 from hashlib import sha256
 from pathlib import Path
-from mimetypes import guess_type
 from typing import cast
 from collections.abc import AsyncGenerator
 from urllib.parse import quote
@@ -23,6 +22,7 @@ from backend.server.zip_stream import ZipStreamEntry, stream_zip64, zip64_stored
 from core.data_center import Database
 from core.stream import Stream
 from core.utils import JsonObject, sanitize_sensitive_urls, write_log
+from backend.server.mime_types import get_file_mime_type
 from core.utils.discord_ import Discord
 from core.utils.progress import Progress
 from .upload_state import get_upload_job_metadata
@@ -149,7 +149,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
     range_header = request.headers.get("range")
     if_range = request.headers.get("if-range")
     if not file.links and int(file.size) == 0:
-        content_type = file.type or guess_type(file.name)[0] or "application/octet-stream"
+        content_type = file.type or get_file_mime_type(file.name)
         headers = {
             "Accept-Ranges": "bytes",
             "Content-Type": content_type,
@@ -196,7 +196,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
         range_header = None
         stream = Stream(file, None)
 
-    content_type = file.type or guess_type(file.name)[0] or "application/octet-stream"
+    content_type = file.type or get_file_mime_type(file.name)
     headers: dict[str, str] = {
         "Accept-Ranges": "bytes",
         "Content-Type": content_type,

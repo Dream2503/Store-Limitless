@@ -5,7 +5,6 @@ from __future__ import annotations
 from asyncio import Task, create_task, sleep, to_thread
 from datetime import datetime, timezone
 from email.message import Message
-from mimetypes import guess_type
 from pathlib import Path
 from shutil import rmtree
 from traceback import format_exc
@@ -20,6 +19,7 @@ from backend.database.models import File
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter
 from core.utils import sanitize_sensitive_urls, write_log
+from backend.server.mime_types import get_file_mime_type
 from core.utils.binaries import get_ffmpeg_path
 from core.utils.download_utils import (
     download_torrent,
@@ -83,7 +83,7 @@ async def download_processed_link(file: File, link: str, selected_torrent_files:
         output: Path = max(files, key=lambda path: path.stat().st_size)
         update_progress_name(file, output.name, progress_state)
         file.size = output.stat().st_size
-        file.type = guess_type(file.name)[0] or "application/octet-stream"
+        file.type = get_file_mime_type(file.name)
         file.modified_at = datetime.now(timezone.utc)
         yield progress_state.current
 
@@ -184,7 +184,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             url_name: str = unquote(urlparse(response.url).path.rstrip("/").rsplit("/", 1)[-1])
             file.name = safe_filename(header_name or url_name or file.name)
             response_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip() or None
-            file.type = guess_type(file.name)[0] or response_type or file.type
+            file.type = get_file_mime_type(file.name, response_type or file.type or "application/octet-stream")
 
             if response_type == "text/html" and not header_name and Path(file.name).suffix.lower() not in {".html", ".htm"}:
                 raise ValueError("The URL returned an HTML page rather than a direct file download")
@@ -200,7 +200,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             download_response: Response = cast("Response", response)
             download_task = create_task(to_thread(stream_response, download_response, output, link))
 
-        file.type = guess_type(file.name)[0] or response_type or file.type or "application/octet-stream"
+        file.type = get_file_mime_type(file.name, response_type or file.type or "application/octet-stream") or "application/octet-stream"
         progress: Progress = Progress(file.name, "Downloading and uploading file", total_size)
         progress.download_active = True
         progress.download_total = total_size
@@ -230,7 +230,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
                 await cancel_ingestion_upload(ticket)
 
         file.size = output.stat().st_size
-        file.type = guess_type(file.name)[0] or response_type or "application/octet-stream"
+        file.type = get_file_mime_type(file.name, response_type or "application/octet-stream")
         file.modified_at = datetime.now(timezone.utc)
         write_log(
             "INFO", data_center, "UPLOAD", file.username,

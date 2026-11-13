@@ -21,8 +21,7 @@ from backend.server.security import resolve_public_share_id, verify_public_strea
 from backend.server.zip_stream import ZipStreamEntry, stream_zip64, zip64_stored_content_length
 from core.data_center import Database
 from core.stream import Stream
-from core.utils import JsonObject, sanitize_sensitive_urls, write_log
-from backend.server.mime_types import get_file_mime_type
+from core.utils import JsonObject, get_file_mime_type, sanitize_sensitive_urls, write_log
 from core.utils.discord_ import Discord
 from core.utils.progress import Progress
 from .upload_state import get_upload_job_metadata

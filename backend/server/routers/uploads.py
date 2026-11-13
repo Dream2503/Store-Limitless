@@ -21,12 +21,11 @@ from backend.database.redis_server import Redis
 from backend.server.jwt_handler import get_current_user
 from backend.server.security import resolve_public_share_id, verify_public_stream_token
 from backend.server.utils import perform_validation
-from backend.server.mime_types import get_file_mime_type
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter, Database
 from core.transfer import link_upload
 from core.utils.telegram_link import resolve_telegram_message_link
-from core.utils import sanitize_sensitive_urls, write_log
+from core.utils import get_file_mime_type, sanitize_sensitive_urls, write_log
 from core.utils.download_utils import preview_torrent_files
 from core.utils.progress import Progress
 from .upload_state import (

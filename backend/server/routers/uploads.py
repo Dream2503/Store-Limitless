@@ -388,6 +388,38 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, object] = Body(..
     return JSONResponse({"batch_id": batch_id, "status": str(updated.get("status") or "queued")})
 
 
+@router.post("/upload-batches/{batch_id}/pause")
+async def pause_upload_batch(
+    batch_id: str,
+    payload: dict[str, object] = Body(...),
+    user: User = Depends(get_current_user),
+) -> JSONResponse:
+    """Pause/resume a browser-managed upload batch."""
+
+    metadata = await get_upload_batch_metadata(batch_id)
+    if metadata is None or metadata.get("username") != user.username:
+        raise HTTPException(status_code=404, detail="Upload task not found")
+
+    if metadata.get("status") in {"completed", "error", "cancelled"}:
+        return JSONResponse({"batch_id": batch_id, "status": str(metadata.get("status"))})
+
+    paused = bool(payload.get("paused"))
+    # Link/torrent jobs run entirely in backend generators. They cannot be
+    # safely suspended at an arbitrary byte boundary, so don't pretend otherwise.
+    if paused and metadata.get("kind") == "link":
+        raise HTTPException(
+            status_code=409,
+            detail="Pause is currently supported for browser file uploads only. Link and torrent imports cannot be paused safely yet.",
+        )
+
+    metadata["paused"] = paused
+    metadata["status"] = "paused" if paused else ("uploading" if metadata.get("current_job_id") else "queued")
+    metadata["message"] = "Paused by you" if paused else "Resuming upload"
+    metadata["paused_at"] = time() if paused else None
+    await Redis.set_json(upload_batch_key(batch_id), metadata)
+    return JSONResponse({"batch_id": batch_id, "status": str(metadata["status"]), "paused": paused})
+
+
 @router.post("/upload-batches/{batch_id}/cancel")
 async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_user)) -> JSONResponse:
     """Cancel the active item and prevent any remaining queued items from starting."""

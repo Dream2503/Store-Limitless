@@ -194,7 +194,6 @@ class Redis:
                             modified_at=datetime.fromisoformat(cast("str", record["modified_at"])),
                             deleted_at=datetime.fromisoformat(cast("str", record["deleted_at"])) if record["deleted_at"] else None,
                             username=cast("str", record["username"]),
-                            public_slug=str(record.get("public_slug") or ""),
                         )
                         for record in records
                     ]
@@ -212,6 +211,7 @@ class Redis:
                             data_center=cast("str", record["data_center"]),
                             links=cast("list[str]", record["links"]),
                             username=cast("str", record["username"]),
+                            public_slug=str(record.get("public_slug") or ""),
                         )
                         for record in records
                     ]
@@ -418,7 +418,6 @@ class Redis:
                         "modified_at": value.modified_at,
                         "deleted_at": value.deleted_at,
                         "username": value.username,
-                        "public_slug": value.public_slug,
                     },
                     default=str,
                 ),
@@ -443,6 +442,7 @@ class Redis:
                         "data_center": value.data_center,
                         "links": value.links,
                         "username": value.username,
+                        "public_slug": value.public_slug,
                     },
                     default=str,
                 ),

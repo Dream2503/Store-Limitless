@@ -417,20 +417,22 @@ async def pause_upload_batch(
             detail="Pause is currently supported for browser file uploads only. Link and torrent imports cannot be paused safely yet.",
         )
 
+    current_job_id = str(metadata.get("current_job_id") or "")
+    if not paused and current_job_id:
+        job_metadata = await get_upload_job_metadata(current_job_id)
+        if job_metadata and job_metadata.get("username") == user.username and job_metadata.get("paused"):
+            job_metadata["paused"] = False
+            await Redis.set_json(upload_job_key(current_job_id), job_metadata)
+            try:
+                progress: Progress = cast("Progress", await Redis.get(current_job_id, "Progress"))
+                if progress.message == "Paused by you":
+                    progress.message = "Receiving and uploading"
+                    await Redis.set(current_job_id, progress)
+            except KeyError:
+                pass
+
     metadata["paused"] = paused
     metadata["status"] = "paused" if paused else ("uploading" if metadata.get("current_job_id") else "queued")
-    current_job_id = str(metadata.get("current_job_id") or "")
-    if current_job_id:
-        job_metadata = await get_upload_job_metadata(current_job_id)
-        if job_metadata and job_metadata.get("username") == user.username:
-            job_metadata["paused"] = paused
-            await Redis.set_json(upload_job_key(current_job_id), job_metadata)
-    if not paused and current_job_id:
-        current_batch = await get_upload_batch_metadata(batch_id)
-        child_status = await get_upload_job_metadata(current_job_id)
-        if child_status and child_status.get("username") == user.username:
-            child_status["paused"] = False
-            await Redis.set_json(upload_job_key(current_job_id), child_status)
     metadata["message"] = "Paused by you" if paused else "Resuming upload"
     metadata["paused_at"] = time() if paused else None
     await Redis.set_json(upload_batch_key(batch_id), metadata)

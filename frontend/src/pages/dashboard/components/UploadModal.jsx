@@ -229,8 +229,10 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             }
 
             const error = new Error(errorMessage);
-            // 4xx errors will not be fixed by retrying.
-            error.fatal = xhr.status >= 400 && xhr.status < 500;
+            // The backend rejects chunks that arrive after the pause flag is set.
+            // This is a resumable interruption, not a permanent 4xx failure.
+            error.paused = xhr.status === 409 && /upload is paused/i.test(errorMessage);
+            error.fatal = xhr.status >= 400 && xhr.status < 500 && !error.paused;
             reject(error);
         };
 
@@ -316,13 +318,19 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         activeChunkProgress.delete(index);
                         reportProgress();
 
-                        if (error.fatal || cancelToken.cancelled || attempt >= MAX_CHUNK_ATTEMPTS) {
+                        if (cancelToken.cancelled) {
                             throw error;
                         }
 
+                        // Pause conflicts and browser aborts must not consume retry
+                        // attempts. Wait for Resume, then resend the exact same range.
                         if (error.paused || cancelToken.paused) {
                             await waitWhilePaused(cancelToken);
                             continue;
+                        }
+
+                        if (error.fatal || attempt >= MAX_CHUNK_ATTEMPTS) {
+                            throw error;
                         }
 
                         await waitWhilePaused(cancelToken);

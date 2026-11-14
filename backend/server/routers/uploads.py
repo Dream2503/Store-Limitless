@@ -422,7 +422,7 @@ async def pause_upload_batch(
         raise HTTPException(status_code=409, detail="Upload has not started yet; wait until file transfer begins before pausing.")
     if not paused and current_job_id:
         job_metadata = await get_upload_job_metadata(current_job_id)
-        if job_metadata and job_metadata.get("username") == user.username and job_metadata.get("paused"):
+        if job_metadata and job_metadata.get("username") == user.username:
             job_metadata["paused"] = False
             await Redis.set_json(upload_job_key(current_job_id), job_metadata)
             try:

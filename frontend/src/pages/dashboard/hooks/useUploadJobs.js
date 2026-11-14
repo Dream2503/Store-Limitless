@@ -410,6 +410,10 @@ export default function useUploadJobs(refreshDirectory) {
         const token = getToken();
         if (!token) return;
         const transfer = window.__storeLimitlessUploadTransfers?.get(jobId);
+        const localTransfer = Boolean(transfer);
+        if (!localTransfer && paused) {
+            console.warn("This upload was started in another tab/device. Pause it from the tab running the upload.");
+        }
         if (transfer?.cancelToken) {
             transfer.cancelToken.paused = paused;
             const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
@@ -434,7 +438,13 @@ export default function useUploadJobs(refreshDirectory) {
         }).then(async (response) => {
             const data = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(data.detail || `Could not ${paused ? "pause" : "resume"} upload (${response.status})`);
-        }).catch((error) => console.error("Could not change upload pause state:", error));
+            return data;
+        }).catch((error) => {
+            console.error("Could not change upload pause state:", error);
+            setUploadJobs((current) => current.map((job) => job.jobId === jobId ? {
+                ...job, status: "uploading", message: error.message || "Could not change pause state",
+            } : job));
+        });
     };
 
     /** Stop the current transfer and prevent later items in the batch from starting. */

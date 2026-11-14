@@ -808,7 +808,7 @@ function describeJob(job) {
     };
 }
 
-function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
+function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismiss}) {
     const {
         isQueued, isActive, itemCount, title, statusText, statusTone, icon, iconTone, percent, transfer, total,
         hasTorrentItems, torrentDownloadTransfer, torrentUploadTransfer, torrentDownloadPercent, torrentUploadPercent,
@@ -943,13 +943,27 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
                 </div>}
             </div>
 
-            {isActive ? <button type="button" onClick={() => onCancel(job.jobId)} className={`${iconBtnDanger} shrink-0`}
-                                title="Cancel this upload task and skip queued items" aria-label={`Cancel upload task ${job.name}`}>
-                <Icon name="close" className="text-[17px]"/>
-            </button> : <button type="button" onClick={() => onDismiss(job.jobId)} className={`${iconBtn} shrink-0`}
-                                title="Remove task from tray" aria-label={`Remove upload task ${job.name}`}>
-                <Icon name="close" className="text-[16px]"/>
-            </button>}
+            <div className="flex shrink-0 items-center gap-1">
+                {isActive && <>
+                    {job.status === "paused"
+                        ? <button type="button" onClick={() => onResume?.(job.jobId)} className={iconBtn}
+                                  title="Resume upload" aria-label={`Resume upload ${job.name}`}>
+                            <Icon name="play_arrow" className="text-[18px]"/>
+                          </button>
+                        : <button type="button" onClick={() => onPause?.(job.jobId)} className={iconBtn}
+                                  title="Pause upload" aria-label={`Pause upload ${job.name}`}>
+                            <Icon name="pause" className="text-[18px]"/>
+                          </button>}
+                    <button type="button" onClick={() => onCancel(job.jobId)} className={iconBtnDanger}
+                            title="Cancel this upload task and skip queued items" aria-label={`Cancel upload task ${job.name}`}>
+                        <Icon name="close" className="text-[17px]"/>
+                    </button>
+                </>}
+                {!isActive && <button type="button" onClick={() => onDismiss(job.jobId)} className={iconBtn}
+                                      title="Remove task from tray" aria-label={`Remove upload task ${job.name}`}>
+                    <Icon name="close" className="text-[16px]"/>
+                </button>}
+            </div>
         </div>
     </article>;
 }
@@ -961,6 +975,8 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
 export default function UploadJobsTray({
     uploadJobs = [],
     cancelUploadJob,
+    pauseUploadJob,
+    resumeUploadJob,
     dismissUploadJob,
     clearAllUploadJobs,
     fullscreen = false,
@@ -1065,7 +1081,7 @@ export default function UploadJobsTray({
 
     if (!uploadJobs.length && !selectionJob && !fullscreen) return null;
 
-    const activeCount = uploadJobs.filter((job) => job.status === "queued" || job.status === "uploading").length;
+    const activeCount = uploadJobs.filter((job) => ["queued", "uploading", "paused"].includes(job.status)).length;
     const totalCount = uploadJobs.length;
     const trayMaximized = fullscreen || maximized;
 
@@ -1158,6 +1174,7 @@ export default function UploadJobsTray({
                         <p className="mt-1 text-xs text-[#718477]">Uploads and imports will appear here with live progress.</p>
                     </div>}
                     {uploadJobs.slice().reverse().map((job) => <UploadJobCard key={job.jobId} job={job} onSelectFiles={openSelection}
+                                                                              onPause={pauseUploadJob} onResume={resumeUploadJob}
                                                                               onCancel={cancelUploadJob} onDismiss={dismissUploadJob}/>)}
                 </div>
             </>}

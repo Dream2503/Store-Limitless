@@ -235,8 +235,11 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
         xhr.onabort = () => {
             done();
-            const error = new Error("File upload was cancelled.");
-            error.fatal = true;
+            // Pause aborts in-flight chunks intentionally. The lane retries this
+            // same chunk after resume; user cancellation remains fatal.
+            const error = new Error("Chunk interrupted.");
+            error.paused = true;
+            error.fatal = false;
             reject(error);
         };
 
@@ -313,6 +316,11 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
                         if (error.fatal || cancelToken.cancelled || attempt >= MAX_CHUNK_ATTEMPTS) {
                             throw error;
+                        }
+
+                        if (error.paused || batchTransfer.cancelToken.paused) {
+                            await waitWhilePaused(batchTransfer);
+                            continue;
                         }
 
                         await waitWhilePaused(batchTransfer);

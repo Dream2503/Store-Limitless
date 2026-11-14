@@ -105,6 +105,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         if (control?.cancelled) throw new Error("Upload task was cancelled.");
     };
 
+    const pauseInterruptError = () => {
+        const error = new Error("Chunk interrupted for pause.");
+        error.paused = true;
+        error.fatal = false;
+        return error;
+    };
+
     const notifyPauseWaiters = (control) => {
         const waiters = Array.isArray(control?.pauseWaiters) ? control.pauseWaiters.splice(0) : [];
         for (const resolve of waiters) resolve();
@@ -234,12 +241,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
         xhr.onabort = () => {
             done();
-            // Pause aborts in-flight chunks intentionally. The lane retries this
-            // same chunk after resume; user cancellation remains fatal.
-            const error = new Error("Chunk interrupted.");
-            error.paused = true;
-            error.fatal = false;
-            reject(error);
+            // The worker retries this same byte range after the pause is lifted.
+            reject(pauseInterruptError());
         };
 
         xhr.send(blob);

@@ -232,6 +232,13 @@ async def wait_for_all_chunks(job_id: str, file: File) -> None:
         if job_metadata and bool(job_metadata.get("failed")):
             raise RuntimeError("Upload failed: browser transfer stopped")
 
+        while job_metadata and bool(job_metadata.get("paused")) and not bool(job_metadata.get("cancelled")):
+            await sleep(0.25)
+            job_metadata = await get_upload_job_metadata(job_id)
+
+        if job_metadata and bool(job_metadata.get("cancelled")):
+            raise RuntimeError("Upload cancelled")
+
         state: object | None = await Redis.get_json(upload_session_key(job_id))
 
         if not isinstance(state, dict):

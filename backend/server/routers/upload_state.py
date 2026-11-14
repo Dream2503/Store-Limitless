@@ -326,6 +326,7 @@ async def register_upload_batch(batch_id: str, *, username: str, name: str, kind
         "status": "queued",
         "message": "Queued",
         "cancelled": False,
+        "paused": False,
         "created_at": time(),
     }
     await Redis.set_json(upload_batch_key(batch_id), metadata)

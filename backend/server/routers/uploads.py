@@ -418,6 +418,8 @@ async def pause_upload_batch(
         )
 
     current_job_id = str(metadata.get("current_job_id") or "")
+    if paused and not current_job_id:
+        raise HTTPException(status_code=409, detail="Upload has not started yet; wait until file transfer begins before pausing.")
     if not paused and current_job_id:
         job_metadata = await get_upload_job_metadata(current_job_id)
         if job_metadata and job_metadata.get("username") == user.username and job_metadata.get("paused"):

@@ -194,6 +194,7 @@ class Redis:
                             modified_at=datetime.fromisoformat(cast("str", record["modified_at"])),
                             deleted_at=datetime.fromisoformat(cast("str", record["deleted_at"])) if record["deleted_at"] else None,
                             username=cast("str", record["username"]),
+                            public_slug=str(record.get("public_slug") or ""),
                         )
                         for record in records
                     ]
@@ -376,7 +377,8 @@ class Redis:
                            data_center,
                            links,
                            deleted_at,
-                           username
+                           username,
+                           public_slug
                     FROM files
                     WHERE username = %s;
                     """,
@@ -416,6 +418,7 @@ class Redis:
                         "modified_at": value.modified_at,
                         "deleted_at": value.deleted_at,
                         "username": value.username,
+                        "public_slug": value.public_slug,
                     },
                     default=str,
                 ),

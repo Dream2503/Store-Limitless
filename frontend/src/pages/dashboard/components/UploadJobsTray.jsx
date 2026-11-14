@@ -823,7 +823,7 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
     const showConcurrentProgress = isActive && downloadActive && !hasTorrentItems;
     const torrents = job.torrentFiles || [];
     const items = Array.isArray(job.items) ? job.items : [];
-    const canPause = job.kind === "file" && (job.status === "queued" || job.status === "uploading" || job.status === "paused");
+    const canPause = job.kind === "file" && (job.status === "uploading" || job.status === "paused");
     const hasPicker = torrents.length === 1 && job.status === "queued";
 
     return <article

@@ -411,7 +411,7 @@ async def pause_upload_batch(
     paused = bool(payload.get("paused"))
     # Link/torrent jobs run entirely in backend generators. They cannot be
     # safely suspended at an arbitrary byte boundary, so don't pretend otherwise.
-    if metadata.get("kind") == "link":
+    if paused and metadata.get("kind") == "link":
         raise HTTPException(
             status_code=409,
             detail="Pause is currently supported for browser file uploads only. Link and torrent imports cannot be paused safely yet.",

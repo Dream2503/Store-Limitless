@@ -127,8 +127,16 @@ async def upload_growing_file(
 
                 return index, message_id
 
+            except FileNotFoundError:
+                # The local staging file is gone. Retrying cannot repair this,
+                # and on cancellation the owning worker is responsible for stopping
+                # this task before it removes the file.
+                raise
+
             except OSError as error:
-                write_log("ERROR", data_center, "UPLOAD", file.username, f"Network error part {index}, retrying: {error}")
+                # Only provider/network I/O failures are retryable. Local file reads
+                # happen before this block and must fail immediately when unavailable.
+                write_log("ERROR", data_center, "UPLOAD", file.username, f"Storage provider error part {index}, retrying: {error}")
                 await sleep(2)
 
     async def collect_done() -> None:

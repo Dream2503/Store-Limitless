@@ -949,13 +949,17 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
             <div className="flex shrink-0 items-center gap-1">
                 {canPause && <>
                     {job.status === "paused"
-                        ? <button type="button" onClick={() => onResume?.(job.jobId)} className={iconBtn}
+                        ? <button type="button" onClick={() => onResume?.(job.jobId)}
+                                  className="inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-[#2e8058] bg-[#173c29] px-2.5 text-[11px] font-semibold text-[#b0f0ca] transition-colors hover:bg-[#205538]"
                                   title="Resume upload" aria-label={`Resume upload ${job.name}`}>
-                            <Icon name="play_arrow" className="text-[18px]"/>
+                            <Icon name="play_arrow" className="text-[16px]"/>
+                            <span>Resume</span>
                           </button>
-                        : <button type="button" onClick={() => onPause?.(job.jobId)} className={iconBtn}
+                        : <button type="button" onClick={() => onPause?.(job.jobId)}
+                                  className="inline-flex h-7 items-center justify-center gap-1.5 rounded-md border border-[#2e8058] bg-[#173c29] px-2.5 text-[11px] font-semibold text-[#b0f0ca] transition-colors hover:bg-[#205538]"
                                   title="Pause upload" aria-label={`Pause upload ${job.name}`}>
-                            <Icon name="pause" className="text-[18px]"/>
+                            <Icon name="pause" className="text-[16px]"/>
+                            <span>Pause</span>
                           </button>}
                     <button type="button" onClick={() => onCancel(job.jobId)} className={iconBtnDanger}
                             title="Cancel this upload task and skip queued items" aria-label={`Cancel upload task ${job.name}`}>

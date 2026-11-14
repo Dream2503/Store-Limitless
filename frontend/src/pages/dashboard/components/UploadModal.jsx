@@ -95,8 +95,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      */
     const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-    const waitWhilePaused = async (transfer) => {
-        const control = transfer?.cancelToken;
+    const waitWhilePaused = async (control) => {
         while (control?.paused && !control.cancelled) {
             await new Promise((resolve) => {
                 if (!Array.isArray(control.pauseWaiters)) control.pauseWaiters = [];
@@ -308,7 +307,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
          */
         const lane = async () => {
             while (!cancelToken.cancelled) {
-                await waitWhilePaused(batchTransfer);
+                await waitWhilePaused(cancelToken);
                 const index = nextIndex++;
 
                 if (index >= chunkCount) return;

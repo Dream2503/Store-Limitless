@@ -7,6 +7,7 @@ from asyncio import CancelledError, Task, gather, sleep
 from pathlib import Path
 from time import time
 from collections.abc import Iterable
+from contextlib import aclosing
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -922,7 +923,7 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
                 raise RuntimeError("Upload cancelled")
             return bool(latest_metadata and latest_metadata.get("paused"))
 
-        async for progress in file_upload(
+        async with aclosing(file_upload(
                 file,
                 file_path,
                 producer_task,
@@ -930,18 +931,19 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
                 track_download=True,
                 download_total=download_total,
                 pause_check=pause_requested,
-        ):
-            latest_metadata = await get_upload_job_metadata(job_id)
+        )) as upload_stream:
+            async for progress in upload_stream:
+                latest_metadata = await get_upload_job_metadata(job_id)
 
-            if latest_metadata and latest_metadata.get("cancelled"):
-                raise RuntimeError("Upload cancelled")
+                if latest_metadata and latest_metadata.get("cancelled"):
+                    raise RuntimeError("Upload cancelled")
 
-            if latest_metadata and latest_metadata.get("paused"):
-                progress.message = "Paused by you"
-                progress.upload_speed = 0
-                progress.download_speed = 0
+                if latest_metadata and latest_metadata.get("paused"):
+                    progress.message = "Paused by you"
+                    progress.upload_speed = 0
+                    progress.download_speed = 0
 
-            await Redis.set(job_id, progress)
+                await Redis.set(job_id, progress)
 
         if producer_task.done() and not producer_task.cancelled():
             producer_error: BaseException | None = producer_task.exception()
@@ -997,17 +999,23 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
 
     except Exception as error:
         metadata = await get_upload_job_metadata(job_id)
-        write_log(
-            "ERROR",
-            Database,
-            "UPLOAD CHUNKS",
-            file.username,
-            f"Chunk upload worker failed job_id={job_id} error={type(error).__name__}: "
-            f"{sanitize_sensitive_urls(str(error))[:300]}",
-        )
 
-        if not (metadata and (metadata.get("failed") or metadata.get("cancelled"))):
-            await Redis.set(job_id, Progress(file.name, f"Upload failed: {sanitize_sensitive_urls(str(error))[:250]}", 0))
+        if metadata and metadata.get("cancelled"):
+            # Cancellation closes the async upload stream and its provider-part
+            # tasks. Do not report expected shutdown as a failed upload.
+            write_log("INFO", Database, "UPLOAD CHUNKS", file.username, f"Upload worker stopped after cancellation job_id={job_id}")
+        else:
+            write_log(
+                "ERROR",
+                Database,
+                "UPLOAD CHUNKS",
+                file.username,
+                f"Chunk upload worker failed job_id={job_id} error={type(error).__name__}: "
+                f"{sanitize_sensitive_urls(str(error))[:300]}",
+            )
+
+            if not (metadata and metadata.get("failed")):
+                await Redis.set(job_id, Progress(file.name, f"Upload failed: {sanitize_sensitive_urls(str(error))[:250]}", 0))
 
     finally:
         if not producer_task.done():

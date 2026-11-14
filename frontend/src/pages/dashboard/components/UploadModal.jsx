@@ -120,26 +120,14 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         let delay = 500;
 
         while (true) {
-            while (cancelToken?.paused && !cancelToken.cancelled) {
-                await new Promise((resolve) => {
-                    if (!Array.isArray(cancelToken.pauseWaiters)) cancelToken.pauseWaiters = [];
-                    cancelToken.pauseWaiters.push(resolve);
-                });
-            }
-            if (cancelToken?.cancelled) throw new Error("Upload task was cancelled.");
+            await waitWhilePaused(cancelToken);
             let response;
-
             try {
                 response = await fetch(`${API_URL}/auth/upload-jobs/${encodeURIComponent(jobId)}/status`, {
                     headers: {Authorization: `Bearer ${token}`}, cache: "no-store",
                 });
             } catch {
-                while (cancelToken?.paused && !cancelToken.cancelled) {
-                    await new Promise((resolve) => {
-                        if (!Array.isArray(cancelToken.pauseWaiters)) cancelToken.pauseWaiters = [];
-                        cancelToken.pauseWaiters.push(resolve);
-                    });
-                }
+                await waitWhilePaused(cancelToken);
                 await sleep(delay);
                 delay = Math.min(delay * 2, 3000);
                 continue;
@@ -147,13 +135,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
             if (!response.ok) {
                 if (response.status >= 500) {
-                    while (cancelToken?.paused && !cancelToken.cancelled) {
-                    await new Promise((resolve) => {
-                        if (!Array.isArray(cancelToken.pauseWaiters)) cancelToken.pauseWaiters = [];
-                        cancelToken.pauseWaiters.push(resolve);
-                    });
-                }
-                await sleep(delay);
+                    await waitWhilePaused(cancelToken);
+                    await sleep(delay);
                     delay = Math.min(delay * 2, 3000);
                     continue;
                 }
@@ -182,18 +165,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             }
 
             if (typeof onProgress === "function") onProgress(job);
-
             if (job.status === "completed") return;
             if (job.status === "cancelled") throw new Error(`${job.name || "Upload"} was cancelled.`);
             if (job.status === "error") throw new Error(job.message || `${job.name || "Upload"} failed.`);
 
             delay = 500;
-            while (cancelToken?.paused && !cancelToken.cancelled) {
-                await new Promise((resolve) => {
-                    if (!Array.isArray(cancelToken.pauseWaiters)) cancelToken.pauseWaiters = [];
-                    cancelToken.pauseWaiters.push(resolve);
-                });
-            }
+            await waitWhilePaused(cancelToken);
             await sleep(500);
         }
     };

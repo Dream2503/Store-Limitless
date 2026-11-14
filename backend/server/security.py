@@ -135,8 +135,14 @@ def resolve_public_share_id(share_id: str) -> dict[str, str | int] | None:
 
     with POOL.connection() as connection:
         row = connection.execute(
-            "SELECT id AS file_id, username FROM files WHERE public_slug = %s;",
-            (share_id,),
+            """
+            SELECT id AS file_id, username
+            FROM files
+            WHERE public_slug = %s
+               OR %s = ANY(public_slug_aliases)
+            LIMIT 1;
+            """,
+            (share_id, share_id),
         ).fetchone()
 
     if row is None:

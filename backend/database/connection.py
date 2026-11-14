@@ -62,6 +62,380 @@ try:
                 deleted_at   TIMESTAMPTZ,
                 username     TEXT        NOT NULL,
                 public_slug  TEXT        NOT NULL DEFAULT replace(gen_random_uuid()::text, '-', ''),
+                public_slug_aliases TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
+                CONSTRAINT ck_files_public_slug_format CHECK (public_slug ~ '^[0-9a-f]{32}
+
+                CONSTRAINT fk_files_directory
+                    FOREIGN KEY (directory_id)
+                        REFERENCES directories (id),
+
+                CONSTRAINT fk_files_user
+                    FOREIGN KEY (username)
+                        REFERENCES users (username)
+            );
+
+            -- Ensure canonical public slugs are uniform while retaining previously shared URLs as aliases.
+            ALTER TABLE files ADD COLUMN IF NOT EXISTS public_slug TEXT;
+            ALTER TABLE files
+                ALTER COLUMN public_slug SET DEFAULT replace(gen_random_uuid()::text, '-', '');
+            ALTER TABLE files
+                ADD COLUMN IF NOT EXISTS public_slug_aliases TEXT[] NOT NULL DEFAULT '{}'::TEXT[];
+
+            -- If an older deployment still has the separate table, copy its slugs before dropping it.
+            DO $public_link_migration$
+            BEGIN
+                IF to_regclass('public.public_links') IS NOT NULL THEN
+                    EXECUTE '
+                        UPDATE public.files AS f
+                        SET public_slug = pl.slug
+                        FROM public.public_links AS pl
+                        WHERE pl.file_id = f.id
+                          AND pl.username = f.username
+                    ';
+                END IF;
+            END;
+            $public_link_migration$;
+
+            -- Rotate any non-canonical or missing slug to a 32-character UUID-hex value.
+            -- The previous value is retained as an alias so old public URLs remain valid.
+            UPDATE files
+            SET public_slug_aliases = CASE
+                    WHEN public_slug IS NOT NULL
+                         AND public_slug <> ''
+                         AND public_slug !~ '^[0-9a-f]{32}
+
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+),
+
+                CONSTRAINT fk_files_directory
+                    FOREIGN KEY (directory_id)
+                        REFERENCES directories (id),
+
+                CONSTRAINT fk_files_user
+                    FOREIGN KEY (username)
+                        REFERENCES users (username)
+            );
+
+            -- Move existing public share IDs onto their file rows before removing the old table.
+            ALTER TABLE files ADD COLUMN IF NOT EXISTS public_slug TEXT;
+            ALTER TABLE files
+                ALTER COLUMN public_slug SET DEFAULT replace(gen_random_uuid()::text, '-', '');
+
+            DO $public_link_migration$
+            BEGIN
+                IF to_regclass('public.public_links') IS NOT NULL THEN
+                    EXECUTE '
+                        UPDATE public.files AS f
+                        SET public_slug = pl.slug
+                        FROM public.public_links AS pl
+                        WHERE pl.file_id = f.id
+                          AND pl.username = f.username
+                    ';
+                END IF;
+            END;
+            $public_link_migration$;
+
+            -- Every old file without a previously-issued link receives one now.
+            UPDATE files
+            SET public_slug = replace(gen_random_uuid()::text, '-', '')
+            WHERE public_slug IS NULL OR public_slug = '';
+
+            ALTER TABLE files ALTER COLUMN public_slug SET NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug ON files (public_slug);
+            DROP TABLE IF EXISTS public_links;
+
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+
+                    THEN array_append(COALESCE(public_slug_aliases, '{}'::TEXT[]), public_slug)
+                    ELSE COALESCE(public_slug_aliases, '{}'::TEXT[])
+                END,
+                public_slug = CASE
+                    WHEN public_slug IS NULL OR public_slug !~ '^[0-9a-f]{32}
+
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+),
+
+                CONSTRAINT fk_files_directory
+                    FOREIGN KEY (directory_id)
+                        REFERENCES directories (id),
+
+                CONSTRAINT fk_files_user
+                    FOREIGN KEY (username)
+                        REFERENCES users (username)
+            );
+
+            -- Move existing public share IDs onto their file rows before removing the old table.
+            ALTER TABLE files ADD COLUMN IF NOT EXISTS public_slug TEXT;
+            ALTER TABLE files
+                ALTER COLUMN public_slug SET DEFAULT replace(gen_random_uuid()::text, '-', '');
+
+            DO $public_link_migration$
+            BEGIN
+                IF to_regclass('public.public_links') IS NOT NULL THEN
+                    EXECUTE '
+                        UPDATE public.files AS f
+                        SET public_slug = pl.slug
+                        FROM public.public_links AS pl
+                        WHERE pl.file_id = f.id
+                          AND pl.username = f.username
+                    ';
+                END IF;
+            END;
+            $public_link_migration$;
+
+            -- Every old file without a previously-issued link receives one now.
+            UPDATE files
+            SET public_slug = replace(gen_random_uuid()::text, '-', '')
+            WHERE public_slug IS NULL OR public_slug = '';
+
+            ALTER TABLE files ALTER COLUMN public_slug SET NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug ON files (public_slug);
+            DROP TABLE IF EXISTS public_links;
+
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+
+                    THEN replace(gen_random_uuid()::text, '-', '')
+                    ELSE public_slug
+                END
+            WHERE public_slug IS NULL
+               OR public_slug !~ '^[0-9a-f]{32}
+
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+),
+
+                CONSTRAINT fk_files_directory
+                    FOREIGN KEY (directory_id)
+                        REFERENCES directories (id),
+
+                CONSTRAINT fk_files_user
+                    FOREIGN KEY (username)
+                        REFERENCES users (username)
+            );
+
+            -- Move existing public share IDs onto their file rows before removing the old table.
+            ALTER TABLE files ADD COLUMN IF NOT EXISTS public_slug TEXT;
+            ALTER TABLE files
+                ALTER COLUMN public_slug SET DEFAULT replace(gen_random_uuid()::text, '-', '');
+
+            DO $public_link_migration$
+            BEGIN
+                IF to_regclass('public.public_links') IS NOT NULL THEN
+                    EXECUTE '
+                        UPDATE public.files AS f
+                        SET public_slug = pl.slug
+                        FROM public.public_links AS pl
+                        WHERE pl.file_id = f.id
+                          AND pl.username = f.username
+                    ';
+                END IF;
+            END;
+            $public_link_migration$;
+
+            -- Every old file without a previously-issued link receives one now.
+            UPDATE files
+            SET public_slug = replace(gen_random_uuid()::text, '-', '')
+            WHERE public_slug IS NULL OR public_slug = '';
+
+            ALTER TABLE files ALTER COLUMN public_slug SET NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug ON files (public_slug);
+            DROP TABLE IF EXISTS public_links;
+
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+
+               OR public_slug_aliases IS NULL;
+
+            ALTER TABLE files ALTER COLUMN public_slug SET NOT NULL;
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug ON files (public_slug);
+            CREATE INDEX IF NOT EXISTS ix_files_public_slug_aliases
+                ON files USING GIN (public_slug_aliases);
+
+            ALTER TABLE files DROP CONSTRAINT IF EXISTS ck_files_public_slug_format;
+            ALTER TABLE files ADD CONSTRAINT ck_files_public_slug_format
+                CHECK (public_slug ~ '^[0-9a-f]{32}
+
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+),
+
+                CONSTRAINT fk_files_directory
+                    FOREIGN KEY (directory_id)
+                        REFERENCES directories (id),
+
+                CONSTRAINT fk_files_user
+                    FOREIGN KEY (username)
+                        REFERENCES users (username)
+            );
+
+            -- Move existing public share IDs onto their file rows before removing the old table.
+            ALTER TABLE files ADD COLUMN IF NOT EXISTS public_slug TEXT;
+            ALTER TABLE files
+                ALTER COLUMN public_slug SET DEFAULT replace(gen_random_uuid()::text, '-', '');
+
+            DO $public_link_migration$
+            BEGIN
+                IF to_regclass('public.public_links') IS NOT NULL THEN
+                    EXECUTE '
+                        UPDATE public.files AS f
+                        SET public_slug = pl.slug
+                        FROM public.public_links AS pl
+                        WHERE pl.file_id = f.id
+                          AND pl.username = f.username
+                    ';
+                END IF;
+            END;
+            $public_link_migration$;
+
+            -- Every old file without a previously-issued link receives one now.
+            UPDATE files
+            SET public_slug = replace(gen_random_uuid()::text, '-', '')
+            WHERE public_slug IS NULL OR public_slug = '';
+
+            ALTER TABLE files ALTER COLUMN public_slug SET NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug ON files (public_slug);
+            DROP TABLE IF EXISTS public_links;
+
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+);
+
+            DROP TABLE IF EXISTS public_links;
+
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+),
 
                 CONSTRAINT fk_files_directory
                     FOREIGN KEY (directory_id)

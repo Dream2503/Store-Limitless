@@ -710,6 +710,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
             /** Create one child upload job, and fully finish it before starting the next item. */
             const createJob = async (selectedFile, selectedLink = "", destinationDirectory = directory, displayName = selectedFile?.name || selectedLink, itemNumber = 1) => {
+                await waitWhilePaused(cancelToken);
                 if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
                 let response;
                 if (uploadMode === "file") {

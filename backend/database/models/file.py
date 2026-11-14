@@ -164,18 +164,19 @@ class File(BaseModel):
 
         with POOL.connection() as connection:
             try:
-                connection.execute(
+                updated = connection.execute(
                     """
                     UPDATE files
                     SET directory_id = %s,
                         name         = %s,
                         type         = %s,
-                        size         = %s,
+                        size          = %s,
                         modified_at  = %s,
                         deleted_at   = %s,
                         data_center  = %s,
                         links        = %s
-                    WHERE id = %s;
+                    WHERE id = %s
+                    RETURNING public_slug;
                     """,
                     (
                         self.directory_id,
@@ -188,7 +189,11 @@ class File(BaseModel):
                         self.links,
                         self.id,
                     ),
-                )
+                ).fetchone()
+
+                if updated is not None:
+                    self.public_slug = str(updated["public_slug"])
+
                 connection.commit()
                 await Redis.set(f"user:{self.username}:files", self)
 

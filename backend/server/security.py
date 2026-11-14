@@ -139,7 +139,7 @@ def resolve_public_share_id(share_id: str) -> dict[str, str | int] | None:
             SELECT id AS file_id, username
             FROM files
             WHERE public_slug = %s
-               OR %s = ANY(public_slug_aliases)
+               OR public_slug_aliases @> ARRAY[%s]::TEXT[]
             LIMIT 1;
             """,
             (share_id, share_id),

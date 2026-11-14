@@ -405,7 +405,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         let batchIds = [];
         let batchId = "";
         let batchTransfer = null;
-        let cancelToken = {cancelled: false};
+        let cancelToken = {cancelled: false, paused: false, pauseWaiters: []};
 
         try {
             const folderRoots = [...new Set(filesWithPaths.map(({relativePath}) => relativePath.split("/").filter(Boolean)[0]).filter(Boolean))];

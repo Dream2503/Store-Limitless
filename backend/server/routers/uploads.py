@@ -15,6 +15,7 @@ from uuid import uuid4
 import aiofiles
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from starlette.requests import ClientDisconnect
 
 from backend.database.models import Directory, File, User
 from backend.database.redis_server import Redis
@@ -783,6 +784,9 @@ async def upload_chunk(
     if metadata.get("failed"):
         raise HTTPException(status_code=409, detail="Upload has already failed")
 
+    if metadata.get("paused"):
+        raise HTTPException(status_code=409, detail="Upload is paused")
+
     session_key: str = upload_session_key(job_id)
     state: object = await Redis.get_json(session_key)
 
@@ -861,19 +865,27 @@ async def upload_chunk(
 
     position: int = offset
 
-    async with aiofiles.open(file_path, "r+b") as buffer:
-        await buffer.seek(offset)
+    try:
+        async with aiofiles.open(file_path, "r+b") as buffer:
+            await buffer.seek(offset)
 
-        async for chunk in request.stream():
-            if not chunk:
-                continue
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
 
-            if position + len(chunk) > total:
-                raise HTTPException(status_code=413, detail="Chunk exceeds declared file size")
+                if position + len(chunk) > total:
+                    raise HTTPException(status_code=413, detail="Chunk exceeds declared file size")
 
-            await buffer.write(chunk)
-            await buffer.flush()
-            position += len(chunk)
+                await buffer.write(chunk)
+                await buffer.flush()
+                position += len(chunk)
+    except ClientDisconnect:
+        # The browser intentionally aborts in-flight XHRs when Pause is pressed.
+        # A partially written range is not recorded as complete, so resume safely
+        # retransmits this chunk from its original offset.
+        latest_metadata = await get_upload_job_metadata(job_id)
+        detail = "Upload is paused." if latest_metadata and latest_metadata.get("paused") else "Chunk transfer was interrupted."
+        return JSONResponse({"job_id": job_id, "detail": detail, "interrupted": True}, status_code=409)
 
     latest_metadata = await get_upload_job_metadata(job_id)
 

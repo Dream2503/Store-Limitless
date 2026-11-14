@@ -823,6 +823,7 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
     const showConcurrentProgress = isActive && downloadActive && !hasTorrentItems;
     const torrents = job.torrentFiles || [];
     const items = Array.isArray(job.items) ? job.items : [];
+    const canPause = job.kind === "file" && (job.status === "queued" || job.status === "uploading" || job.status === "paused");
     const hasPicker = torrents.length === 1 && job.status === "queued";
 
     return <article
@@ -946,7 +947,7 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
             </div>
 
             <div className="flex shrink-0 items-center gap-1">
-                {isActive && <>
+                {canPause && <>
                     {job.status === "paused"
                         ? <button type="button" onClick={() => onResume?.(job.jobId)} className={iconBtn}
                                   title="Resume upload" aria-label={`Resume upload ${job.name}`}>

@@ -1050,7 +1050,7 @@ see [Security notes](#security-notes).
 | `POST /auth/files/zip-link`                        | Validate at least two active files and create a short-lived token for a streamed ZIP download.                     |
 | `GET /public/download-zip/{token}`                 | Stream a ZIP64 archive directly from remote source files without creating a complete temporary archive.            |
 
-Public shares use an opaque ID stored directly on each file in PostgreSQL and are opened at `/s/{share_id}`. Existing 11-character IDs are preserved by the migration; new files receive a random 32-character UUID-hex ID automatically. The same ID also works with
+Public shares use a canonical 32-character lowercase UUID-hex ID stored directly on each file in PostgreSQL and are opened at `/s/{share_id}`. Existing shorter or non-canonical IDs are retained as lookup aliases during migration, so previously shared URLs continue to work; new files receive a canonical ID automatically. The same ID also works with
 `/public/stream/{share_id}` and `/public/download/{share_id}`. Existing signed `/view/{token}` links continue to work.
 
 The `/home` root is protected from being moved/renamed/deleted by the directory-management code. File and directory names are validated before path

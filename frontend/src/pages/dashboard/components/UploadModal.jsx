@@ -294,7 +294,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 const blob = selectedFile.slice(start, end);
 
                 for (let attempt = 1; ; attempt++) {
-                    await waitWhilePaused(batchTransfer);
+                    await waitWhilePaused(cancelToken);
                     if (cancelToken.cancelled) {
                         throw new Error("File upload was cancelled.");
                     }
@@ -316,12 +316,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             throw error;
                         }
 
-                        if (error.paused || batchTransfer.cancelToken.paused) {
-                            await waitWhilePaused(batchTransfer);
+                        if (error.paused || cancelToken.paused) {
+                            await waitWhilePaused(cancelToken);
                             continue;
                         }
 
-                        await waitWhilePaused(batchTransfer);
+                        await waitWhilePaused(cancelToken);
                         await sleep(1000 * attempt);
                     }
                 }

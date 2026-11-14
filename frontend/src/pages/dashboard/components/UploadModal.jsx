@@ -133,6 +133,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 continue;
             }
 
+            await waitWhilePaused(cancelToken);
             if (!response.ok) {
                 if (response.status >= 500) {
                     await waitWhilePaused(cancelToken);

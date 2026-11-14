@@ -237,12 +237,17 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, object] = Body(..
 
     status = str(payload.get("status") or metadata.get("status") or "queued")
 
-    if status not in {"queued", "uploading", "completed", "error", "cancelled"}:
+    if status not in {"queued", "uploading", "paused", "completed", "error", "cancelled"}:
         raise HTTPException(status_code=422, detail="Invalid upload task status")
+
+    # Browser progress events can arrive after the user pauses. Preserve the
+    # authoritative pause state while still accepting byte and item progress.
+    if metadata.get("paused") and status == "uploading":
+        status = "paused"
 
     updates: dict[str, object] = {"status": status}
 
-    if "message" in payload:
+    if "message" in payload and not (metadata.get("paused") and status == "paused"):
         updates["message"] = str(payload.get("message") or "")[:500]
 
     if "torrent_files" in payload:

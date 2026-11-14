@@ -121,7 +121,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         let delay = 500;
 
         while (true) {
-            await waitWhilePaused(batchTransfer);
+            await waitWhilePaused(cancelToken?.transfer || {cancelToken});
             if (cancelToken?.cancelled) throw new Error("Upload task was cancelled.");
             let response;
 

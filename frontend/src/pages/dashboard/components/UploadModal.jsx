@@ -135,6 +135,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     headers: {Authorization: `Bearer ${token}`}, cache: "no-store",
                 });
             } catch {
+                while (cancelToken?.paused && !cancelToken.cancelled) {
+                    await new Promise((resolve) => {
+                        if (!Array.isArray(cancelToken.pauseWaiters)) cancelToken.pauseWaiters = [];
+                        cancelToken.pauseWaiters.push(resolve);
+                    });
+                }
                 await sleep(delay);
                 delay = Math.min(delay * 2, 3000);
                 continue;
@@ -142,7 +148,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
             if (!response.ok) {
                 if (response.status >= 500) {
-                    await sleep(delay);
+                    while (cancelToken?.paused && !cancelToken.cancelled) {
+                    await new Promise((resolve) => {
+                        if (!Array.isArray(cancelToken.pauseWaiters)) cancelToken.pauseWaiters = [];
+                        cancelToken.pauseWaiters.push(resolve);
+                    });
+                }
+                await sleep(delay);
                     delay = Math.min(delay * 2, 3000);
                     continue;
                 }

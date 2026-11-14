@@ -827,14 +827,16 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
     const hasPicker = torrents.length === 1 && job.status === "queued";
 
     return <article
-        className="rounded-lg border border-[#212c25] bg-[#151d18]/50 px-3 py-2.5 transition-colors hover:border-[#2d4337] hover:bg-[#19231c]">
-        <div className="flex items-start gap-2.5">
+        className="relative rounded-lg border border-[#212c25] bg-[#151d18]/50 px-3 py-2.5 transition-colors hover:border-[#2d4337] hover:bg-[#19231c]">
+        <div className="flex min-w-0 items-start gap-2.5">
             <Icon name={icon} className={`mt-0.5 text-[19px] ${iconTone}`}/>
 
             <div className="min-w-0 flex-1">
-                <p className="truncate text-[15px] font-medium text-[#f3f7f4]" title={title}>{title}</p>
-                <p className={`mt-0.5 text-[13px] ${statusTone}`}
-                   title={job.message}>{torrents.length > 1 && job.status === "queued" ? "Multiple-link imports are disabled. Submit one link per task." : statusText}</p>
+                <div className="min-w-0 pr-20">
+                    <p className="truncate text-[15px] font-medium text-[#f3f7f4]" title={title}>{title}</p>
+                    <p className={`mt-0.5 truncate text-[13px] ${statusTone}`}
+                       title={job.message}>{torrents.length > 1 && job.status === "queued" ? "Multiple-link imports are disabled. Submit one link per task." : statusText}</p>
+                </div>
 
                 {hasPicker && <button type="button" onClick={() => onSelectFiles(job)}
                                       className="mt-2 rounded-md border border-[#2e8058] bg-[#173c29] px-2.5 py-1.5 text-[12px] font-medium text-[#b0f0ca] transition-colors hover:bg-[#205538]">
@@ -946,29 +948,30 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
                 </div>}
             </div>
 
-            <div className="flex shrink-0 items-center gap-1">
-                {canPause && <>
-                    {job.status === "paused"
-                        ? <button type="button" onClick={() => onResume?.(job.jobId)}
-                                  className="flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-[#83cfa0] transition-colors hover:border-[#2e8058]/60 hover:bg-[#173c29]/70 hover:text-[#c8f8d7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#3ecf8e]"
-                                  title="Resume upload" aria-label={`Resume upload ${job.name}`}>
-                            <Icon name="play_arrow" className="text-[18px]"/>
-                          </button>
-                        : <button type="button" onClick={() => onPause?.(job.jobId)}
-                                  className="flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-[#83cfa0] transition-colors hover:border-[#2e8058]/60 hover:bg-[#173c29]/70 hover:text-[#c8f8d7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#3ecf8e]"
-                                  title="Pause upload" aria-label={`Pause upload ${job.name}`}>
-                            <Icon name="pause" className="text-[18px]"/>
-                          </button>}
-                    <button type="button" onClick={() => onCancel(job.jobId)} className={iconBtnDanger}
-                            title="Cancel this upload task and skip queued items" aria-label={`Cancel upload task ${job.name}`}>
-                        <Icon name="close" className="text-[17px]"/>
-                    </button>
-                </>}
-                {!isActive && <button type="button" onClick={() => onDismiss(job.jobId)} className={iconBtn}
-                                      title="Remove task from tray" aria-label={`Remove upload task ${job.name}`}>
-                    <Icon name="close" className="text-[16px]"/>
-                </button>}
-            </div>
+        </div>
+
+        <div className="absolute right-3 top-2.5 flex items-center gap-1">
+            {canPause && <>
+                {job.status === "paused"
+                    ? <button type="button" onClick={() => onResume?.(job.jobId)}
+                              className="flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-[#83cfa0] transition-colors hover:border-[#2e8058]/60 hover:bg-[#173c29]/70 hover:text-[#c8f8d7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#3ecf8e]"
+                              title="Resume upload" aria-label={`Resume upload ${job.name}`}>
+                        <Icon name="play_arrow" className="text-[18px]"/>
+                      </button>
+                    : <button type="button" onClick={() => onPause?.(job.jobId)}
+                              className="flex h-7 w-7 items-center justify-center rounded-md border border-transparent text-[#83cfa0] transition-colors hover:border-[#2e8058]/60 hover:bg-[#173c29]/70 hover:text-[#c8f8d7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#3ecf8e]"
+                              title="Pause upload" aria-label={`Pause upload ${job.name}`}>
+                        <Icon name="pause" className="text-[18px]"/>
+                      </button>}
+                <button type="button" onClick={() => onCancel(job.jobId)} className={iconBtnDanger}
+                        title="Cancel this upload task and skip queued items" aria-label={`Cancel upload task ${job.name}`}>
+                    <Icon name="close" className="text-[17px]"/>
+                </button>
+            </>}
+            {!isActive && <button type="button" onClick={() => onDismiss(job.jobId)} className={iconBtn}
+                                  title="Remove task from tray" aria-label={`Remove upload task ${job.name}`}>
+                <Icon name="close" className="text-[16px]"/>
+            </button>}
         </div>
     </article>;
 }

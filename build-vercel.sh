@@ -44,6 +44,7 @@ BACKEND_DOMAIN="${VERCEL_BACKEND_DOMAIN:-cdn-storelimitless.vercel.app}"
 BACKEND_API_URL="https://${BACKEND_DOMAIN}"
 FRONTEND_PROJECT="${VERCEL_FRONTEND_PROJECT:-drive-bot}"
 VERCEL_SCOPE="${VERCEL_SCOPE:-}"
+EXPECTED_VERCEL_USER="${VERCEL_EXPECTED_USER:-}"
 
 [[ -f "$FRONTEND_DIR/package.json" ]] || fail "frontend/package.json was not found under $REPO_ROOT"
 [[ -f "$FRONTEND_DIR/vercel.json" ]] || fail "frontend/vercel.json was not found; expected the StoreLimitless Vite frontend"
@@ -69,6 +70,20 @@ if ! vercel_cli whoami >/dev/null 2>&1; then
     vercel_cli login
 fi
 
+AUTHENTICATED_USER="$(vercel_cli whoami 2>/dev/null | tr -d '\r' | tail -n 1)"
+[[ -n "$AUTHENTICATED_USER" ]] || fail "Could not determine the authenticated Vercel user."
+printf 'Vercel account: %s\n' "$AUTHENTICATED_USER"
+
+if [[ -n "$EXPECTED_VERCEL_USER" && "${AUTHENTICATED_USER,,}" != "${EXPECTED_VERCEL_USER,,}" ]]; then
+    fail "Authenticated as '$AUTHENTICATED_USER', but VERCEL_EXPECTED_USER is '$EXPECTED_VERCEL_USER'. Run 'vercel logout' then 'vercel login' with the intended account."
+fi
+
+if [[ -n "$VERCEL_SCOPE" ]]; then
+    printf 'Vercel deployment scope: %s\n' "$VERCEL_SCOPE"
+else
+    printf 'Vercel deployment scope: personal scope for %s\n' "$AUTHENTICATED_USER"
+fi
+
 # Keep the local Vercel link and pulled production env file out of Git.
 if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     GIT_EXCLUDE="$(git -C "$REPO_ROOT" rev-parse --git-path info/exclude)"
@@ -88,6 +103,12 @@ project_name_from_link() {
     node -e 'try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).projectName || "")); } catch {}' "$project_json"
 }
 
+project_id_from_link() {
+    local project_json="$1"
+    [[ -f "$project_json" ]] || return 0
+    node -e 'try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).projectId || "")); } catch {}' "$project_json"
+}
+
 log "Verifying the frontend Vercel project only"
 mkdir -p "$ROOT_VERCEL_DIR"
 
@@ -102,14 +123,17 @@ if ! (cd "$REPO_ROOT" && vercel_cli "${inspect_args[@]}") >/dev/null; then
     fail "Could not verify existing frontend Vercel project '$FRONTEND_PROJECT'. Check the project name, account, and VERCEL_SCOPE."
 fi
 
+# Always relink, even when the project name matches. A project with the same
+# name may exist under the previous Vercel account, and project.json contains
+# the actual project/team IDs used by subsequent env-pull and deploy commands.
+log "Linking repository root to '$FRONTEND_PROJECT' in the selected Vercel scope"
+(cd "$REPO_ROOT" && vercel_cli "${link_args[@]}")
+
 CURRENT_PROJECT="$(project_name_from_link "$PROJECT_JSON")"
-if [[ "${CURRENT_PROJECT,,}" != "${FRONTEND_PROJECT,,}" ]]; then
-    log "Linking repository root to existing frontend project '$FRONTEND_PROJECT'"
-    (cd "$REPO_ROOT" && vercel_cli "${link_args[@]}")
-    CURRENT_PROJECT="$(project_name_from_link "$PROJECT_JSON")"
-fi
+CURRENT_PROJECT_ID="$(project_id_from_link "$PROJECT_JSON")"
 [[ "${CURRENT_PROJECT,,}" == "${FRONTEND_PROJECT,,}" ]] || fail "Root Vercel link is not '$FRONTEND_PROJECT'; stopping to avoid deploying the wrong project."
-printf 'Frontend project: %s (domain %s)\n' "$FRONTEND_PROJECT" "$FRONTEND_DOMAIN"
+[[ -n "$CURRENT_PROJECT_ID" ]] || fail "Vercel did not write a projectId to $PROJECT_JSON; refusing to deploy."
+printf 'Frontend project: %s (project ID %s, domain %s)\n' "$FRONTEND_PROJECT" "$CURRENT_PROJECT_ID" "$FRONTEND_DOMAIN"
 printf 'Backend API URL (unchanged): %s\n' "$BACKEND_API_URL"
 
 log "Installing locked frontend dependencies"

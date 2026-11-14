@@ -88,7 +88,7 @@ try:
                           AND pl.username = f.username
                     ';
                 END IF;
-            END
+            END;
             $public_link_migration$;
 
             -- Every old file without a previously-issued link receives one now.

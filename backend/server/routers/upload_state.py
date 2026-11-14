@@ -642,7 +642,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                         and child_metadata.get("username") == username
                         and str(child_metadata.get("batch_id") or "") == batch_id
                         and child_status in {"error", "cancelled"}
-                        and metadata.get("status") in {"queued", "uploading"}
+                        and metadata.get("status") in {"queued", "uploading", "paused"}
                 ):
                     metadata["status"] = child_status
                     metadata["message"] = progress_message or (

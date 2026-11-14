@@ -325,6 +325,10 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         // Pause conflicts and browser aborts must not consume retry
                         // attempts. Wait for Resume, then resend the exact same range.
                         if (error.paused || cancelToken.paused) {
+                            // A server-side pause can be requested from another signed-in
+                            // tab/device. Mirror the 409 pause response locally so this
+                            // worker waits for the shared batch status to report Resume.
+                            if (error.paused) cancelToken.paused = true;
                             await waitWhilePaused(cancelToken);
                             continue;
                         }

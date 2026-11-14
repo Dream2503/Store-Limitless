@@ -143,7 +143,7 @@ export default function useUploadJobs(refreshDirectory) {
                 if (!Array.isArray(payload.batches)) return;
 
                 const batches = await Promise.all(payload.batches.map(async (batch) => {
-                    const status = ["queued", "uploading", "completed", "error", "cancelled"].includes(batch.status) ? batch.status : "queued";
+                    const status = ["queued", "uploading", "paused", "completed", "error", "cancelled"].includes(batch.status) ? batch.status : "queued";
                     const totalItems = Math.max(0, Number(batch.total_items) || 0);
                     const normalized = {
                         jobId: String(batch.batch_id),

@@ -1050,7 +1050,7 @@ see [Security notes](#security-notes).
 | `POST /auth/files/zip-link`                        | Validate at least two active files and create a short-lived token for a streamed ZIP download.                     |
 | `GET /public/download-zip/{token}`                 | Stream a ZIP64 archive directly from remote source files without creating a complete temporary archive.            |
 
-New public shares use an opaque 11-character ID stored in PostgreSQL and are opened at `/s/{share_id}`. The same ID also works with
+Public shares use an opaque ID stored directly on each file in PostgreSQL and are opened at `/s/{share_id}`. Existing 11-character IDs are preserved by the migration; new files receive a random 32-character UUID-hex ID automatically. The same ID also works with
 `/public/stream/{share_id}` and `/public/download/{share_id}`. Existing signed `/view/{token}` links continue to work.
 
 The `/home` root is protected from being moved/renamed/deleted by the directory-management code. File and directory names are validated before path
@@ -1475,7 +1475,7 @@ This project should be treated as a self-hosted application that requires securi
 3. **Keep Redis private.** Redis listens on the local host and is an internal coordination service. Do not expose it directly to the internet.
 4. **Do not use plain FTP over untrusted networks.** Add FTPS or another secure transport and configure passive data ports/firewall rules correctly
    before public use.
-5. **Treat public links as secrets.** Short public share IDs are durable and do not currently expire; anyone with the link can view the file until
+5. **Treat public links as secrets.** Public share IDs are durable and do not currently expire; anyone with the link can view the file until
    the file is deleted. Add an explicit revocation/expiry control if time-limited sharing is required.
 6. **Use HTTPS in public deployments.** The frontend, bearer tokens, account data, and file links should not cross untrusted networks over plain HTTP.
 7. **Review CORS and hosting mode.** `backend/server/app.py` has development-oriented local origins, and Cloud mode adds the selected website origin.

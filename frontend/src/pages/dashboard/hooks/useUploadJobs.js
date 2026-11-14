@@ -325,16 +325,27 @@ export default function useUploadJobs(refreshDirectory) {
                 }));
                 // Active batches stay near-real-time; while idle, the longer interval
                 // still discovers work started by another device without constant empty polls.
-                hasActiveUploads.current = batches.some((batch) => batch.status === "queued" || batch.status === "uploading");
+                hasActiveUploads.current = batches.some((batch) => ["queued", "uploading", "paused"].includes(batch.status));
 
-                // Cancellation and Clear all can be initiated from another signed-in device.
-                // Mirror those server-side changes into this tab's active chunk requests.
-                const batchStatusById = new Map(batches.map((batch) => [batch.jobId, batch.status]));
+                // Mirror pause/resume/cancel requests made from another signed-in device.
+                const batchById = new Map(batches.map((batch) => [batch.jobId, batch]));
                 for (const [batchId, transfer] of window.__storeLimitlessUploadTransfers?.entries?.() || []) {
-                    const serverStatus = batchStatusById.get(batchId);
-                    if (serverStatus === undefined || serverStatus === "cancelled") {
+                    const serverBatch = batchById.get(batchId);
+                    if (serverBatch === undefined || serverBatch.status === "cancelled") {
                         transfer.cancelToken.cancelled = true;
+                        transfer.cancelToken.paused = false;
+                        const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+                        waiters.forEach((resolve) => resolve());
                         for (const xhr of transfer.xhrs || []) xhr.abort();
+                    } else if (serverBatch.status === "paused" && !transfer.cancelToken.paused) {
+                        transfer.cancelToken.paused = true;
+                        // Abort only in-flight chunks. Their offsets are retried after resume;
+                        // completed chunks stay committed on the server.
+                        for (const xhr of transfer.xhrs || []) xhr.abort();
+                    } else if (serverBatch.status !== "paused" && transfer.cancelToken.paused) {
+                        transfer.cancelToken.paused = false;
+                        const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+                        waiters.forEach((resolve) => resolve());
                     }
                 }
 

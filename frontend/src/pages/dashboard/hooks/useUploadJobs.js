@@ -409,6 +409,11 @@ export default function useUploadJobs(refreshDirectory) {
     const setUploadPaused = (jobId, paused) => {
         const token = getToken();
         if (!token) return;
+        const currentJob = uploadJobs.find((job) => job.jobId === jobId);
+        if (currentJob?.kind !== "file") {
+            console.warn("Pause/resume is currently available for file uploads only.");
+            return;
+        }
         const transfer = window.__storeLimitlessUploadTransfers?.get(jobId);
         const localTransfer = Boolean(transfer);
         if (!localTransfer && paused) {

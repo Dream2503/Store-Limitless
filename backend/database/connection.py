@@ -63,7 +63,6 @@ try:
                 deleted_at   TIMESTAMPTZ,
                 username     TEXT        NOT NULL,
                 public_slug  TEXT        NOT NULL DEFAULT replace(gen_random_uuid()::text, '-', ''),
-                public_slug_aliases TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
 
                 CONSTRAINT ck_files_public_slug_format
                     CHECK (length(public_slug) = 32 AND public_slug ~ '^[0-9a-f]+$'),
@@ -81,8 +80,6 @@ try:
             ALTER TABLE files ADD COLUMN IF NOT EXISTS public_slug TEXT;
             ALTER TABLE files
                 ALTER COLUMN public_slug SET DEFAULT replace(gen_random_uuid()::text, '-', '');
-            ALTER TABLE files
-                ADD COLUMN IF NOT EXISTS public_slug_aliases TEXT[] NOT NULL DEFAULT '{}'::TEXT[];
 
             -- If an older deployment still has public_links, copy its current IDs first.
             DO $public_link_migration$
@@ -99,34 +96,44 @@ try:
             END;
             $public_link_migration$;
 
-            -- Normalize every non-canonical slug to 32 lowercase hexadecimal characters.
-            -- Retain the previous slug as an alias so previously shared URLs still resolve.
+            -- Give every file one canonical 32-character lowercase hexadecimal slug.
             UPDATE files
-            SET public_slug_aliases = CASE
-                    WHEN public_slug IS NOT NULL
-                         AND public_slug <> ''
-                         AND (length(public_slug) <> 32 OR public_slug !~ '^[0-9a-f]+$')
-                    THEN array_append(COALESCE(public_slug_aliases, '{}'::TEXT[]), public_slug)
-                    ELSE COALESCE(public_slug_aliases, '{}'::TEXT[])
-                END,
-                public_slug = CASE
-                    WHEN public_slug IS NULL
-                         OR length(public_slug) <> 32
-                         OR public_slug !~ '^[0-9a-f]+$'
-                    THEN replace(gen_random_uuid()::text, '-', '')
-                    ELSE public_slug
-                END
+            SET public_slug = replace(gen_random_uuid()::text, '-', '')
             WHERE public_slug IS NULL
                OR length(public_slug) <> 32
-               OR public_slug !~ '^[0-9a-f]+$'
-               OR public_slug_aliases IS NULL;
+               OR public_slug !~ '^[0-9a-f]+
+            ALTER TABLE files ALTER COLUMN public_slug SET NOT NULL;
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug
+                ON files (public_slug);
+
+            ALTER TABLE files DROP CONSTRAINT IF EXISTS ck_files_public_slug_format;
+            ALTER TABLE files ADD CONSTRAINT ck_files_public_slug_format
+                CHECK (length(public_slug) = 32 AND public_slug ~ '^[0-9a-f]+$');
+
+            DROP TABLE IF EXISTS public_links;
+            """
+        )
+        connection.commit()
+
+except Exception as e:
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )
+;
 
             ALTER TABLE files ALTER COLUMN public_slug SET NOT NULL;
 
             CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug
                 ON files (public_slug);
-            CREATE INDEX IF NOT EXISTS ix_files_public_slug_aliases
-                ON files USING GIN (public_slug_aliases);
 
             ALTER TABLE files DROP CONSTRAINT IF EXISTS ck_files_public_slug_format;
             ALTER TABLE files ADD CONSTRAINT ck_files_public_slug_format

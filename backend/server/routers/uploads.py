@@ -435,6 +435,14 @@ async def pause_upload_batch(
 
     metadata["paused"] = paused
     metadata["status"] = "paused" if paused else ("uploading" if metadata.get("current_job_id") else "queued")
+    if paused and current_job_id:
+        progress = await Redis.get(current_job_id, "Progress")
+        if isinstance(progress, Progress):
+            metadata["paused_progress_message"] = str(progress.message or "")
+            progress.message = "Paused by you"
+            progress.upload_speed = 0
+            progress.download_speed = 0
+            await Redis.set(current_job_id, progress)
     metadata["message"] = "Paused by you" if paused else "Resuming upload"
     metadata["paused_at"] = time() if paused else None
     await Redis.set_json(upload_batch_key(batch_id), metadata)

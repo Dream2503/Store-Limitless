@@ -428,7 +428,7 @@ async def pause_upload_batch(
             try:
                 progress: Progress = cast("Progress", await Redis.get(current_job_id, "Progress"))
                 if progress.message == "Paused by you":
-                    progress.message = "Receiving and uploading"
+                    progress.message = str(metadata.get("paused_progress_message") or "Receiving and uploading")
                     await Redis.set(current_job_id, progress)
             except KeyError:
                 pass

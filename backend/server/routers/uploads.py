@@ -761,6 +761,9 @@ async def upload_chunk(
     if metadata.get("failed"):
         raise HTTPException(status_code=409, detail="Upload has already failed")
 
+    if metadata.get("paused"):
+        raise HTTPException(status_code=409, detail="Upload is paused")
+
     session_key: str = upload_session_key(job_id)
     state: object = await Redis.get_json(session_key)
 

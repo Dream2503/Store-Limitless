@@ -420,6 +420,7 @@ export default function useUploadJobs(refreshDirectory) {
         }
         const transfer = window.__storeLimitlessUploadTransfers?.get(jobId);
         const localTransfer = Boolean(transfer);
+        const previousPaused = Boolean(transfer?.cancelToken?.paused);
         if (!localTransfer && paused) {
             console.warn("This upload was started in another tab/device. Pause it from the tab running the upload.");
         }
@@ -450,8 +451,19 @@ export default function useUploadJobs(refreshDirectory) {
             return data;
         }).catch((error) => {
             console.error("Could not change upload pause state:", error);
+            if (transfer?.cancelToken) {
+                // Roll back the optimistic local flag when the API rejects the
+                // pause/resume request, and wake any chunk lanes that need to recover.
+                transfer.cancelToken.paused = previousPaused;
+                if (!previousPaused) {
+                    const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+                    waiters.forEach((resolve) => resolve());
+                }
+            }
             setUploadJobs((current) => current.map((job) => job.jobId === jobId ? {
-                ...job, status: "uploading", message: error.message || "Could not change pause state",
+                ...job,
+                status: previousPaused ? "paused" : "uploading",
+                message: error.message || "Could not change pause state",
             } : job));
         });
     };

@@ -920,7 +920,7 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
 
             latest_metadata = await get_upload_job_metadata(job_id)
             if latest_metadata and latest_metadata.get("cancelled"):
-                raise RuntimeError("Upload cancelled")
+                raise CancelledError
             return bool(latest_metadata and latest_metadata.get("paused"))
 
         async with aclosing(file_upload(

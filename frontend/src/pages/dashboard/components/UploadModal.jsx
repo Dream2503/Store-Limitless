@@ -493,6 +493,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             const publishBatch = async (updates) => {
                 if (!batchId) return;
                 const batchUpdates = {...updates};
+                // Do not let routine progress snapshots overwrite a pause requested
+                // from the tray while the active chunk worker is waiting to resume.
+                if (cancelToken.paused && batchUpdates.status === "uploading") {
+                    batchUpdates.status = "paused";
+                    batchUpdates.message = "Paused by you";
+                }
                 // Every server task represents exactly one queue item; the browser
                 // coordinates the full queue and publishes progress only for the active task.
                 if (batchUpdates.item_index != null) batchUpdates.item_index = 0;

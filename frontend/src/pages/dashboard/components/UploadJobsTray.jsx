@@ -582,7 +582,8 @@ function describeJob(job) {
     const isError = job.status === "error";
     const isCancelled = job.status === "cancelled";
     const isQueued = job.status === "queued";
-    const isActive = isQueued || job.status === "uploading";
+    const isPaused = job.status === "paused";
+    const isActive = isQueued || job.status === "uploading" || isPaused;
 
     const items = Array.isArray(job.items) ? job.items : [];
     const torrents = Array.isArray(job.torrentFiles) ? job.torrentFiles : [];
@@ -733,6 +734,7 @@ function describeJob(job) {
     if (isComplete) statusText = singleItem ? "Completed" : `Completed · ${itemsLabel}`;
     else if (isError) statusText = job.message || "Some items failed";
     else if (isCancelled) statusText = "Cancelled";
+    else if (isPaused) statusText = "Paused";
     else if (isQueued) statusText = singleItem ? "Queued" : `Queued · ${itemsLabel}`;
     else if (hasTorrentItems) statusText = `${downloadedCount} of ${itemCount} downloaded`;
     else if (stageText) statusText = stageText;

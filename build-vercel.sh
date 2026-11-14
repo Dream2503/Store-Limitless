@@ -119,8 +119,19 @@ if [[ -n "$VERCEL_SCOPE" ]]; then
     link_args+=(--scope "$VERCEL_SCOPE")
 fi
 
-if ! (cd "$REPO_ROOT" && vercel_cli "${inspect_args[@]}") >/dev/null; then
-    fail "Could not verify existing frontend Vercel project '$FRONTEND_PROJECT'. Check the project name, account, and VERCEL_SCOPE."
+# A project from the previous Vercel account will not exist in the new account.
+# Create it in the selected personal/team scope rather than aborting.
+if ! (cd "$REPO_ROOT" && vercel_cli "${inspect_args[@]}") >/dev/null 2>&1; then
+    log "Project '$FRONTEND_PROJECT' was not found in the selected Vercel scope; creating it"
+
+    create_args=(project create "$FRONTEND_PROJECT")
+    if [[ -n "$VERCEL_SCOPE" ]]; then
+        create_args+=(--scope "$VERCEL_SCOPE")
+    fi
+
+    if ! (cd "$REPO_ROOT" && vercel_cli "${create_args[@]}"); then
+        fail "Could not create Vercel project '$FRONTEND_PROJECT'. Check that this name is available and that the authenticated account has permission to create projects. You can choose another name with VERCEL_FRONTEND_PROJECT."
+    fi
 fi
 
 # Always relink, even when the project name matches. A project with the same

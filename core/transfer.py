@@ -6,7 +6,7 @@ from asyncio import Task
 from contextlib import aclosing
 from pathlib import Path
 from traceback import format_exc
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from urllib.parse import ParseResult, parse_qs, urlparse
 
 from backend.database.models import File, User
@@ -31,6 +31,7 @@ async def file_upload(
         track_download: bool = False,
         download_total: int = 0,
         queue_slot_held: bool = False,
+        pause_check: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncGenerator[Progress]:
     """Upload one file through the shared FIFO, optionally leaving its database save to the caller."""
 
@@ -65,6 +66,7 @@ async def file_upload(
                     upload_task,
                     track_download=track_download,
                     download_total=download_total,
+                    pause_check=pause_check,
             )) as upload_progress_stream:
                 async for progress_value in upload_progress_stream:
                     yield progress_value

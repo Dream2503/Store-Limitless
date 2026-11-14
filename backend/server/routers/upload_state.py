@@ -914,6 +914,14 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
         session_state: object | None = await Redis.get_json(upload_session_key(job_id))
         download_total = int(session_state.get("total") or 0) if isinstance(session_state, dict) else 0
 
+        async def pause_requested() -> bool:
+            """Read the child job's authoritative pause flag for the provider scheduler."""
+
+            latest_metadata = await get_upload_job_metadata(job_id)
+            if latest_metadata and latest_metadata.get("cancelled"):
+                raise RuntimeError("Upload cancelled")
+            return bool(latest_metadata and latest_metadata.get("paused"))
+
         async for progress in file_upload(
                 file,
                 file_path,
@@ -921,20 +929,17 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
                 intermediate=True,
                 track_download=True,
                 download_total=download_total,
+                pause_check=pause_requested,
         ):
             latest_metadata = await get_upload_job_metadata(job_id)
 
             if latest_metadata and latest_metadata.get("cancelled"):
                 raise RuntimeError("Upload cancelled")
 
-            # Hold every published stage at the pause boundary. Once the
-            # provider generator yields again, wait here before publishing it.
-            while latest_metadata and latest_metadata.get("paused") and not latest_metadata.get("cancelled"):
-                await sleep(0.25)
-                latest_metadata = await get_upload_job_metadata(job_id)
-
-            if latest_metadata and latest_metadata.get("cancelled"):
-                raise RuntimeError("Upload cancelled")
+            if latest_metadata and latest_metadata.get("paused"):
+                progress.message = "Paused by you"
+                progress.upload_speed = 0
+                progress.download_speed = 0
 
             await Redis.set(job_id, progress)
 

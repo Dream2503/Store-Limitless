@@ -121,7 +121,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         let delay = 500;
 
         while (true) {
-            await waitWhilePaused(cancelToken?.transfer || {cancelToken});
+            while (cancelToken?.paused && !cancelToken.cancelled) {
+                await new Promise((resolve) => {
+                    if (!Array.isArray(cancelToken.pauseWaiters)) cancelToken.pauseWaiters = [];
+                    cancelToken.pauseWaiters.push(resolve);
+                });
+            }
             if (cancelToken?.cancelled) throw new Error("Upload task was cancelled.");
             let response;
 
@@ -172,7 +177,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             if (job.status === "error") throw new Error(job.message || `${job.name || "Upload"} failed.`);
 
             delay = 500;
-            await waitWhilePaused(batchTransfer);
+            while (cancelToken?.paused && !cancelToken.cancelled) {
+                await new Promise((resolve) => {
+                    if (!Array.isArray(cancelToken.pauseWaiters)) cancelToken.pauseWaiters = [];
+                    cancelToken.pauseWaiters.push(resolve);
+                });
+            }
             await sleep(500);
         }
     };

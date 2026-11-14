@@ -414,6 +414,10 @@ export default function useUploadJobs(refreshDirectory) {
             console.warn("Pause/resume is currently available for file uploads only.");
             return;
         }
+        if (paused && currentJob.status === "queued") {
+            console.warn("Wait until the file begins uploading before pausing.");
+            return;
+        }
         const transfer = window.__storeLimitlessUploadTransfers?.get(jobId);
         const localTransfer = Boolean(transfer);
         if (!localTransfer && paused) {

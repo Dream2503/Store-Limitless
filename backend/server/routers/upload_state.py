@@ -871,6 +871,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
             "current_job_id": current_job_id,
             "current_name": current_name,
             "status": status,
+            "paused": bool(metadata.get("paused")),
             "progress": progress,
             "transfer": current_transfer,
             "total": current_total,

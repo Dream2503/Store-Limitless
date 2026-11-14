@@ -4,7 +4,7 @@ import {getFilesFromDrop, getUploadRelativePath} from "../uploadFiles.js";
 import {formatFileSize} from "../utils.js";
 import {API_URL} from "../../../api.js";
 
-/** @typedef {{cancelled: boolean}} UploadCancelToken */
+/** @typedef {{cancelled: boolean, paused: boolean, pauseWaiters?: Array<() => void>}} UploadCancelToken */
 /** @typedef {Error & {fatal?: boolean, queueFatal?: boolean}} UploadRequestError */
 
 const DATA_CENTERS = ["Discord", "Telegram"];
@@ -95,6 +95,22 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      */
     const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+    const waitWhilePaused = async (transfer) => {
+        const control = transfer?.cancelToken;
+        while (control?.paused && !control.cancelled) {
+            await new Promise((resolve) => {
+                if (!Array.isArray(control.pauseWaiters)) control.pauseWaiters = [];
+                control.pauseWaiters.push(resolve);
+            });
+        }
+        if (control?.cancelled) throw new Error("Upload task was cancelled.");
+    };
+
+    const notifyPauseWaiters = (control) => {
+        const waiters = Array.isArray(control?.pauseWaiters) ? control.pauseWaiters.splice(0) : [];
+        for (const resolve of waiters) resolve();
+    };
+
     /**
      * Wait until the backend finishes storing one upload before allowing the queue to advance.
      * @param {string} jobId
@@ -105,6 +121,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         let delay = 500;
 
         while (true) {
+            await waitWhilePaused(batchTransfer);
             if (cancelToken?.cancelled) throw new Error("Upload task was cancelled.");
             let response;
 
@@ -155,6 +172,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             if (job.status === "error") throw new Error(job.message || `${job.name || "Upload"} failed.`);
 
             delay = 500;
+            await waitWhilePaused(batchTransfer);
             await sleep(500);
         }
     };
@@ -265,6 +283,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
          */
         const lane = async () => {
             while (!cancelToken.cancelled) {
+                await waitWhilePaused(batchTransfer);
                 const index = nextIndex++;
 
                 if (index >= chunkCount) return;
@@ -274,6 +293,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 const blob = selectedFile.slice(start, end);
 
                 for (let attempt = 1; ; attempt++) {
+                    await waitWhilePaused(batchTransfer);
                     if (cancelToken.cancelled) {
                         throw new Error("File upload was cancelled.");
                     }
@@ -295,6 +315,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             throw error;
                         }
 
+                        await waitWhilePaused(batchTransfer);
                         await sleep(1000 * attempt);
                     }
                 }
@@ -411,7 +432,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     if (!createdBatchId) throw new Error("The server did not return an upload task ID.");
                     createdTasks.push({
                         batchId: createdBatchId,
-                        transfer: {cancelToken: {cancelled: false}, xhrs: new Set(), activeJobId: ""},
+                        transfer: {cancelToken: {cancelled: false, paused: false, pauseWaiters: []}, xhrs: new Set(), activeJobId: ""},
                     });
                 }
             } catch (error) {
@@ -748,8 +769,10 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
                 if (uploadMode === "file") {
                     try {
+                        await waitWhilePaused(batchTransfer);
                         await uploadFileInChunks(jobId, selectedFile, cancelToken, batchTransfer.xhrs, publishCurrentFileProgress);
                         await flushPendingProgressUpdate();
+                        await waitWhilePaused(batchTransfer);
                         if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
                         // Sending browser chunks is not enough: wait until the storage provider
                         // confirms completion before the next queued file starts.
@@ -1021,6 +1044,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         } finally {
             const transfers = window.__storeLimitlessUploadTransfers;
             for (const taskId of batchIds) {
+                const transfer = transfers?.get(taskId);
+                if (transfer?.cancelToken) {
+                    transfer.cancelToken.cancelled = true;
+                    transfer.cancelToken.paused = false;
+                    notifyPauseWaiters(transfer.cancelToken);
+                }
                 if (transfers?.has(taskId)) transfers.delete(taskId);
             }
             uploadRunRef.current = false;

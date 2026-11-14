@@ -113,9 +113,12 @@ async def upload_growing_file(
         """Read exactly one chunk off the event loop and retry temporary provider I/O errors."""
 
         while True:
+            # Read the local staging file outside the provider retry handler. A
+            # missing/removed source is a terminal local-file error, never a network retry.
+            offset: int = (index - start_part) * chunk_size
+            chunk: bytes = await to_thread(read_chunk, path, offset, size)
+
             try:
-                offset: int = (index - start_part) * chunk_size
-                chunk: bytes = await to_thread(read_chunk, path, offset, size)
                 message_id: str = await data_center.upload(chunk, f"{file.name}.part{index:03d}", progress)
 
                 if total_size:
@@ -127,15 +130,12 @@ async def upload_growing_file(
 
                 return index, message_id
 
-            except FileNotFoundError:
-                # The local staging file is gone. Retrying cannot repair this,
-                # and on cancellation the owning worker is responsible for stopping
-                # this task before it removes the file.
-                raise
-
             except OSError as error:
-                # Only provider/network I/O failures are retryable. Local file reads
-                # happen before this block and must fail immediately when unavailable.
+                # A cancelled child job raises from pause_check(), ending this retry
+                # loop even if cancellation races with a provider/network failure.
+                if pause_check is not None:
+                    await pause_check()
+
                 write_log("ERROR", data_center, "UPLOAD", file.username, f"Storage provider error part {index}, retrying: {error}")
                 await sleep(2)
 

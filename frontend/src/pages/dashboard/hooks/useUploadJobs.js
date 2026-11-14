@@ -404,11 +404,46 @@ export default function useUploadJobs(refreshDirectory) {
         }).catch((error) => console.error("Could not remove upload task:", error));
     };
 
+    /** Pause or resume a browser-driven upload without discarding completed chunks. */
+    const setUploadPaused = (jobId, paused) => {
+        const token = getToken();
+        if (!token) return;
+        const transfer = window.__storeLimitlessUploadTransfers?.get(jobId);
+        if (transfer?.cancelToken) {
+            transfer.cancelToken.paused = paused;
+            const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+            waiters.forEach((resolve) => resolve());
+            if (paused) {
+                // Aborted in-flight chunks are retried by their worker after resume.
+                for (const xhr of transfer.xhrs || []) xhr.abort();
+            }
+        }
+        setUploadJobs((current) => current.map((job) => job.jobId === jobId ? {
+            ...job,
+            status: paused ? "paused" : "uploading",
+            message: paused ? "Paused by you" : "Resuming upload",
+            uploadSpeed: paused ? 0 : job.uploadSpeed,
+            downloadSpeed: paused ? 0 : job.downloadSpeed,
+        } : job));
+        void fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(jobId)}/pause`, {
+            method: "POST",
+            headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
+            body: JSON.stringify({paused}),
+            cache: "no-store",
+        }).then(async (response) => {
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || `Could not ${paused ? "pause" : "resume"} upload (${response.status})`);
+        }).catch((error) => console.error("Could not change upload pause state:", error));
+    };
+
     /** Stop the current transfer and prevent later items in the batch from starting. */
     const cancelUploadJob = (jobId) => {
         const transfer = window.__storeLimitlessUploadTransfers?.get(jobId);
         if (transfer) {
             transfer.cancelToken.cancelled = true;
+            transfer.cancelToken.paused = false;
+            const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+            waiters.forEach((resolve) => resolve());
             for (const xhr of transfer.xhrs || []) xhr.abort();
         }
         setUploadJobs((current) => current.map((job) => job.jobId === jobId ? {
@@ -430,6 +465,9 @@ export default function useUploadJobs(refreshDirectory) {
     const clearAllUploadJobs = () => {
         for (const transfer of window.__storeLimitlessUploadTransfers?.values?.() || []) {
             transfer.cancelToken.cancelled = true;
+            transfer.cancelToken.paused = false;
+            const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+            waiters.forEach((resolve) => resolve());
             for (const xhr of transfer.xhrs || []) xhr.abort();
         }
         setUploadJobs([]);
@@ -445,5 +483,5 @@ export default function useUploadJobs(refreshDirectory) {
         }).catch((error) => console.error("Could not clear upload tray:", error));
     };
 
-    return {uploadJobs, dismissUploadJob, cancelUploadJob, clearAllUploadJobs};
+    return {uploadJobs, dismissUploadJob, cancelUploadJob, pauseUploadJob: (jobId) => setUploadPaused(jobId, true), resumeUploadJob: (jobId) => setUploadPaused(jobId, false), clearAllUploadJobs};
 }

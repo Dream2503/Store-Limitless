@@ -147,6 +147,7 @@ export default function useUploadJobs(refreshDirectory) {
                     const totalItems = Math.max(0, Number(batch.total_items) || 0);
                     const normalized = {
                         jobId: String(batch.batch_id),
+                        paused: Boolean(batch.paused) || status === "paused",
                         name: String(batch.name || "Upload task"),
                         kind: String(batch.kind || "file"),
                         directory: String(batch.directory || "/home"),

@@ -106,7 +106,9 @@ class Telegram(DataCenter, metaclass=ConfigMeta):
             if client is not None:
                 await client.disconnect()
 
-            TELEGRAM_SESSION.unlink()
+            # Telethon may already have removed the SQLite session during disconnect.
+            # Shutdown should remain idempotent when the session file is absent.
+            TELEGRAM_SESSION.unlink(missing_ok=True)
 
             write_log("INFO", Telegram, "SHUTDOWN", "", "Telegram client stopped.")
 

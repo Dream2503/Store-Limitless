@@ -920,6 +920,15 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
             if latest_metadata and latest_metadata.get("cancelled"):
                 raise RuntimeError("Upload cancelled")
 
+            # Hold every published stage at the pause boundary. Once the
+            # provider generator yields again, wait here before publishing it.
+            while latest_metadata and latest_metadata.get("paused") and not latest_metadata.get("cancelled"):
+                await sleep(0.25)
+                latest_metadata = await get_upload_job_metadata(job_id)
+
+            if latest_metadata and latest_metadata.get("cancelled"):
+                raise RuntimeError("Upload cancelled")
+
             await Redis.set(job_id, progress)
 
         if producer_task.done() and not producer_task.cancelled():

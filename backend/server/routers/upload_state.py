@@ -530,7 +530,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
         # The browser normally publishes current_job_id, but a frontend hot reload
         # can interrupt that PATCH after the backend has already registered the child.
         # Recover it from the batch's persisted child list instead of relying on UI memory.
-        if metadata.get("kind") == "link" and metadata.get("status") in {"queued", "uploading"}:
+        if metadata.get("kind") == "link" and metadata.get("status") in {"queued", "uploading", "paused"}:
             current_child_id = str(metadata.get("current_job_id") or "")
             child_ids = [str(value) for value in metadata.get("child_job_ids", []) if str(value)]
             candidates = ([current_child_id] if current_child_id else []) + [

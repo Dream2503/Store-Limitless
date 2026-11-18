@@ -93,16 +93,14 @@ The application provides these user-facing capabilities:
   from saved browser-storage bytes through HTTP byte ranges when the selected archive has not changed.
 - Use dashboard keyboard shortcuts for selection, opening, renaming, trashing, permanent deletion, details, and parent-folder navigation. Mouse and touch
   users can also use context menus, drag selection, long-press selection, and drag-and-drop moves.
-- View media in a custom video player with seeking, volume, speed control, fullscreen, picture-in-picture (when supported), and keyboard shortcuts. HLS playback buffers ahead and prefetches cached audio/video segments;
-  preview PDFs, audio, Markdown, and common text/source formats.
+- Stream videos directly from their original storage chunks using HTTP byte ranges, with no server-side transcoding or track extraction. Copy the signed stream URL to open the raw video in VLC; browser playback depends on the source codec. Preview PDFs, audio, Markdown, and common text/source formats.
 - Use keyboard shortcuts on the upload page to return to the dashboard or trigger the upload/import action.
 - Rename and move files and folders, including bulk move operations. The move dialog supports browsing destinations and toggling an already-selected
   destination off.
 - Inspect file/folder details such as location, path, type, size, storage provider, timestamps, status, and record ID when those values are available.
 - Move files/folders to trash, restore them, or permanently delete trash items.
 - Create signed links for streaming or downloading a file.
-- Preview supported video formats in the existing custom player, audio in the browser's audio player, PDFs in the built-in PDF viewer, Markdown with a
-  safe rendered subset, and common source/config/text extensions as plain text.
+- Open video files through the original byte-range stream, with a copy-stream-URL action for VLC. Browser playback is limited by supported codecs. Audio uses the browser's audio player; PDFs use the built-in viewer; Markdown uses a safe rendered subset; and common source/config/text extensions display as plain text.
 - Stream media and other files over HTTP, including single byte-range requests for seeking.
 - Connect through FTP using the same account and virtual directory tree.
 - Cache recently used remote file parts locally to reduce repeat downloads.
@@ -828,8 +826,7 @@ All dashboard-specific modules are under `src/pages/dashboard/`:
   jobs.
 - `utils/resumableDownloads.js` stores resumable download metadata and browser file handles in IndexedDB.
 - `uploadFiles.js` extracts files and relative paths from file drops, including supported dropped directory trees.
-- `components/ViewFile.jsx` routes to the correct preview by file extension and preserves the custom video player, including seeking, playback rate,
-  volume, fullscreen, and picture-in-picture controls.
+- `components/ViewFile.jsx` routes by file extension and streams the original video URL directly in the native browser player. Its **Copy stream URL** action gives VLC the original signed byte-range URL.
 - `components/FileContentPreview.jsx` fetches text content through an authenticated signed stream and renders source/config files as plain text,
   Markdown with a small safe subset, PDFs through the browser's PDF viewer, and audio through the native audio player. Common extensions include
   `.txt`, `.log`, `.json`, `.yaml`, `.html`, `.css`, `.js`, `.jsx`, `.ts`, `.tsx`, `.py`, `.c`, `.h`, `.cpp`, `.hpp`, `.rs`, `.go`, `.java`, `.sql`,
@@ -840,25 +837,13 @@ executable HTML. The viewer's dark background/pane owns vertical and horizontal 
 text element. Text preview is limited to 5 MB to avoid freezing the browser tab. Markdown supports common headings, paragraphs, inline emphasis/code,
 fenced code blocks, lists, blockquotes, horizontal rules, and HTTP (S) links; it is not a full CommonMark implementation.
 
-#### Video player controls and keyboard shortcuts
+#### Video streaming and VLC
 
-The custom video player exposes timeline seeking, volume, playback speed, fullscreen, picture-in-picture (when supported by the browser), and a
-copy-stream-link action. Its keyboard shortcuts are active while the video viewer is open and the event target is not a text-editing control:
+Video playback uses the original file's raw HTTP byte-range stream. StoreLimitless does not dynamically transcode the video or extract separate audio and
+subtitle tracks. Use the **Copy stream URL** action to copy the signed `/public/stream/{token}` URL, then open it in VLC. Browser preview depends on the
+browser's supported codecs; VLC can handle formats the browser cannot.
 
-| Key            | Action                                                                                |
-|----------------|---------------------------------------------------------------------------------------|
-| `Space` or `K` | Play/pause                                                                            |
-| `←` / `→`      | Seek backward/forward 5 seconds; hold `Shift` to seek 10 seconds                      |
-| `J` / `L`      | Seek backward/forward 10 seconds                                                      |
-| `↑` / `↓`      | Raise/lower volume by 5%                                                              |
-| `M`            | Toggle mute                                                                           |
-| `F`            | Toggle fullscreen                                                                     |
-| `Esc`          | Close the playback-speed menu when open; otherwise return to the previous page/folder |
-| `Backspace`    | Return to the previous page/folder unless focus is in a text-editing control          |
-
-Playback speeds are available from **0.25× through 2×** (including 0.75×, 1.25×, 1.5×, and 1.75×). Picture-in-picture and fullscreen behavior depends
-on browser support and permissions. The stream-link action copies the signed playback URL; treat that URL as a bearer link, because the current
-signed-token format has no expiry timestamp.
+Treat the copied stream URL as a bearer link: anyone who has it can access the shared file, and the current signed-token format has no expiry timestamp.
 
 - `constants.js` centralizes the API URL, navigation entries, and shared keys/styles.
 - `utils.js` contains shared path, token, file-kind, route, and selection helpers. `getFileKind()` maps common code, configuration, text, Markdown,

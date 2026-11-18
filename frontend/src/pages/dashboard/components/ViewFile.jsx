@@ -1,5 +1,4 @@
 import {useCallback, useEffect, useRef, useState} from "react";
-import Hls from "hls.js";
 import {useNavigate, useParams, useSearchParams} from "react-router-dom";
 import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
 import UploadJobsTray from "./UploadJobsTray.jsx";
@@ -14,989 +13,290 @@ import {API_URL} from "../../../api.js";
  * @typedef {Object} VideoPlayerProps
  * @property {PreviewFile} file
  * @property {string} streamUrl
- * @property {string} publicToken
  * @property {string} [heightClass]
  */
-/** @typedef {{streamUrl: string, publicToken: string}} VideoSource */
+/** @typedef {{streamUrl: string}} VideoSource */
 
-
-const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-
-const TRACK_LANGUAGES = [
-    ["English", /\b(?:english|eng)\b/i],
-    ["Hindi", /\b(?:hindi|hin)\b/i],
-    ["German", /\b(?:german|deu|ger)\b/i],
-    ["French", /\b(?:french|fra|fre)\b/i],
-    ["Portuguese", /\b(?:portuguese|por)\b/i],
-    ["Spanish", /\b(?:spanish|spa)\b/i],
-    ["Korean", /\b(?:korean|kor)\b/i],
-    ["Chinese", /\b(?:chinese|zho|chi|cmn)\b/i],
-    ["Polish", /\b(?:polish|pol)\b/i],
-    ["Russian", /\b(?:russian|rus)\b/i],
-    ["Japanese", /\b(?:japanese|jpn)\b/i],
-    ["Italian", /\b(?:italian|ita)\b/i],
-    ["Arabic", /\b(?:arabic|ara)\b/i],
-    ["Tamil", /\b(?:tamil|tam)\b/i],
-    ["Telugu", /\b(?:telugu|tel)\b/i],
-    ["Bengali", /\b(?:bengali|ben)\b/i],
-    ["Turkish", /\b(?:turkish|tur)\b/i],
-    ["Dutch", /\b(?:dutch|nld|dut)\b/i],
-    ["Swedish", /\b(?:swedish|swe)\b/i],
-    ["Ukrainian", /\b(?:ukrainian|ukr)\b/i],
-];
-
-/** Show only a recognized spoken language, not release-group and codec metadata. */
-function getTrackLanguage(track, kind = "Audio") {
-    const candidates = [track?.language, track?.label].filter(Boolean).join(" ");
-    for (const [language, pattern] of TRACK_LANGUAGES) {
-        if (pattern.test(candidates)) return language;
-    }
-    return kind + " " + (Number(track?.index) >= 0 ? Number(track.index) + 1 : 1);
-}
-
-/** Convert SRT or WebVTT cue timestamps into seconds. */
-function subtitleTimeToSeconds(value) {
-    const parts = String(value || "").trim().replace(",", ".").split(":");
-    if (parts.length < 2 || parts.length > 3) return NaN;
-    const seconds = Number(parts.pop());
-    const minutes = Number(parts.pop());
-    const hours = parts.length ? Number(parts.pop()) : 0;
-    if (![hours, minutes, seconds].every(Number.isFinite)) return NaN;
-    return hours * 3600 + minutes * 60 + seconds;
-}
-
-/** Parse complete or progressively received WebVTT/SRT subtitle cues. */
-function parseSubtitleText(source) {
-    const lines = String(source || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n");
-    const cues = [];
-
-    for (let index = 0; index < lines.length; index += 1) {
-        if (!lines[index].includes("-->")) continue;
-        const timing = lines[index].split("-->");
-        if (timing.length !== 2) continue;
-
-        const start = subtitleTimeToSeconds(timing[0]);
-        const end = subtitleTimeToSeconds(timing[1].trim().split(/\s+/)[0]);
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
-
-        const bodyLines = [];
-        for (let bodyIndex = index + 1; bodyIndex < lines.length; bodyIndex += 1) {
-            if (lines[bodyIndex].includes("-->") || (!lines[bodyIndex].trim() && bodyLines.length)) break;
-            if (lines[bodyIndex].trim() || bodyLines.length) bodyLines.push(lines[bodyIndex]);
-        }
-
-        const body = bodyLines.join("\n")
-            .replace(/\{\\[^}]+\}/g, "")
-            .replace(/<[^>]*>/g, "")
-            .replace(/\\[Nn]/g, "\n")
-            .replace(/&amp;/gi, "&")
-            .replace(/&lt;/gi, "<")
-            .replace(/&gt;/gi, ">")
-            .replace(/&quot;/gi, '"')
-            .replace(/&#39;|&apos;/gi, "'")
-            .replace(/&nbsp;/gi, "\u00a0")
-            .trim();
-
-        if (body) cues.push({start, end, text: body});
-    }
-
-    return cues.sort((left, right) => left.start - right.start);
-}
 
 /**
- * FFmpeg may emit timestamps relative to a clipped subtitle window or to the
- * original media timeline. Detect window-relative cues and move them onto the
- * video timeline so captions continue rendering after the first segment.
- */
-function alignSubtitleCueTimes(cues, segmentStart, segmentDuration) {
-    if (!cues.length || segmentStart <= 0) return cues;
-
-    const latestCueStart = Math.max(...cues.map((cue) => cue.start));
-    const timestampsAreWindowRelative = latestCueStart <= segmentDuration + 0.05;
-    if (!timestampsAreWindowRelative) return cues;
-
-    return cues.map((cue) => ({
-        ...cue,
-        start: cue.start + segmentStart,
-        end: cue.end + segmentStart,
-    }));
-}
-
-const ctrlBtn = "flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[#fafafa]/90 transition-colors " + "hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]";
-
-/**
- * Format a playback position as mm:ss or hh:mm:ss.
- * @param {number} seconds
- * @returns {string}
- */
-const fmtTime = (seconds) => {
-    if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60).toString().padStart(2, "0");
-    return hours > 0 ? `${hours}:${minutes.toString().padStart(2, "0")}:${secs}` : `${minutes}:${secs}`;
-};
-
-/**
- * Render a custom HTML video player with seeking, volume, speed, fullscreen, and keyboard controls.
+ * Play the original stored file directly with lightweight custom controls.
  * @param {VideoPlayerProps} props
  * @returns {import("react").ReactElement}
  */
-function VideoPlayer({file, streamUrl, publicToken, heightClass = "h-[70vh]"}) {
+function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
     const wrapRef = useRef(null);
     const videoRef = useRef(null);
-    const hlsRef = useRef(null);
-    const hideTimer = useRef(null);
-    const stallTimerRef = useRef(null);
-    const menuRef = useRef(null);
+    const lastSideTapRef = useRef({side: "", time: 0});
+    const feedbackTimeoutRef = useRef(null);
 
     const [playing, setPlaying] = useState(false);
-    const [buffering, setBuffering] = useState(true);
-    const [current, setCurrent] = useState(0);
+    const [currentTime, setCurrentTime] = useState(0);
     const [duration, setDuration] = useState(0);
-    const [buffered, setBuffered] = useState(0);
     const [volume, setVolume] = useState(1);
     const [muted, setMuted] = useState(false);
-    const [rate, setRate] = useState(1);
-    const [audioTracks, setAudioTracks] = useState([]);
-    const [selectedAudioTrack, setSelectedAudioTrack] = useState(-1);
-    const [subtitleTracks, setSubtitleTracks] = useState([]);
-    const [selectedSubtitleTrack, setSelectedSubtitleTrack] = useState(-1);
-    const [subtitleWindowSeconds, setSubtitleWindowSeconds] = useState(6);
-    const trackInfoRequestRef = useRef(null);
-    const [subtitleReloadNonce, setSubtitleReloadNonce] = useState(0);
-    const [subtitleCues, setSubtitleCues] = useState([]);
-    const [subtitleLoadError, setSubtitleLoadError] = useState("");
-    const [isFs, setIsFs] = useState(false);
-    const [showUi, setShowUi] = useState(true);
-    /** @type {["speed" | "audio" | "subtitles" | null, import("react").Dispatch<import("react").SetStateAction<"speed" | "audio" | "subtitles" | null>>]} */
-    const [menu, setMenu] = useState(null);
-    /** @type {[string | null, import("react").Dispatch<import("react").SetStateAction<string | null>>]} */
-    const [error, setError] = useState(null);
-    const [streamRetryNonce, setStreamRetryNonce] = useState(0);
-    const retryCountRef = useRef(0);
-    const resumeTimeRef = useRef(0);
-    const retryCheckpointRef = useRef(0);
+    const [playbackRate, setPlaybackRate] = useState(1);
+    const [fullscreen, setFullscreen] = useState(false);
+    const [seekFeedback, setSeekFeedback] = useState("");
 
-    menuRef.current = menu;
+    const formatTime = (value) => {
+        if (!Number.isFinite(value) || value < 0) return "0:00";
+        const hours = Math.floor(value / 3600);
+        const minutes = Math.floor((value % 3600) / 60);
+        const seconds = Math.floor(value % 60).toString().padStart(2, "0");
+        return hours > 0
+            ? `${hours}:${minutes.toString().padStart(2, "0")}:${seconds}`
+            : `${minutes}:${seconds}`;
+    };
 
-    // A media request can be interrupted by a transient tunnel/proxy reset.
-    // Add a unique cache-busting query for each retry and resume at the last position.
-    const playbackUrl = streamRetryNonce > 0 ? `${streamUrl}${streamUrl.includes("?") ? "&" : "?"}_sl_stream_retry=${streamRetryNonce}` : streamUrl;
-    const hlsUrl = publicToken ? API_URL + "/public/hls/" + encodeURIComponent(publicToken) + "/master.m3u8" : "";
-    const tracksUrl = publicToken ? API_URL + "/public/tracks/" + encodeURIComponent(publicToken) : "";
-    // Subtitle requests share the backend's HLS segment duration, keeping video,
-    // audio, and subtitle windows aligned even if the segment size changes.
-    const subtitleSegmentIndex = Math.floor(Math.max(0, current) / subtitleWindowSeconds);
-
-    useEffect(() => {
-        retryCountRef.current = 0;
-        resumeTimeRef.current = 0;
-        retryCheckpointRef.current = 0;
-        if (stallTimerRef.current !== null) window.clearTimeout(stallTimerRef.current);
-        stallTimerRef.current = null;
-    }, [streamUrl]);
-
-    // Reset track selection only when the underlying shared file changes.
-    // Playback retries change playbackUrl after the 20-second stall watchdog fires;
-    // clearing the selected subtitle track in that retry effect aborts the in-flight
-    // subtitle request and leaves captions disabled even after video/audio recover.
-    useEffect(() => {
-        setAudioTracks([]);
-        setSelectedAudioTrack(-1);
-        setSubtitleTracks([]);
-        setSelectedSubtitleTrack(-1);
-        setSubtitleCues([]);
-        setSubtitleLoadError("");
-    }, [publicToken]);
-
-    useEffect(() => {
+    const togglePlayback = () => {
         const video = videoRef.current;
         if (!video) return;
-
-        let cancelled = false;
-        let hlsInstance = null;
-
-        setError(null);
-        setBuffering(true);
-        video.removeAttribute("src");
-        video.load();
-
-        const useOriginalStream = () => {
-            if (cancelled) return;
-            video.src = playbackUrl;
-            video.load();
-            video.play().catch(() => {
-                // Some browsers require a user gesture before playback.
-            });
-        };
-
-        const setupPlayback = async () => {
-            if (!publicToken) {
-                useOriginalStream();
-                return;
-            }
-
-            try {
-                // A playback retry can rerun this effect while the same media probe is
-                // still running. Reuse its promise so retries don't create parallel
-                // /public/tracks requests for the same public file.
-                let trackInfoPromise = trackInfoRequestRef.current?.publicToken === publicToken
-                    ? trackInfoRequestRef.current.promise
-                    : null;
-
-                if (!trackInfoPromise) {
-                    trackInfoPromise = (async () => {
-                        const response = await fetch(tracksUrl, {cache: "no-store"});
-                        if (!response.ok) throw new Error("Track metadata is unavailable.");
-                        return response.json();
-                    })();
-                    trackInfoRequestRef.current = {publicToken, promise: trackInfoPromise};
-                }
-
-                let trackInfo;
-                try {
-                    trackInfo = await trackInfoPromise;
-                } catch (metadataError) {
-                    if (trackInfoRequestRef.current?.promise === trackInfoPromise) {
-                        trackInfoRequestRef.current = null;
-                    }
-                    throw metadataError;
-                }
-                if (cancelled) return;
-
-                const segmentDuration = Number(trackInfo.segment_duration);
-                if (Number.isFinite(segmentDuration) && segmentDuration > 0) {
-                    setSubtitleWindowSeconds(segmentDuration);
-                }
-
-                setSubtitleTracks((trackInfo.subtitles || []).filter((track) => track.selectable));
-                setAudioTracks((trackInfo.audio || []).map((track, index) => ({
-                    index,
-                    label: track.label || track.language || ("Audio " + (index + 1)),
-                    language: track.language || "",
-                    default: Boolean(track.default),
-                })));
-
-                if (Hls.isSupported()) {
-                    hlsInstance = new Hls({
-                        enableWorker: true,
-                        // Keep more media ahead of playback so background segment generation
-                        // has time to finish before the playhead reaches those fragments.
-                        maxBufferLength: 60,
-                        maxMaxBufferLength: 120,
-                        backBufferLength: 30,
-                        startFragPrefetch: true,
-                        fragLoadPolicy: {
-                            default: {
-                                maxTimeToFirstByteMs: 90000,
-                                maxLoadTimeMs: 120000,
-                                timeoutRetry: {
-                                    maxNumRetry: 4,
-                                    retryDelayMs: 1000,
-                                    maxRetryDelayMs: 8000,
-                                    backoff: "linear",
-                                },
-                                errorRetry: {
-                                    maxNumRetry: 5,
-                                    retryDelayMs: 1000,
-                                    maxRetryDelayMs: 8000,
-                                    backoff: "exponential",
-                                },
-                            },
-                        },
-                    });
-                    hlsRef.current = hlsInstance;
-
-                    const syncAudioTracks = () => {
-                        if (cancelled || !hlsInstance) return;
-                        const available = hlsInstance.audioTracks.map((track, index) => ({
-                            index,
-                            label: track.name || track.lang || ("Audio " + (index + 1)),
-                            language: track.lang || "",
-                            default: Boolean(track.default),
-                        }));
-                        setAudioTracks(available);
-
-                        if (available.length) {
-                            const currentIndex = hlsInstance.audioTrack;
-                            const defaultIndex = available.findIndex((track) => track.default);
-                            const selectedIndex = currentIndex >= 0
-                                ? currentIndex
-                                : defaultIndex >= 0 ? defaultIndex : 0;
-                            hlsInstance.audioTrack = selectedIndex;
-                            setSelectedAudioTrack(selectedIndex);
-                        }
-                    };
-
-                    hlsInstance.on(Hls.Events.MEDIA_ATTACHED, () => {
-                        if (!cancelled) hlsInstance.loadSource(hlsUrl);
-                    });
-                    hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-                        syncAudioTracks();
-                        setBuffering(false);
-                        video.play().catch(() => {
-                            // Some browsers require a user gesture before playback.
-                        });
-                    });
-                    hlsInstance.on(Hls.Events.AUDIO_TRACKS_UPDATED, syncAudioTracks);
-                    hlsInstance.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => {
-                        setSelectedAudioTrack(data.id);
-                    });
-                    hlsInstance.on(Hls.Events.ERROR, (_event, data) => {
-                        if (!data.fatal) return;
-
-                        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && retryCountRef.current < 3) {
-                            retryCountRef.current += 1;
-                            hlsInstance.startLoad();
-                        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-                            hlsInstance.recoverMediaError();
-                        } else {
-                            setBuffering(false);
-                            setError("Track-aware streaming could not load a video or audio segment. Reopen the stream to try again.");
-                        }
-                    });
-                    hlsInstance.attachMedia(video);
-                    return;
-                }
-
-                if (video.canPlayType("application/vnd.apple.mpegurl")) {
-                    video.src = hlsUrl;
-                    video.load();
-                    video.play().catch(() => {
-                        // Some browsers require a user gesture before playback.
-                    });
-                    return;
-                }
-
-                useOriginalStream();
-            } catch {
-                // Keep existing direct streaming working if track-aware playback is unavailable.
-                useOriginalStream();
-            }
-        };
-
-        void setupPlayback();
-
-        return () => {
-            cancelled = true;
-            if (hlsInstance) hlsInstance.destroy();
-            if (hlsRef.current === hlsInstance) hlsRef.current = null;
-            video.pause();
-            video.removeAttribute("src");
-            video.load();
-        };
-    }, [hlsUrl, playbackUrl, publicToken, tracksUrl]);
-
-    useEffect(() => {
-        setSubtitleCues([]);
-        setSubtitleLoadError("");
-    }, [publicToken, selectedSubtitleTrack]);
-
-    useEffect(() => {
-        let cancelled = false;
-        const controller = new AbortController();
-        setSubtitleLoadError("");
-
-        if (!publicToken || selectedSubtitleTrack < 0) return () => controller.abort();
-
-        const subtitleUrl = API_URL + "/public/hls/" + encodeURIComponent(publicToken)
-            + "/segment/subtitle/" + selectedSubtitleTrack + "/" + subtitleSegmentIndex;
-        const maxAttempts = 3;
-
-        (async () => {
-            for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-                let reader = null;
-
-                try {
-                    const response = await fetch(subtitleUrl, {
-                        cache: "no-store",
-                        signal: controller.signal,
-                    });
-
-                    if (response.status === 204) {
-                        // The backend may return 204 if its media probe was interrupted.
-                        // This is transient for an explicitly selected subtitle track.
-                        const error = new Error("Subtitle extraction was interrupted (HTTP 204).");
-                        error.status = 204;
-                        throw error;
-                    }
-
-                    if (!response.ok) {
-                        let detail = "";
-                        try {
-                            const payload = await response.json();
-                            detail = payload?.detail ? " " + payload.detail : "";
-                        } catch {
-                            // The response body may not be JSON.
-                        }
-                        const error = new Error("Subtitle request failed (HTTP " + response.status + ")." + detail);
-                        error.status = response.status;
-                        throw error;
-                    }
-
-                    let subtitleText = "";
-
-                    if (!response.body) {
-                        subtitleText = await response.text();
-                    } else {
-                        reader = response.body.getReader();
-                        const decoder = new TextDecoder();
-
-                        while (true) {
-                            const {value, done} = await reader.read();
-                            if (done) {
-                                subtitleText += decoder.decode();
-                                break;
-                            }
-
-                            subtitleText += decoder.decode(value, {stream: true});
-                            if (cancelled) return;
-
-                            const trimmed = subtitleText.trimStart();
-
-                            // ReadableStream chunks have arbitrary boundaries. The first read
-                            // may contain only "WE" or "WEBV", which is a valid prefix of the
-                            // WebVTT header, not a malformed response. Validate only after the
-                            // full header could have arrived.
-                            if (trimmed.length >= 6 && !trimmed.startsWith("WEBVTT")) {
-                                throw new Error("The server response is not valid WebVTT subtitle data.");
-                            }
-
-                            // Parse received bytes immediately so captions can appear while
-                            // FFmpeg continues scanning the source video for later cues.
-                            if (trimmed.startsWith("WEBVTT")) {
-                                const receivedCues = alignSubtitleCueTimes(
-                                    parseSubtitleText(subtitleText),
-                                    subtitleSegmentIndex * subtitleWindowSeconds,
-                                    subtitleWindowSeconds,
-                                );
-                                if (receivedCues.length) setSubtitleCues(receivedCues);
-                            }
-                        }
-                    }
-
-                    if (cancelled) return;
-                    const trimmed = subtitleText.trimStart();
-                    if (!trimmed.startsWith("WEBVTT")) {
-                        throw new Error("The server returned an empty or invalid WebVTT subtitle stream.");
-                    }
-
-                    // An interval without dialogue is valid. Keep the last parsed cues;
-                    // timestamps determine whether they are visible at the current position.
-                    const extractedCues = alignSubtitleCueTimes(
-                        parseSubtitleText(subtitleText),
-                        subtitleSegmentIndex * subtitleWindowSeconds,
-                        subtitleWindowSeconds,
-                    );
-                    if (extractedCues.length) setSubtitleCues(extractedCues);
-                    setSubtitleLoadError("");
-                    return;
-                } catch (loadError) {
-                    if (cancelled || controller.signal.aborted || loadError?.name === "AbortError") return;
-
-                    const status = Number(loadError?.status || 0);
-                    const retryable = loadError?.name === "TypeError"
-                        || status === 204
-                        || status === 408
-                        || status === 425
-                        || status === 429
-                        || status >= 500;
-
-                    if (retryable && attempt < maxAttempts - 1) {
-                        // A stream can be interrupted while FFmpeg is still writing.
-                        // Retry the same selected track twice instead of requiring the
-                        // user to toggle subtitles off and on to trigger another request.
-                        await new Promise((resolve) => window.setTimeout(resolve, 300 * (attempt + 1)));
-                        if (cancelled || controller.signal.aborted) return;
-                        continue;
-                    }
-
-                    setSubtitleLoadError(
-                        loadError instanceof Error ? loadError.message : "Could not load this subtitle track."
-                    );
-                    return;
-                } finally {
-                    if (reader) {
-                        try { reader.releaseLock(); } catch { /* The stream may already be closed. */ }
-                    }
-                }
-            }
-        })();
-
-        return () => {
-            cancelled = true;
-            controller.abort();
-        };
-    }, [publicToken, selectedSubtitleTrack, subtitleSegmentIndex, subtitleWindowSeconds, subtitleReloadNonce]);
-
-
-
-    const recoverStream = useCallback((video) => {
-        if (!video) return;
-        if (retryCountRef.current >= 3) {
-            setBuffering(false);
-            setError("The stream connection kept interrupting and could not recover after three retries. Reopen the stream to try again.");
-            return;
-        }
-
-        resumeTimeRef.current = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-        retryCheckpointRef.current = resumeTimeRef.current;
-        retryCountRef.current += 1;
-        if (stallTimerRef.current !== null) window.clearTimeout(stallTimerRef.current);
-        stallTimerRef.current = null;
-        setError(null);
-        setBuffering(true);
-        setStreamRetryNonce((nonce) => nonce + 1);
-    }, []);
-
-    const handleMediaError = useCallback((event) => {
-        const video = event.currentTarget;
-        if (hlsRef.current) return;
-
-        // MEDIA_ERR_NETWORK is recoverable; codec/decode errors usually are not.
-        if (video.error?.code === 2) {
-            recoverStream(video);
-            return;
-        }
-
-        setError("This browser can't play this video format. Copy the stream link and open it in a compatible media player.");
-    }, [recoverStream]);
-
-    const togglePlay = useCallback(() => {
-        const video = videoRef.current;
-        if (!video) return;
-        if (video.paused) video.play().catch(() => {
-        }); else video.pause();
-    }, []);
-
-    const seekBy = useCallback((amount) => {
-        const video = videoRef.current;
-        if (!video) return;
-        const max = Number.isFinite(video.duration) ? video.duration : Infinity;
-        video.currentTime = Math.min(Math.max(video.currentTime + amount, 0), max);
-    }, []);
-
-    const changeVolume = useCallback((amount) => {
-        const video = videoRef.current;
-        if (!video) return;
-        video.volume = Math.min(Math.max(video.volume + amount, 0), 1);
-        if (video.volume > 0) video.muted = false;
-    }, []);
-
-    const toggleFs = useCallback(() => {
-        if (document.fullscreenElement) document.exitFullscreen?.(); else wrapRef.current?.requestFullscreen?.();
-    }, []);
-
-    /**
-     * Toggle browser picture-in-picture playback when supported.
-     * @returns {void}
-     */
-    const togglePip = () => {
-        const video = videoRef.current;
-        if (!video) return;
-        if (document.pictureInPictureElement) {
-            document.exitPictureInPicture?.().catch(() => {
-                // The browser may reject picture-in-picture if the state changes mid-request.
-            });
+        if (video.paused) {
+            void video.play().catch(() => {});
         } else {
-            video.requestPictureInPicture?.().catch(() => {
-                // Picture-in-picture may be unavailable for the current media state.
-            });
+            video.pause();
         }
     };
 
-    /**
-     * Apply a playback rate and close the speed menu.
-     * @param {number} playbackRate
-     * @returns {void}
-     */
-    const changeRate = (playbackRate) => {
-        if (videoRef.current) videoRef.current.playbackRate = playbackRate;
-        setMenu(null);
+    const seekBy = (seconds) => {
+        const video = videoRef.current;
+        if (!video || !Number.isFinite(video.duration)) return;
+        video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + seconds));
+        setCurrentTime(video.currentTime);
     };
 
-    const selectAudioTrack = (index) => {
-        if (hlsRef.current) {
-            hlsRef.current.audioTrack = index;
-        } else if (videoRef.current?.audioTracks && videoRef.current.audioTracks[index]) {
-            for (let trackIndex = 0; trackIndex < videoRef.current.audioTracks.length; trackIndex += 1) {
-                videoRef.current.audioTracks[trackIndex].enabled = trackIndex === index;
-            }
-        }
-        setSelectedAudioTrack(index);
-        setMenu(null);
+    const showSeekFeedback = (text) => {
+        setSeekFeedback(text);
+        window.clearTimeout(feedbackTimeoutRef.current);
+        feedbackTimeoutRef.current = window.setTimeout(() => setSeekFeedback(""), 650);
     };
 
-    const selectSubtitleTrack = (index) => {
-        // Increment even when the current track is clicked again, so a failed or
-        // cancelled request can be retried without requiring a different selection.
-        setSubtitleLoadError("");
-        setSubtitleCues([]);
-        setSelectedSubtitleTrack(index);
-        setSubtitleReloadNonce((nonce) => nonce + 1);
-        setMenu(null);
-    };
-
-    const poke = useCallback(() => {
-        setShowUi(true);
-        clearTimeout(hideTimer.current);
-        hideTimer.current = setTimeout(() => setShowUi(false), 2800);
-    }, []);
-
-    useEffect(() => () => {
-        clearTimeout(hideTimer.current);
-        if (stallTimerRef.current !== null) window.clearTimeout(stallTimerRef.current);
-    }, []);
-
-    useEffect(() => {
-        const onFullscreenChange = () => setIsFs(document.fullscreenElement === wrapRef.current);
-        document.addEventListener("fullscreenchange", onFullscreenChange);
-        return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
-    }, []);
-
-    useEffect(() => {
-        /**
-         * Handle video-player keyboard shortcuts.
-         * @param {KeyboardEvent} event
-         * @returns {void}
-         */
-        const onKey = (event) => {
-            const tag = event.target?.tagName;
-            if ((tag === "INPUT" && event.target.type !== "range") || tag === "TEXTAREA") return;
-            if (event.key === "Escape" && menuRef.current) {
-                event.stopImmediatePropagation();
-                setMenu(null);
-                return;
-            }
-
-            const step = event.shiftKey ? 10 : 5;
-            switch (event.key.toLowerCase()) {
-                case " ":
-                case "k":
-                    togglePlay();
-                    break;
-                case "arrowleft":
-                    seekBy(-step);
-                    break;
-                case "arrowright":
-                    seekBy(step);
-                    break;
-                case "j":
-                    seekBy(-10);
-                    break;
-                case "l":
-                    seekBy(10);
-                    break;
-                case "arrowup":
-                    changeVolume(0.05);
-                    break;
-                case "arrowdown":
-                    changeVolume(-0.05);
-                    break;
-                case "m":
-                    if (videoRef.current) videoRef.current.muted = !videoRef.current.muted;
-                    break;
-                case "f":
-                    toggleFs();
-                    break;
-                default:
-                    return;
-            }
-            event.preventDefault();
-            poke();
-        };
-        window.addEventListener("keydown", onKey);
-        return () => window.removeEventListener("keydown", onKey);
-    }, [togglePlay, seekBy, changeVolume, toggleFs, poke]);
-
-    /**
-     * Update the visible buffered endpoint for the current playback position.
-     * @returns {void}
-     */
-    const updateBuffered = () => {
+    const handleVideoPointerUp = (event) => {
         const video = videoRef.current;
         if (!video) return;
-        const ranges = video.buffered;
-        for (let i = 0; i < ranges.length; i++) {
-            if (ranges.start(i) <= video.currentTime && video.currentTime <= ranges.end(i)) {
-                setBuffered(ranges.end(i));
+
+        const bounds = video.getBoundingClientRect();
+        if (!bounds.width || !bounds.height) return;
+
+        const x = (event.clientX - bounds.left) / bounds.width;
+        const y = (event.clientY - bounds.top) / bounds.height;
+        const centerTap = x >= 0.33 && x <= 0.67 && y >= 0.25 && y <= 0.75;
+
+        if (event.pointerType === "touch") {
+            if (centerTap) {
+                lastSideTapRef.current = {side: "", time: 0};
+                togglePlayback();
                 return;
             }
+
+            const side = x < 0.33 ? "left" : x > 0.67 ? "right" : "";
+            if (!side) {
+                lastSideTapRef.current = {side: "", time: 0};
+                return;
+            }
+
+            const now = event.timeStamp;
+            const lastTap = lastSideTapRef.current;
+            if (lastTap.side === side && now - lastTap.time <= 320) {
+                const seconds = side === "right" ? 10 : -10;
+                seekBy(seconds);
+                showSeekFeedback(side === "right" ? "+10s" : "−10s");
+                lastSideTapRef.current = {side: "", time: 0};
+            } else {
+                // A single tap on either side does nothing. Only the second tap seeks.
+                lastSideTapRef.current = {side, time: now};
+            }
+            return;
         }
-        setBuffered(0);
+
+        // Desktop clicks only toggle play/pause in the center, never on the edges.
+        if (event.pointerType === "mouse" && event.button === 0 && centerTap) {
+            togglePlayback();
+        }
     };
 
-    const activeSubtitleText = subtitleCues
-        .filter((cue) => current >= cue.start && current < cue.end)
-        .map((cue) => cue.text)
-        .join("\n");
-    const controlsVisible = showUi || !playing || menu !== null;
-    /**
-     * Convert a time value to a clamped timeline percentage.
-     * @param {number} value
-     * @returns {number}
-     */
-    const percent = (value) => duration ? Math.min((value / duration) * 100, 100) : 0;
+    const toggleFullscreen = async () => {
+        const target = wrapRef.current;
+        if (!target) return;
+        try {
+            if (document.fullscreenElement) {
+                await document.exitFullscreen();
+            } else {
+                await target.requestFullscreen();
+            }
+        } catch {
+            // Fullscreen is optional and may be blocked by the browser.
+        }
+    };
 
-    return (<div
-        ref={wrapRef}
-        onMouseMove={poke}
-        onMouseLeave={() => playing && setShowUi(false)}
-        className={`relative ${heightClass} w-full select-none overflow-hidden bg-black ${controlsVisible ? "" : "cursor-none"}`}
-    >
-        <video
-            ref={videoRef}
-            crossOrigin="anonymous"
-            autoPlay
-            playsInline
-            className="h-full w-full object-contain"
-            onClick={() => {
-                setMenu(null);
-                togglePlay();
-            }}
-            onDoubleClick={toggleFs}
-            onPlay={() => setPlaying(true)}
-            onPause={() => setPlaying(false)}
-            onPlaying={() => {
-                setPlaying(true);
-                setBuffering(false);
-                if (stallTimerRef.current !== null) window.clearTimeout(stallTimerRef.current);
-                stallTimerRef.current = null;
-            }}
-            onCanPlay={() => {
-                setBuffering(false);
-                if (stallTimerRef.current !== null) window.clearTimeout(stallTimerRef.current);
-                stallTimerRef.current = null;
-            }}
-            onLoadedMetadata={(event) => {
-                const video = event.currentTarget;
-                const resumeAt = resumeTimeRef.current;
-                if (resumeAt > 0 && Number.isFinite(video.duration)) {
-                    video.currentTime = Math.min(resumeAt, Math.max(0, video.duration - 0.25));
-                    resumeTimeRef.current = 0;
-                }
-            }}
-            onWaiting={(event) => {
-                setBuffering(true);
-                const video = event.currentTarget;
-                if (video.paused || stallTimerRef.current !== null) return;
-                // Recover from a silent stall too; browsers do not always emit `error`
-                // when a long-lived proxy/tunnel stream stops delivering bytes.
-                stallTimerRef.current = window.setTimeout(() => {
-                    stallTimerRef.current = null;
-                    const currentVideo = videoRef.current;
-                    if (currentVideo && !currentVideo.paused && currentVideo.readyState < 3) recoverStream(currentVideo);
-                }, 20000);
-            }}
-            onTimeUpdate={(event) => {
-                const video = event.currentTarget;
-                setCurrent(video.currentTime);
-                if (retryCountRef.current > 0 && video.currentTime >= retryCheckpointRef.current + 10) {
-                    retryCountRef.current = 0;
-                }
-                updateBuffered();
-            }}
-            onProgress={updateBuffered}
-            onDurationChange={(event) => setDuration(event.currentTarget.duration)}
-            onVolumeChange={(event) => {
-                setVolume(event.currentTarget.volume);
-                setMuted(event.currentTarget.muted || event.currentTarget.volume === 0);
-            }}
-            onRateChange={(event) => setRate(event.currentTarget.playbackRate)}
-            onError={handleMediaError}
-        />
-        {activeSubtitleText && (<div
-            aria-live="off"
-            className="pointer-events-none absolute inset-x-4 bottom-[5.5rem] z-10 flex justify-center px-4 text-center"
-        >
-            <span className="max-w-[90%] whitespace-pre-line rounded bg-black/75 px-3 py-1.5 text-base font-semibold leading-relaxed text-white [text-shadow:0_1px_2px_#000,1px_0_2px_#000,-1px_0_2px_#000] md:text-xl">
-                {activeSubtitleText}
-            </span>
-        </div>)}
-        {subtitleLoadError && selectedSubtitleTrack >= 0 && (<div className="pointer-events-none absolute inset-x-4 bottom-20 z-10 flex justify-center">
-            <span className="rounded bg-black/80 px-2 py-1 text-xs text-red-300">{subtitleLoadError}</span>
-        </div>)}
+    useEffect(() => {
+        const handleFullscreenChange = () => setFullscreen(document.fullscreenElement === wrapRef.current);
+        document.addEventListener("fullscreenchange", handleFullscreenChange);
+        return () => {
+            document.removeEventListener("fullscreenchange", handleFullscreenChange);
+            window.clearTimeout(feedbackTimeoutRef.current);
+        };
+    }, []);
 
-        {buffering && !error && (<div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                    <span className="material-symbols-outlined animate-spin text-[40px] text-[#3ecf8e]" aria-label="Loading">
-                        progress_activity
-                    </span>
-        </div>)}
-
-        {error && (<div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/80 px-8 text-center">
-            <span className="material-symbols-outlined text-[32px] text-[#f87171]" aria-hidden="true">error</span>
-            <p className="max-w-md text-sm text-[#fafafa]">{error}</p>
-        </div>)}
-
-        {isFs && (<div
-            className={`pointer-events-none absolute inset-x-0 top-0 bg-gradient-to-b from-black/80 to-transparent px-5 pb-8 pt-4 transition-opacity duration-200 ${controlsVisible ? "opacity-100" : "opacity-0"}`}>
-            <p className="truncate text-sm font-medium text-[#fafafa]">{file.name}</p>
-        </div>)}
-
-        {menu === "audio" && (<div
-            className="absolute bottom-16 right-3 z-20 max-h-64 w-56 overflow-auto rounded-md border border-[#2e2e2e] bg-[#1c1c1c]/95 p-1.5 shadow-xl backdrop-blur"
-            onClick={(event) => event.stopPropagation()}>
-            <p className="px-2 pb-1 pt-2 text-[11px] text-[#8b8b8b]">Audio track</p>
-            {audioTracks.map((track) => (<button
-                key={"audio-" + track.index}
-                type="button"
-                onClick={() => selectAudioTrack(track.index)}
-                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-[#fafafa] hover:bg-white/10"
-            >
-                <span className="inline-block w-4 text-[#3ecf8e]">{selectedAudioTrack === track.index ? "✓" : ""}</span>
-                <span className="flex-1 truncate">{getTrackLanguage(track, "Audio")}</span>
-            </button>))}
-        </div>)}
-
-        {menu === "subtitles" && (<div
-            className="absolute bottom-16 right-3 z-20 max-h-64 w-56 overflow-auto rounded-md border border-[#2e2e2e] bg-[#1c1c1c]/95 p-1.5 shadow-xl backdrop-blur"
-            onClick={(event) => event.stopPropagation()}>
-            <p className="px-2 pb-1 pt-2 text-[11px] text-[#8b8b8b]">Subtitles</p>
-            <button
-                type="button"
-                onClick={() => selectSubtitleTrack(-1)}
-                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-[#fafafa] hover:bg-white/10"
-            >
-                <span className="inline-block w-4 text-[#3ecf8e]">{selectedSubtitleTrack === -1 ? "✓" : ""}</span>
-                <span className="flex-1">Off</span>
-            </button>
-            {subtitleTracks.map((track) => (<button
-                key={"subtitle-" + track.index}
-                type="button"
-                onClick={() => selectSubtitleTrack(track.index)}
-                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-[#fafafa] hover:bg-white/10"
-            >
-                <span className="inline-block w-4 text-[#3ecf8e]">{selectedSubtitleTrack === track.index ? "✓" : ""}</span>
-                <span className="flex-1 truncate">{getTrackLanguage(track, "Subtitle")}</span>
-            </button>))}
-        </div>)}
-
-        {menu === "speed" && (<div
-            className="absolute bottom-16 right-3 max-h-64 w-52 overflow-auto rounded-md border border-[#2e2e2e] bg-[#1c1c1c]/95 p-1.5 shadow-xl backdrop-blur"
-            onClick={(event) => event.stopPropagation()}>
-            <p className="px-2 pb-1 pt-2 text-[11px] text-[#8b8b8b]">Playback speed</p>
-            {SPEEDS.map((speed) => (<button
-                key={speed}
-                type="button"
-                onClick={() => changeRate(speed)}
-                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-[#fafafa] hover:bg-white/10"
-            >
-                <span className="inline-block w-4 text-[#3ecf8e]">{speed === rate ? "✓" : ""}</span>
-                <span className="flex-1">{speed === 1 ? "Normal" : `${speed}×`}</span>
-            </button>))}
-        </div>)}
-
+    return (
         <div
-            className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent px-3 pb-2 pt-10 transition-opacity duration-200 ${controlsVisible ? "opacity-100" : "pointer-events-none opacity-0"}`}
-            onClick={(event) => event.stopPropagation()}
+            ref={wrapRef}
+            className={`relative ${heightClass} min-h-0 w-full overflow-hidden bg-black text-white select-none`}
         >
-            <div className="group relative mb-1 h-4">
-                <div
-                    className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-white/20 transition-[height] group-hover:h-1.5">
-                    <div className="absolute inset-y-0 left-0 bg-white/30" style={{width: `${percent(buffered)}%`}}/>
-                    <div className="absolute inset-y-0 left-0 bg-[#3ecf8e]" style={{width: `${percent(current)}%`}}/>
+            <video
+                ref={videoRef}
+                className="absolute inset-0 h-full w-full bg-black object-contain"
+                src={streamUrl}
+                preload="metadata"
+                playsInline
+                disablePictureInPicture
+                aria-label={file?.name || "Video preview"}
+                onPointerUp={handleVideoPointerUp}
+                onContextMenu={(event) => event.preventDefault()}
+                onLoadedMetadata={(event) => {
+                    setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0);
+                    setCurrentTime(event.currentTarget.currentTime || 0);
+                    setVolume(event.currentTarget.volume);
+                    setMuted(event.currentTarget.muted);
+                    setPlaybackRate(event.currentTarget.playbackRate);
+                }}
+                onDurationChange={(event) => {
+                    if (Number.isFinite(event.currentTarget.duration)) setDuration(event.currentTarget.duration);
+                }}
+                onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime || 0)}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                onVolumeChange={(event) => {
+                    setVolume(event.currentTarget.volume);
+                    setMuted(event.currentTarget.muted);
+                }}
+                onRateChange={(event) => setPlaybackRate(event.currentTarget.playbackRate)}
+            />
+
+            {seekFeedback && (
+                <div className={`pointer-events-none absolute inset-y-0 flex w-1/3 items-center justify-center ${seekFeedback.startsWith("+") ? "right-0" : "left-0"}`}>
+                    <span className="rounded-full bg-black/70 px-4 py-2 text-lg font-semibold">{seekFeedback}</span>
                 </div>
-                <div
-                    className="pointer-events-none absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#3ecf8e] opacity-0 transition-opacity group-hover:opacity-100"
-                    style={{left: `${percent(current)}%`}}/>
-                <input
-                    type="range"
-                    min={0}
-                    max={duration || 0}
-                    step={0.1}
-                    value={Math.min(current, duration || 0)}
-                    aria-label="Seek"
-                    onChange={(event) => {
-                        const time = Number(event.target.value);
-                        if (videoRef.current) videoRef.current.currentTime = time;
-                        setCurrent(time);
-                    }}
-                    className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                />
-            </div>
+            )}
 
-            <div className="flex items-center gap-1">
-                <button type="button" className={ctrlBtn} onClick={togglePlay} aria-label={playing ? "Pause" : "Play"}>
-                    <span className="material-symbols-outlined text-[24px]">{playing ? "pause" : "play_arrow"}</span>
-                </button>
-                <button type="button" className={ctrlBtn} onClick={() => seekBy(-10)} aria-label="Back 10 seconds">
-                    <span className="material-symbols-outlined text-[20px]">replay_10</span>
-                </button>
-                <button type="button" className={ctrlBtn} onClick={() => seekBy(10)} aria-label="Forward 10 seconds">
-                    <span className="material-symbols-outlined text-[20px]">forward_10</span>
-                </button>
-
-                <div className="ml-1 flex items-center gap-1">
-                    <button
-                        type="button"
-                        className={ctrlBtn}
-                        aria-label={muted ? "Unmute" : "Mute"}
-                        onClick={() => videoRef.current && (videoRef.current.muted = !videoRef.current.muted)}
-                    >
-                            <span
-                                className="material-symbols-outlined text-[20px]">{muted ? "volume_off" : volume < 0.5 ? "volume_down" : "volume_up"}</span>
-                    </button>
+            <div className="absolute inset-x-0 bottom-6 bg-gradient-to-t from-black/95 via-black/65 to-transparent px-3 pb-3 pt-12 sm:px-5">
+                <div className="mb-2 flex items-center gap-3">
+                    <span className="w-11 shrink-0 text-right text-xs tabular-nums text-white/90">{formatTime(currentTime)}</span>
                     <input
                         type="range"
                         min={0}
-                        max={1}
-                        step={0.05}
-                        value={muted ? 0 : volume}
-                        aria-label="Volume"
+                        max={duration || 0}
+                        step={0.1}
+                        value={Math.min(currentTime, duration || 0)}
+                        aria-label="Seek video"
                         onChange={(event) => {
                             const video = videoRef.current;
                             if (!video) return;
-                            video.volume = Number(event.target.value);
-                            video.muted = video.volume === 0;
+                            video.currentTime = Number(event.target.value);
+                            setCurrentTime(video.currentTime);
                         }}
-                        className="h-1 w-20 cursor-pointer accent-[#3ecf8e]"
+                        className="h-1.5 min-w-0 flex-1 cursor-pointer accent-[#3ecf8e]"
                     />
+                    <span className="w-11 shrink-0 text-xs tabular-nums text-white/90">{formatTime(duration)}</span>
                 </div>
 
-                <span className="ml-2 text-xs tabular-nums text-[#fafafa]/80">{fmtTime(current)} / {fmtTime(duration)}</span>
-
-                <div className="ml-auto flex items-center gap-1">
-                    {audioTracks.length > 1 && (<button
-                        type="button"
-                        className={"flex h-8 shrink-0 items-center justify-center rounded-md px-2 text-xs text-[#fafafa]/90 transition-colors hover:bg-white/10 " + (menu === "audio" ? "bg-white/10" : "")}
-                        aria-label="Audio tracks"
-                        aria-expanded={menu === "audio"}
-                        onClick={() => setMenu(menu === "audio" ? null : "audio")}
-                    >
-                        <span className="material-symbols-outlined mr-1 text-[17px]" aria-hidden="true">audio_file</span>
-                        Audio
-                    </button>)}
-                    {subtitleTracks.length > 0 && (<button
-                        type="button"
-                        className={"flex h-8 shrink-0 items-center justify-center rounded-md px-2 text-xs text-[#fafafa]/90 transition-colors hover:bg-white/10 " + (menu === "subtitles" ? "bg-white/10" : "")}
-                        aria-label="Subtitle tracks"
-                        aria-expanded={menu === "subtitles"}
-                        onClick={() => setMenu(menu === "subtitles" ? null : "subtitles")}
-                    >
-                        <span className="material-symbols-outlined mr-1 text-[17px]" aria-hidden="true">closed_caption</span>
-                        Subs
-                    </button>)}
+                <div className="flex min-w-0 items-center gap-2 sm:gap-3">
                     <button
                         type="button"
-                        className={`${ctrlBtn} w-auto px-2 text-xs tabular-nums ${menu === "speed" ? "bg-white/10" : ""}`}
-                        aria-label="Playback speed"
-                        aria-expanded={menu === "speed"}
-                        onClick={() => setMenu(menu === "speed" ? null : "speed")}
+                        onClick={togglePlayback}
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-white transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
+                        aria-label={playing ? "Pause video" : "Play video"}
+                        title={playing ? "Pause" : "Play"}
                     >
-                        {rate}×
+                        <span className="material-symbols-outlined text-[25px]" aria-hidden="true">{playing ? "pause" : "play_arrow"}</span>
                     </button>
-                    {document.pictureInPictureEnabled && (
-                        <button type="button" className={ctrlBtn} onClick={togglePip} aria-label="Picture in picture">
-                            <span className="material-symbols-outlined text-[20px]">picture_in_picture_alt</span>
-                        </button>)}
-                    <button type="button" className={ctrlBtn} onClick={toggleFs} aria-label={isFs ? "Exit full screen" : "Full screen"}>
-                        <span className="material-symbols-outlined text-[20px]">{isFs ? "fullscreen_exit" : "fullscreen"}</span>
+
+                    <button
+                        type="button"
+                        onClick={() => seekBy(-10)}
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-white transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
+                        aria-label="Back 10 seconds"
+                        title="Back 10 seconds"
+                    >
+                        <span className="material-symbols-outlined text-[22px]" aria-hidden="true">replay_10</span>
                     </button>
+                    <button
+                        type="button"
+                        onClick={() => seekBy(10)}
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-white transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
+                        aria-label="Forward 10 seconds"
+                        title="Forward 10 seconds"
+                    >
+                        <span className="material-symbols-outlined text-[22px]" aria-hidden="true">forward_10</span>
+                    </button>
+
+                    <div className="ml-auto flex min-w-0 items-center gap-2 sm:gap-3">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const video = videoRef.current;
+                                if (!video) return;
+                                video.muted = !video.muted;
+                            }}
+                            className="flex h-9 w-8 shrink-0 items-center justify-center rounded-md text-white transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
+                            aria-label={muted || volume === 0 ? "Unmute video" : "Mute video"}
+                            title={muted || volume === 0 ? "Unmute" : "Mute"}
+                        >
+                            <span className="material-symbols-outlined text-[21px]" aria-hidden="true">{muted || volume === 0 ? "volume_off" : volume < 0.5 ? "volume_down" : "volume_up"}</span>
+                        </button>
+                        <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={muted ? 0 : volume}
+                            aria-label="Volume"
+                            onChange={(event) => {
+                                const video = videoRef.current;
+                                if (!video) return;
+                                video.volume = Number(event.target.value);
+                                video.muted = video.volume === 0;
+                            }}
+                            className="hidden w-20 cursor-pointer accent-[#3ecf8e] sm:block"
+                        />
+
+                        <label className="flex shrink-0 items-center gap-1.5 text-xs text-white/90">
+                            <span className="hidden sm:inline">Speed</span>
+                            <select
+                                value={playbackRate}
+                                aria-label="Playback speed"
+                                onChange={(event) => {
+                                    const video = videoRef.current;
+                                    const nextRate = Number(event.target.value);
+                                    setPlaybackRate(nextRate);
+                                    if (video) video.playbackRate = nextRate;
+                                }}
+                                className="h-8 rounded-md border border-white/20 bg-[#171717] px-1.5 text-xs text-white outline-none focus:border-[#3ecf8e]"
+                            >
+                                {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((rate) => (
+                                    <option key={rate} value={rate}>{rate}×</option>
+                                ))}
+                            </select>
+                        </label>
+
+                        <button
+                            type="button"
+                            onClick={() => void toggleFullscreen()}
+                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-white transition-colors hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
+                            aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                            title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+                        >
+                            <span className="material-symbols-outlined text-[22px]" aria-hidden="true">{fullscreen ? "fullscreen_exit" : "fullscreen"}</span>
+                        </button>
+                    </div>
                 </div>
             </div>
+
+            <p className="pointer-events-none absolute inset-x-0 bottom-0 border-t border-white/10 bg-[#171717]/95 px-4 py-1.5 text-center text-[11px] text-[#a7a7a7]">
+                If this format does not play in your browser, copy the stream URL above and open it in VLC.
+            </p>
         </div>
-    </div>);
+    );
 }
 
 /**
@@ -1569,7 +869,7 @@ export default function ViewFile() {
     }, [navigate]);
 
     const copyStreamLink = useCallback(async () => {
-        const streamUrl = publicToken ? window.location.href : source?.streamUrl;
+        const streamUrl = source?.streamUrl;
         if (!streamUrl) return;
 
         const copyUsingFallback = () => {
@@ -1609,7 +909,7 @@ export default function ViewFile() {
         setCopyStatus(copied ? "Copied!" : "Copy failed");
         clearTimeout(copyTimer.current);
         copyTimer.current = window.setTimeout(() => setCopyStatus(""), 2500);
-    }, [source?.streamUrl, publicToken]);
+    }, [source?.streamUrl]);
 
     useEffect(() => () => clearTimeout(copyTimer.current), []);
 
@@ -1622,7 +922,7 @@ export default function ViewFile() {
         setError("");
 
         if (publicToken) {
-            setSource({streamUrl: `${API_URL}/public/stream/${encodeURIComponent(publicToken)}`, publicToken});
+            setSource({streamUrl: `${API_URL}/public/stream/${encodeURIComponent(publicToken)}`});
             return () => {
                 cancelled = true;
             };
@@ -1649,7 +949,7 @@ export default function ViewFile() {
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.detail || "Could not open this file.");
                 if (!data.public_token) throw new Error("The server did not return a public stream token.");
-                if (!cancelled) setSource({streamUrl: `${API_URL}/public/stream/${data.public_token}`, publicToken: data.public_token});
+                if (!cancelled) setSource({streamUrl: `${API_URL}/public/stream/${data.public_token}`});
             } catch (err) {
                 if (!cancelled) setError(err.message || "Could not open this file.");
             }
@@ -1683,13 +983,13 @@ export default function ViewFile() {
                 {source?.streamUrl && kind === "video" && (<button
                     type="button"
                     onClick={copyStreamLink}
-                    title={publicToken ? "Copy the public view link to your clipboard" : "Copy the stream URL to your clipboard"}
+                    title="Copy the raw stream URL to open in VLC"
                     aria-live="polite"
                     className="flex shrink-0 items-center gap-2 rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#fafafa] transition-colors hover:bg-[#2a2a2a] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
                 >
                     <span className="material-symbols-outlined text-[17px]"
                           aria-hidden="true">{copyStatus === "Copied!" ? "check" : copyStatus === "Copy failed" ? "error" : "content_copy"}</span>
-                    {copyStatus || (publicToken ? "Copy share link" : "Copy stream link")}
+                    {copyStatus || "Copy stream URL"}
                 </button>)}
             </div>
         </header>
@@ -1729,7 +1029,7 @@ export default function ViewFile() {
                         {status}
                     </div>) : (<div className="flex h-full w-full min-h-0 flex-col">
                         <div className="min-h-0 min-w-0 flex-1">
-                            <VideoPlayer file={{name}} streamUrl={source.streamUrl} publicToken={source.publicToken} heightClass="h-full"/>
+                            <VideoPlayer file={{name}} streamUrl={source.streamUrl} heightClass="h-full"/>
                         </div>
                     </div>)}
         </main>

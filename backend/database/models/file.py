@@ -3,6 +3,7 @@ File model and persistence operations. File metadata is stored in PostgreSQL and
 """
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field

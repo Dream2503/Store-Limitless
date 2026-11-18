@@ -654,6 +654,8 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
         completed_items = max(0, min(int(metadata.get("completed_items") or 0), total_items))
         current_transfer = 0
         current_total = 0
+        current_upload_transfer = 0
+        current_upload_total = 0
         current_download_transfer = 0
         current_download_total = 0
         current_download_active = False
@@ -776,6 +778,8 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                 child_progress: Progress = cast("Progress", await Redis.get(current_job_id, "Progress"))
                 current_transfer = max(0, int(child_progress.transfer or 0))
                 current_total = max(0, int(child_progress.total or 0))
+                current_upload_transfer = current_transfer
+                current_upload_total = current_total
                 current_download_transfer = max(0, int(getattr(child_progress, "download_transfer", 0) or 0))
                 current_download_total = max(0, int(getattr(child_progress, "download_total", 0) or 0))
                 current_download_active = bool(getattr(child_progress, "download_active", False))
@@ -1074,6 +1078,8 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
             "progress": progress,
             "transfer": current_transfer,
             "total": current_total,
+            "upload_transfer": current_upload_transfer,
+            "upload_total": current_upload_total,
             "download_transfer": current_download_transfer,
             "download_total": current_download_total,
             "download_active": current_download_active,

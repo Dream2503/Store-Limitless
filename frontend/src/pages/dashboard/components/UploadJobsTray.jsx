@@ -749,10 +749,10 @@ function describeJob(job) {
     const reportedDownloadTotal = hasTorrentItems
         ? (allItemSizesKnown ? num(job.downloadTotal) : 0)
         : num(job.downloadTotal);
-    const reportedStorageTransfer = num(job.transfer);
+    const reportedStorageTransfer = num(job.uploadTransfer) || num(job.transfer);
     const reportedStorageTotal = hasTorrentItems
         ? (allItemSizesKnown ? (num(job.total) || total) : 0)
-        : num(job.total) || total;
+        : num(job.uploadTotal) || num(job.total) || total;
 
     // A normal browser file upload has two phases:
     // 0-50% is the browser sending bytes to this server, and 50-99.5% is the
@@ -817,8 +817,6 @@ function describeJob(job) {
 function expandBrowserFileQueue(job) {
     const items = Array.isArray(job.items) ? job.items : [];
     if (job.kind !== "file" || items.length === 0) return [job];
-    if (job.status === "completed") return [];
-
     const displayItems = items.map((sourceItem, index) => {
         const item = {...sourceItem};
         const rawStatus = String(item.status || "queued");
@@ -830,16 +828,24 @@ function expandBrowserFileQueue(job) {
         if (job.status === "cancelled" && status === "queued") status = "cancelled";
 
         return {item, index, status};
-    }).filter(({status}) => status !== "completed");
+    });
 
     return displayItems.map(({item, index, status}, displayIndex) => {
         const size = num(item.size) || num(item.total);
         const itemProgress = item.progress == null ? 0 : Math.max(0, Math.min(100, num(item.progress)));
-        const providerTransfer = itemProgress >= 50
-            ? Math.min(size || Number.MAX_SAFE_INTEGER, num(item.transfer))
-            : 0;
         const isCurrent = index === Number(job.currentIndex);
         const name = String(item.name || `File ${index + 1}`);
+
+        // The batch-level counters describe only currentIndex. Copying them onto
+        // every expanded file card makes queued siblings appear to be uploading
+        // the active file's bytes. Keep storage metrics scoped to the active item.
+        const itemTotal = size || (isCurrent ? num(job.uploadTotal) || num(job.total) : 0);
+        const itemUploadTransfer = isCurrent
+            ? Math.min(itemTotal || Number.MAX_SAFE_INTEGER, Math.max(num(job.uploadTransfer), num(job.transfer)))
+            : 0;
+        const itemUploadTotal = isCurrent
+            ? (num(job.uploadTotal) || num(job.total) || itemTotal)
+            : itemTotal;
 
         item.name = name;
         item.size = size;
@@ -862,10 +868,12 @@ function expandBrowserFileQueue(job) {
             completedItems: status === "completed" ? 1 : 0,
             currentIndex: 0,
             currentName: name,
-            total: size,
-            transfer: providerTransfer,
+            total: itemTotal,
+            transfer: itemUploadTransfer,
+            uploadTransfer: itemUploadTransfer,
+            uploadTotal: itemUploadTotal,
             downloadTransfer: 0,
-            downloadTotal: 0,
+            downloadTotal: itemTotal,
             downloadActive: true,
             downloadSpeed: 0,
             uploadSpeed: isCurrent ? num(job.uploadSpeed) : 0,
@@ -1274,7 +1282,7 @@ export default function UploadJobsTray({
                         </button>
                         {typeof clearTasks === "function" && <button type="button" onClick={() => clearTasks()}
                                 className="rounded-md px-2 py-1 text-[12px] text-[#b0c8b9] transition-colors hover:bg-white/5 hover:text-[#f3f7f4]"
-                                title="Cancel active uploads and clear upload history">
+                                title="Clear completed, failed, and cancelled uploads">
                             Clear uploads
                         </button>}
                     </div>

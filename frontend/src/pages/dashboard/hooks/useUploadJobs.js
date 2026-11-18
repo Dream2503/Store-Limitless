@@ -19,6 +19,34 @@ export default function useUploadJobs(refreshDirectory) {
         let pollAgain = false;
         let pollTimer = null;
 
+        const handleOptimisticBatch = (event) => {
+            const batch = event.detail;
+            if (!batch?.jobId) return;
+            const optimistic = {
+                ...batch,
+                jobId: String(batch.jobId),
+                status: "queued",
+                message: "Preparing upload",
+                paused: false,
+                progress: 0,
+                transfer: 0,
+                total: 0,
+                downloadTransfer: 0,
+                downloadTotal: 0,
+                downloadActive: batch.kind === "link",
+                uploadTransfer: 0,
+                uploadTotal: 0,
+                downloadSpeed: 0,
+                uploadSpeed: 0,
+                createdAt: Date.now(),
+            };
+            setUploadJobs((current) => current.some((job) => job.jobId === optimistic.jobId)
+                ? current
+                : [optimistic, ...current]);
+            hasActiveUploads.current = true;
+            scheduleNextPoll(true);
+        };
+
         const scheduleNextPoll = (immediate = false) => {
             if (cancelled) return;
             if (pollTimer !== null) {
@@ -166,6 +194,8 @@ export default function useUploadJobs(refreshDirectory) {
                         progress: status === "completed" ? 100 : Math.max(0, Math.min(99, Number(batch.progress) || 0)),
                         transfer: Math.max(0, Number(batch.transfer) || 0),
                         total: Math.max(0, Number(batch.total) || 0),
+                        uploadTransfer: Math.max(0, Number(batch.upload_transfer ?? batch.transfer) || 0),
+                        uploadTotal: Math.max(0, Number(batch.upload_total ?? batch.total) || 0),
                         downloadTransfer: Math.max(0, Number(batch.download_transfer) || 0),
                         downloadTotal: Math.max(0, Number(batch.download_total) || 0),
                         downloadActive: Boolean(batch.download_active),
@@ -327,34 +357,9 @@ export default function useUploadJobs(refreshDirectory) {
                         return normalized;
                     }
                 }));
-                // A fully successful browser-file queue has no remaining work to show.
-                // Remove its terminal Redis batch as well as its tray cards so it does not
-                // return after a page reload. Link-import history and failed/cancelled tasks
-                // retain their existing dismissal behavior.
-                const completedFileBatches = batches.filter(
-                    (batch) => batch.kind === "file" && batch.status === "completed",
-                );
-                const completedFileBatchIds = new Set(completedFileBatches.map((batch) => batch.jobId));
-                const sessionToken = getToken();
-
-                if (sessionToken && completedFileBatches.length) {
-                    await Promise.all(completedFileBatches.map(async (batch) => {
-                        try {
-                            const deleteResponse = await fetch(
-                                `${API_URL}/auth/upload-batches/${encodeURIComponent(batch.jobId)}`,
-                                {method: "DELETE", headers: {Authorization: `Bearer ${sessionToken}`}, cache: "no-store"},
-                            );
-                            if (!deleteResponse.ok && deleteResponse.status !== 404) {
-                                const payload = await deleteResponse.json().catch(() => ({}));
-                                throw new Error(payload.detail || `Could not auto-remove completed upload (${deleteResponse.status})`);
-                            }
-                        } catch (error) {
-                            console.error("Could not automatically remove completed file upload:", error);
-                        }
-                    }));
-                }
-
-                const visibleBatches = batches.filter((batch) => !completedFileBatchIds.has(batch.jobId));
+                // Keep terminal tasks visible until the user explicitly removes
+                // one with its row action or clears terminal history from the tray.
+                const visibleBatches = batches;
 
                 // Active batches stay near-real-time; while idle, the longer interval
                 // still discovers work started by another device without constant empty polls.
@@ -411,6 +416,7 @@ export default function useUploadJobs(refreshDirectory) {
             }
         };
 
+        window.addEventListener("storelimitless:upload-batch-created", handleOptimisticBatch);
         window.addEventListener("focus", requestImmediateRefresh);
         window.addEventListener("online", requestImmediateRefresh);
         document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -419,6 +425,7 @@ export default function useUploadJobs(refreshDirectory) {
         return () => {
             cancelled = true;
             if (pollTimer !== null) window.clearTimeout(pollTimer);
+            window.removeEventListener("storelimitless:upload-batch-created", handleOptimisticBatch);
             window.removeEventListener("focus", requestImmediateRefresh);
             window.removeEventListener("online", requestImmediateRefresh);
             document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -528,26 +535,33 @@ export default function useUploadJobs(refreshDirectory) {
         }).catch((error) => console.error("Could not cancel upload task:", error));
     };
 
-    /** Clear all task history, cancelling active batch uploads first. */
+    /** Remove terminal upload history without cancelling or mutating active transfers. */
     const clearAllUploadJobs = () => {
-        for (const transfer of window.__storeLimitlessUploadTransfers?.values?.() || []) {
-            transfer.cancelToken.cancelled = true;
-            transfer.cancelToken.paused = false;
-            const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
-            waiters.forEach((resolve) => resolve());
-            for (const xhr of transfer.xhrs || []) xhr.abort();
-        }
-        setUploadJobs([]);
         const token = getToken();
         if (!token) return;
+
         void fetch(`${API_URL}/auth/upload-batches`, {
             method: "DELETE", headers: {Authorization: `Bearer ${token}`}, cache: "no-store",
         }).then(async (response) => {
+            const data = await response.json().catch(() => ({}));
             if (!response.ok) {
-                const data = await response.json().catch(() => ({}));
                 throw new Error(data.detail || `Could not clear upload tray (${response.status})`);
             }
-        }).catch((error) => console.error("Could not clear upload tray:", error));
+
+            // The server returns the exact terminal batches it removed. Active
+            // queued/uploading/paused batches remain in both Redis and local state.
+            const removedIds = new Set(
+                Array.isArray(data.removed_batch_ids)
+                    ? data.removed_batch_ids.map((id) => String(id))
+                    : uploadJobs
+                        .filter((job) => ["completed", "error", "failed", "cancelled"].includes(String(job.status)))
+                        .map((job) => String(job.jobId))
+            );
+
+            setUploadJobs((current) => current.filter((job) => !removedIds.has(String(job.jobId))));
+            const transfers = window.__storeLimitlessUploadTransfers;
+            for (const jobId of removedIds) transfers?.delete?.(jobId);
+        }).catch((error) => console.error("Could not clear upload history:", error));
     };
 
     return {uploadJobs, dismissUploadJob, cancelUploadJob, pauseUploadJob: (jobId) => setUploadPaused(jobId, true), resumeUploadJob: (jobId) => setUploadPaused(jobId, false), clearAllUploadJobs};

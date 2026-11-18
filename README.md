@@ -587,8 +587,8 @@ The dashboard applies local state changes before waiting for the database respon
   in place.
 - The complete selection is registered as one Redis-backed batch before the modal closes automatically. All of its files/links are visible in the tray
   as queued items before transfers start.
-- Batch tasks remain visible after they complete, fail, or are cancelled. Use the row's **X** to remove one terminal task, or **Clear all** to cancel
-  active tasks and clear all tray history.
+- Batch tasks remain visible after they complete, fail, or are cancelled. Use the row's **X** to remove one terminal task, or **Clear uploads** to remove
+  only completed, failed, and cancelled tasks. Queued, uploading, and paused tasks remain untouched.
 - Cancelling a batch aborts local chunk `XMLHttpRequest`s, prevents subsequent queue items from starting, asks the backend to cancel its active child
   worker, and cleans temporary chunk/session state. The browser-file worker and cancellation route share a Redis finalization lock: if cancellation
   wins, the file metadata is not committed; if the worker already entered the protected final database-save section, the endpoint reports that the
@@ -900,12 +900,12 @@ The batch API supports these shared actions:
   browser file from being saved in the database after cancellation wins the race.
 - **Dismiss one task:** `DELETE /auth/upload-batches/{batch_id}` removes a batch's history and child-job records. Active batches must be cancelled
   first.
-- **Clear all:** `DELETE /auth/upload-batches` cancels active batch children and removes all batch history for the account.
+- **Clear terminal history:** `DELETE /auth/upload-batches` removes completed, failed, and cancelled batches only. Queued, uploading, and paused batches are preserved.
 - **Report browser transfer failure:** `POST /auth/upload-jobs/{job_id}/fail` publishes local chunk-transfer failures to the child job's shared
   status.
 
 Terminal batches are intentionally **not** automatically pruned. Successful, failed, and cancelled tasks remain in the tray until the user removes one
-with its row-level **X** or selects **Clear all**. The tray refreshes the destination directory after a batch becomes terminal. All routes verify
+with its row-level **X** or selects **Clear uploads**, which removes only terminal batches. The tray refreshes the destination directory after a batch becomes terminal. All routes verify
 ownership against the authenticated username.
 
 **Deployment requirement:** every device must use the same API backend and the same Redis data store. A per-process `localhost` Redis instance does
@@ -1067,7 +1067,7 @@ changes.
 | `PATCH /auth/upload-batches/{batch_id}`                                                         | Update a batch's state, current child job, progress counters, or item status.                                                                      |
 | `POST /auth/upload-batches/{batch_id}/cancel`                                                   | Cancel the active child and stop subsequent queued items.                                                                                          |
 | `DELETE /auth/upload-batches/{batch_id}`                                                        | Remove one terminal batch and its child job records.                                                                                               |
-| `DELETE /auth/upload-batches`                                                                   | Cancel active batches and clear all account tray history.                                                                                          |
+| `DELETE /auth/upload-batches`                                                                   | Remove completed, failed, and cancelled batches; preserve queued, uploading, and paused batches.                                                   |
 | `POST /auth/upload`                                                                             | Create a browser-upload child job. Headers include `X-Data-Center`, `X-Directory`, `X-File-Name`, optional `X-File-Size`, and `X-Upload-Batch-Id`. |
 | `PUT /public/upload/{job_id}/chunk?offset=...&total=...`                                        | Send bytes for a declared file range. Requires the owning user's bearer token.                                                                     |
 | `GET /auth/torrent-preview?link=...`                                                            | Resolve a magnet link and return torrent file indexes, paths, and sizes before payload download. Requires authentication.                          |

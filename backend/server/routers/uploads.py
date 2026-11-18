@@ -844,14 +844,36 @@ async def dismiss_upload_batch(batch_id: str, user: User = Depends(get_current_u
 
 @router.delete("/upload-batches")
 async def clear_upload_batches(user: User = Depends(get_current_user)) -> JSONResponse:
-    """Cancel active tasks and clear the whole upload tray when the user chooses Clear all."""
+    """Remove completed, failed, and cancelled tasks without interrupting active uploads."""
 
+    terminal_statuses = {"completed", "error", "failed", "cancelled"}
     batch_ids = await Redis.redis.smembers(user_upload_batches_key(user.username))
+    removed_batch_ids: list[str] = []
 
     for raw_batch_id in list(batch_ids):
-        await _delete_upload_batch(str(raw_batch_id), user.username, cancel_active=True)
+        batch_id = str(raw_batch_id)
+        metadata = await get_upload_batch_metadata(batch_id)
 
-    return JSONResponse({"message": "Upload tray cleared"})
+        # Clean stale account-index entries, but never touch a batch owned by
+        # another account or one that is still queued, uploading, or paused.
+        if metadata is None:
+            await _delete_upload_batch(batch_id, user.username)
+            removed_batch_ids.append(batch_id)
+            continue
+
+        if metadata.get("username") != user.username:
+            continue
+
+        if str(metadata.get("status") or "queued") not in terminal_statuses:
+            continue
+
+        await _delete_upload_batch(batch_id, user.username)
+        removed_batch_ids.append(batch_id)
+
+    return JSONResponse({
+        "message": "Terminal upload history cleared",
+        "removed_batch_ids": removed_batch_ids,
+    })
 
 
 @router.get("/upload-jobs")

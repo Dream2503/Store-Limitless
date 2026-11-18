@@ -138,9 +138,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             try:
                 if not metadata_response.ok:
                     raise OSError(f"Google Drive API error: {metadata_response.status_code}: {metadata_response.text}")
-
                 metadata: dict[str, object] = cast("dict[str, object]", metadata_response.json())
-
             finally:
                 metadata_response.close()
 
@@ -148,11 +146,10 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
                 raise OSError("Could not determine Google Drive file size")
 
             file.name = safe_filename(str(metadata.get("name") or file_id))
-            total_size: int = int(metadata["size"])
+            total_size = int(metadata["size"])
             output = temp_dir / file.name
             output.touch()
             download_task = create_task(to_thread(download_google_drive_file, link, output))
-
         else:
             response = await to_thread(
                 get,
@@ -164,23 +161,21 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             )
 
             if not response.ok:
-                remote_host: str = urlparse(response.url).hostname or parsed.hostname or "remote host"
-                status: int = response.status_code
-                reason: str = response.reason or "Request rejected"
-
+                remote_host = urlparse(response.url).hostname or parsed.hostname or "remote host"
+                status = response.status_code
+                reason = response.reason or "Request rejected"
                 if status == 403:
                     raise OSError(
                         f"Remote download host {remote_host} returned HTTP 403 Forbidden. "
                         "The host may require a valid download session or may reject requests "
                         "from this server's network."
                     )
-
                 raise OSError(f"Remote download host {remote_host} returned HTTP {status} {reason}.")
 
-            disposition: Message = Message()
+            disposition = Message()
             disposition["content-disposition"] = response.headers.get("Content-Disposition", "")
-            header_name: str | None = disposition.get_filename()
-            url_name: str = unquote(urlparse(response.url).path.rstrip("/").rsplit("/", 1)[-1])
+            header_name = disposition.get_filename()
+            url_name = unquote(urlparse(response.url).path.rstrip("/").rsplit("/", 1)[-1])
             file.name = safe_filename(header_name or url_name or file.name)
             response_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip() or None
             file.type = get_file_mime_type(file.name, response_type or file.type or "application/octet-stream")
@@ -190,38 +185,44 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
 
             try:
                 total_size = max(0, int(response.headers.get("Content-Length", "0")))
-
             except ValueError:
                 total_size = 0
 
             output = temp_dir / file.name
             output.touch()
-            download_response: Response = cast("Response", response)
+            download_response = cast("Response", response)
             download_task = create_task(to_thread(stream_response, download_response, output, link))
 
-        file.type = get_file_mime_type(file.name, response_type or file.type or "application/octet-stream") or "application/octet-stream"
-        progress: Progress = Progress(file.name, "Downloading and uploading file", total_size)
+        file.type = get_file_mime_type(
+            file.name, response_type or file.type or "application/octet-stream"
+        ) or "application/octet-stream"
+        file.modified_at = datetime.now(timezone.utc)
+
+        progress = Progress(file.name, "Downloading and uploading file", total_size)
         progress.download_active = True
         progress.download_total = total_size
+
+        # Reserve a FIFO upload position immediately, but start feeding the storage
+        # provider from the growing local file while the source download is still active.
         ticket = await enqueue_ingestion_upload(file.name, file.username)
         write_log(
             "INFO", data_center, "UPLOAD", file.username,
-            f"Direct-link import ready for queued upload name={file.name!r} source_host={urlparse(link).hostname!r}.",
+            f"Direct-link streaming import queued name={file.name!r} "
+            f"source_host={urlparse(link).hostname!r}.",
         )
-
 
         try:
             async with ingestion_upload_slot(ticket):
                 async for progress_value in upload_growing_file(
-                        file,
-                        output,
-                        data_center,
-                        progress,
-                        download_task,
-                        total_size,
-                        track_download=True,
-                        download_total=total_size,
-                        download_from_path=True,
+                    file,
+                    output,
+                    data_center,
+                    progress,
+                    download_task,
+                    total_size,
+                    track_download=True,
+                    download_total=total_size,
+                    download_from_path=True,
                 ):
                     yield progress_value
         finally:

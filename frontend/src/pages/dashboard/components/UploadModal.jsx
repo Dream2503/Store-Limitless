@@ -564,6 +564,26 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     batchId: createdBatchId,
                     transfer: {cancelToken: {cancelled: false, paused: false, pauseWaiters: []}, xhrs: new Set(), activeJobId: ""},
                 });
+                // Publish the task to the tray immediately after the server accepts
+                // it. Do not wait for the child worker or the tray's next polling tick.
+                window.dispatchEvent(new CustomEvent("storelimitless:upload-batch-created", {
+                    detail: {
+                        jobId: createdBatchId,
+                        name: taskName,
+                        kind: uploadMode,
+                        directory,
+                        dataCenter,
+                        totalItems: items.length,
+                        items: items.map((item) => ({
+                            name: String(item.name || "Preparing upload"),
+                            size: Math.max(0, Number(item.size) || 0),
+                            directory: String(item.directory || directory),
+                            data_center: String(item.data_center || dataCenter),
+                            status: "queued",
+                            message: "Preparing upload",
+                        })),
+                    },
+                }));
             };
 
             try {

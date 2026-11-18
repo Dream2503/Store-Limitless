@@ -8,7 +8,7 @@ provider-level chunk concurrency in each DataCenter implementation.
 from __future__ import annotations
 
 import os
-from asyncio import Task, CancelledError, create_task, gather, sleep
+from asyncio import Task, CancelledError, create_task, gather, sleep, current_task
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Final
@@ -29,8 +29,8 @@ _HEARTBEAT: Final[float] = 10.0
 
 try:
     UPLOAD_CONCURRENCY: Final[int] = max(
-        1, min(8, int(os.environ.get("STORELIMITLESS_FILE_UPLOADS", "3")))
-    )
+    1, min(8, int(os.environ.get("STORELIMITLESS_FILE_UPLOADS", "3")))
+)
 except ValueError:
     UPLOAD_CONCURRENCY = 3
 
@@ -75,7 +75,7 @@ _RENEW_LEASE: Final[str] = """
 local score = redis.call('ZSCORE', KEYS[1], ARGV[1])
 if not score then return 0 end
 redis.call('ZADD', KEYS[1], tonumber(ARGV[2]), ARGV[1])
-return redis.call('PEXPIRE', KEYS[1], ARGV[3])
+return 1
 """
 _RELEASE_LEASE: Final[str] = """
 -- storelimitless-ingestion-release-lease
@@ -167,9 +167,10 @@ async def _keep_lease_alive(ticket: IngestionUploadTicket, owner: Task[object]) 
     try:
         while True:
             await sleep(_HEARTBEAT)
+            from time import time
             renewed = await Redis.redis.eval(
-                _RENEW_LEASE, 1, _ACTIVE, ticket.ticket_id, ticket.ticket_id,
-                _LEASE_TTL_MS, _LEASE_TTL_MS,
+                _RENEW_LEASE, 1, _ACTIVE, ticket.ticket_id,
+                int(time() * 1000), _LEASE_TTL_MS,
             )
             if renewed:
                 continue
@@ -201,7 +202,7 @@ async def ingestion_upload_slot(ticket: IngestionUploadTicket) -> AsyncIterator[
                 _ACTIVE,
                 ticket.key,
                 ticket.ticket_id,
-                _LEASE_TTL_MS,
+                int(__import__("time").time() * 1000),
                 UPLOAD_CONCURRENCY,
                 _PREFIX,
             ))
@@ -223,9 +224,11 @@ async def ingestion_upload_slot(ticket: IngestionUploadTicket) -> AsyncIterator[
             await gather(ticket_heartbeat, return_exceptions=True)
             ticket.heartbeat = None
 
-        from time import time
+        owner = current_task()
+        if owner is None:
+            raise RuntimeError("An upload slot requires an active asyncio task")
         lease_heartbeat = create_task(
-            _keep_lease_alive(ticket, _owner_task()),
+            _keep_lease_alive(ticket, owner),
             name=f"ingestion-lease-{ticket.ticket_id}",
         )
         yield
@@ -246,12 +249,3 @@ async def ingestion_upload_slot(ticket: IngestionUploadTicket) -> AsyncIterator[
         else:
             await Redis.redis.eval(_CANCEL, 2, _QUEUE, ticket.key, ticket.ticket_id)
 
-
-def _owner_task() -> Task[object]:
-    """Return current task to the lease heartbeat without losing typing information."""
-
-    from asyncio import current_task
-    owner = current_task()
-    if owner is None:
-        raise RuntimeError("An upload slot requires an active asyncio task")
-    return owner

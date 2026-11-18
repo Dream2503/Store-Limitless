@@ -883,6 +883,23 @@ export default function ViewFile({active = true} = {}) {
             } catch {
                 // The root dashboard remains the safe fallback for invalid session data.
             }
+            // PDF.js can leave the SPA renderer in a blank state in this app.
+            // A clean document navigation is equivalent to the manual refresh that
+            // restores the dashboard, while sessionStorage keeps the folder and
+            // selection snapshot available to the dashboard on its next mount.
+            // Do not reload while browser-owned uploads still hold File objects:
+            // those transfers cannot survive a page unload.
+            const browserTransfers = window.__storeLimitlessUploadTransfers;
+            const hasActiveBrowserUploads = browserTransfers instanceof Map
+                && Array.from(browserTransfers.values()).some((transfer) =>
+                    transfer?.cancelToken && !transfer.cancelToken.cancelled
+                );
+
+            if (kind === "pdf" && !hasActiveBrowserUploads) {
+                window.location.replace(returnPath);
+                return;
+            }
+
             navigate(returnPath, {replace: true});
         };
 

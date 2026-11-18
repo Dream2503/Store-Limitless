@@ -534,18 +534,18 @@ function PDFDocumentViewer({streamUrl, fileName}) {
 
             <div className="flex items-center gap-1.5">
                 <button type="button" className={iconButtonClass} onClick={() => changeZoom(-0.15)}
-                        disabled={loading || (!fitToWidth && zoom <= 0.5)} aria-label="Zoom out" title="Zoom out">
+                        disabled={loading || Boolean(loadError) || (!fitToWidth && zoom <= 0.5)} aria-label="Zoom out" title="Zoom out">
                     <span className="material-symbols-outlined text-[18px]" aria-hidden="true">remove</span>
                 </button>
                 <span className="min-w-12 text-center text-xs tabular-nums text-[#c5d0c8]">
                     {fitToWidth ? "Fit width" : Math.round(zoom * 100) + "%"}
                 </span>
                 <button type="button" className={iconButtonClass} onClick={() => changeZoom(0.15)}
-                        disabled={loading || (!fitToWidth && zoom >= 3)} aria-label="Zoom in" title="Zoom in">
+                        disabled={loading || Boolean(loadError) || (!fitToWidth && zoom >= 3)} aria-label="Zoom in" title="Zoom in">
                     <span className="material-symbols-outlined text-[18px]" aria-hidden="true">add</span>
                 </button>
                 <button type="button" className={buttonClass} onClick={() => setFitToWidth(true)}
-                        disabled={loading || fitToWidth} title="Fit page to viewer width">
+                        disabled={loading || Boolean(loadError) || fitToWidth} title="Fit page to viewer width">
                     <span className="material-symbols-outlined text-[16px]" aria-hidden="true">fit_screen</span>
                     <span className="hidden sm:inline">Fit width</span>
                 </button>
@@ -579,7 +579,7 @@ function PDFDocumentViewer({streamUrl, fileName}) {
 }
 
 /**
- * Render a browser-native image, PDF, or audio preview from a signed stream URL.
+ * Render an image, in-app PDF, or audio preview from a signed stream URL.
  * Image formats are displayed as contained media so the full photo remains visible.
  * @param {{fileId: string, navigate: Function, type: "image" | "pdf" | "audio", fileName?: string}} props
  */

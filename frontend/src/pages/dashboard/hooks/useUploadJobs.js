@@ -2,6 +2,9 @@ import {useEffect, useRef, useState} from "react";
 import {API_URL} from "../constants.js";
 import {getToken} from "../utils.js";
 
+const ACTIVE_POLL_INTERVAL_MS = 1000;
+const IDLE_POLL_INTERVAL_MS = 10000;
+
 /** Polls account-scoped batch tasks and retains terminal results until the user dismisses them. */
 export default function useUploadJobs(refreshDirectory) {
     const [uploadJobs, setUploadJobs] = useState([]);
@@ -18,8 +21,21 @@ export default function useUploadJobs(refreshDirectory) {
 
         const scheduleNextPoll = (immediate = false) => {
             if (cancelled) return;
-            if (pollTimer !== null) window.clearTimeout(pollTimer);
-            const delay = immediate ? 0 : hasActiveUploads.current ? 500 : 2000;
+            if (pollTimer !== null) {
+                window.clearTimeout(pollTimer);
+                pollTimer = null;
+            }
+
+            // Idle tabs do not need to query Redis while hidden. Active tabs keep
+            // polling in the background so a cancellation made on another device
+            // can still stop an in-progress transfer.
+            if (document.visibilityState !== "visible" && !hasActiveUploads.current) return;
+
+            const delay = immediate
+                ? 0
+                : hasActiveUploads.current
+                    ? ACTIVE_POLL_INTERVAL_MS
+                    : IDLE_POLL_INTERVAL_MS;
             pollTimer = window.setTimeout(refreshUploadBatches, delay);
         };
 
@@ -54,7 +70,12 @@ export default function useUploadJobs(refreshDirectory) {
         };
 
         const handleVisibilityChange = () => {
-            if (document.visibilityState === "visible") requestImmediateRefresh();
+            if (document.visibilityState === "visible") {
+                requestImmediateRefresh();
+            } else if (!hasActiveUploads.current && pollTimer !== null) {
+                window.clearTimeout(pollTimer);
+                pollTimer = null;
+            }
         };
 
         const persistTerminalBatch = (batch, status, message, items) => {
@@ -293,8 +314,8 @@ export default function useUploadJobs(refreshDirectory) {
                         return normalized;
                     }
                 }));
-                // Refresh frequently only while work is active. Idle trays poll less often,
-                // reducing unnecessary API and Redis reads.
+                // Active batches stay near-real-time; while idle, the longer interval
+                // still discovers work started by another device without constant empty polls.
                 hasActiveUploads.current = batches.some((batch) => batch.status === "queued" || batch.status === "uploading");
 
                 // Cancellation and Clear all can be initiated from another signed-in device.

@@ -6,8 +6,11 @@ import re
 from contextvars import ContextVar, Token
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 from urllib.parse import urlsplit, urlunsplit
+
+JsonObject: TypeAlias = dict[str, object]
+
 
 if TYPE_CHECKING:
     from core.data_center import DataCenter

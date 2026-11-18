@@ -7,10 +7,11 @@ from collections.abc import Coroutine
 from concurrent.futures import Future
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
+from starlette.types import Scope
 
 from backend.database.models import Directory, File
 from core.config import TRANSFER_PATH
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
     from backend.ftp.filesystem.download import FTPDownloadFile
     from backend.ftp.filesystem.filesystem import StoreLimitlessFS
 
-T = TypeVar("T")
+T: TypeVar = TypeVar("T")
 
 
 async def request_async(self: FTPDownloadFile, start: int, end: int) -> bytes:
@@ -29,7 +30,7 @@ async def request_async(self: FTPDownloadFile, start: int, end: int) -> bytes:
     from backend.server.routers.public_routes import public_stream
 
     path: str = f"/public/stream/{self.token}"
-    scope: dict[str, Any] = {
+    scope: Scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
@@ -104,7 +105,7 @@ def fill_buffer(self: FTPDownloadFile, start: int) -> None:
 class FilesystemUtils:
     """Provide shared database, transfer, and path operations for the FTP filesystem."""
 
-    def run(self: StoreLimitlessFS, coro: Coroutine[Any, Any, T]) -> T:
+    def run(self: StoreLimitlessFS, coro: Coroutine[object, object, T]) -> T:
         """Run an asynchronous database operation and wait for its result."""
 
         future: Future[T] = asyncio.run_coroutine_threadsafe(coro, self.event_loop)

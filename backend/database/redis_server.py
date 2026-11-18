@@ -6,12 +6,12 @@ from datetime import datetime
 from time import monotonic, time
 from json import dumps, loads
 from pathlib import Path
-from typing import Any, Literal, cast, TYPE_CHECKING
+from typing import Literal, Never, cast, TYPE_CHECKING
 
 import redis.asyncio
 
 from backend.database.connection import POOL, DirectoryDict, FileDict
-from core.utils import write_log
+from core.utils import JsonObject, write_log
 from core.utils.progress import Progress
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ def _metric_stage(progress: Progress) -> str:
     return message.split("(", 1)[0].strip() or "starting"
 
 
-def _file_progress_counts(items: list[dict[str, Any]]) -> dict[str, int]:
+def _file_progress_counts(items: list[JsonObject]) -> dict[str, int]:
     """Summarize ingestion file states for the persisted top-level job."""
 
     statuses = [str(item.get("status") or "queued").casefold() for item in items]
@@ -60,7 +60,7 @@ def _file_progress_counts(items: list[dict[str, Any]]) -> dict[str, int]:
 class Redis:
     """Manage the shared asynchronous Redis client and serialize application model objects to and from Redis keys and hashes."""
 
-    def __new__(cls, *args: Any, **kwargs: Any) -> Redis:
+    def __new__(cls, *args: object, **kwargs: object) -> Never:
         """Prevent instantiation because Redis exposes class-level operations only."""
 
         raise TypeError("Redis cannot be instantiated")
@@ -92,14 +92,14 @@ class Redis:
         write_log("INFO", Database, "REDIS", "server", "Connection pool closed")
 
     @classmethod
-    async def get_json(cls, key: str) -> Any | None:
+    async def get_json(cls, key: str) -> object | None:
         """Read an arbitrary JSON-serializable value stored under a Redis key."""
 
         value: str | None = await cls.redis.get(key)
         return loads(value) if value is not None else None
 
     @classmethod
-    async def set_json(cls, key: str, value: Any, *, ex: int | None = None, nx: bool = False) -> bool:
+    async def set_json(cls, key: str, value: object, *, ex: int | None = None, nx: bool = False) -> bool:
         """Store JSON data, optionally with an expiry or SET-NX semantics."""
 
         result = await cls.redis.set(key, dumps(value, default=str), ex=ex, nx=nx)
@@ -151,15 +151,15 @@ class Redis:
                 progress.ingestion_type = str(data.get("ingestion_type", "") or "")
                 progress.last_updated_at = max(0.0, float(data.get("last_updated_at", 0) or 0))
                 try:
-                    raw_counts: Any = loads(data.get("file_counts", "{}"))
-                    progress.file_counts = raw_counts if isinstance(raw_counts, dict) else {}
+                    raw_counts: object = loads(data.get("file_counts", "{}"))
+                    progress.file_counts = cast(dict[str, int], raw_counts) if isinstance(raw_counts, dict) else {}
                 except (TypeError, ValueError):
                     progress.file_counts = {}
                 raw_torrent_items: str = data.get("torrent_items", "[]")
 
                 try:
-                    torrent_items: Any = loads(raw_torrent_items)
-                    progress.torrent_items = torrent_items if isinstance(torrent_items, list) else []
+                    torrent_items: object = loads(raw_torrent_items)
+                    progress.torrent_items = cast(list[JsonObject], torrent_items) if isinstance(torrent_items, list) else []
 
                 except (TypeError, ValueError):
                     progress.torrent_items = []
@@ -184,7 +184,7 @@ class Redis:
                     if not values:
                         return []
 
-                records: list[dict[str, Any]] = [loads(value) for value in values]
+                records: list[JsonObject] = [cast(JsonObject, loads(value)) for value in values]
 
                 if type == "Directory":
                     items: list[Directory] | list[File] = [

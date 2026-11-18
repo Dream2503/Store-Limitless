@@ -1,0 +1,14 @@
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["ANN", "UP", "TCH"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+ignore_missing_imports = true
+show_error_codes = true
+pretty = true
+files = ["backend", "core"]

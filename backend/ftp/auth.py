@@ -7,6 +7,8 @@ from pyftpdlib.authorizers import AuthenticationFailed, DummyAuthorizer
 
 from backend.database.models import User
 from backend.server.security import verify_password
+from core.data_center import Database
+from core.utils import write_log
 
 
 class StoreLimitlessAuthorizer(DummyAuthorizer):
@@ -18,9 +20,11 @@ class StoreLimitlessAuthorizer(DummyAuthorizer):
         user: User | None = run_coroutine_threadsafe(User.get(username), handler.event_loop).result()
 
         if user is None or not verify_password(password, user.password):
+            write_log("WARNING", Database, "FTP AUTH", username, "Authentication rejected")
             raise AuthenticationFailed("Authentication failed.")
 
         handler.store_limitless_user = user
+        write_log("INFO", Database, "FTP AUTH", username, "Authentication successful")
 
     def get_home_dir(self, username: str) -> str:
         """Return the virtual root exposed to an authenticated FTP user."""

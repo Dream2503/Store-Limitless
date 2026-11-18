@@ -11,6 +11,8 @@ from backend.database.models import Directory, File, User
 from backend.database.redis_server import Redis
 from backend.server.jwt_handler import OAuth2_scheme, create_access_token, get_current_user, verify_token
 from backend.server.security import hash_password, verify_password
+from core.data_center import Database
+from core.utils import write_log
 
 router: APIRouter = APIRouter()
 
@@ -22,10 +24,12 @@ async def register(user: User) -> JSONResponse:
     user.verify()
 
     if await User.get(user.username):
+        write_log("WARNING", Database, "AUTH", user.username, "Registration rejected: username already exists")
         raise HTTPException(status_code=400, detail="Username already registered")
 
     user.password = hash_password(user.password)
     await user.save()
+    write_log("INFO", Database, "AUTH", user.username, "Account registration completed")
     return JSONResponse({"message": "User registered successfully"})
 
 
@@ -39,8 +43,10 @@ async def login(username: str, password: str) -> tuple[dict[str, str], dict[str,
     user: User | None = await User.get(username)
 
     if not user or not verify_password(password, user.password):
+        write_log("WARNING", Database, "AUTH", username, "Login rejected: invalid username or password")
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
+    write_log("INFO", Database, "AUTH", user.username, "Login successful")
     return (
         {
             "message": "Login successful",
@@ -60,6 +66,7 @@ async def logout(token: str = Depends(OAuth2_scheme)) -> JSONResponse:
 
     username = verify_token(token)
     if username is None:
+        write_log("INFO", Database, "AUTH", "unknown", "Logout request used an already expired or invalid session")
         return JSONResponse({"message": "Session already expired"})
 
     session_hash = sha256(token.encode("utf-8")).hexdigest()
@@ -68,6 +75,7 @@ async def logout(token: str = Depends(OAuth2_scheme)) -> JSONResponse:
         {"username": username, "revoked": True},
         ex=86400,
     )
+    write_log("INFO", Database, "AUTH", username, "Session revoked; signed out")
     return JSONResponse({"message": "Signed out"})
 
 

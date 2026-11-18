@@ -5,7 +5,7 @@ cached in Redis.
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -192,7 +192,7 @@ class Directory(BaseModel):
                     await Redis.delete(f"user:{self.username}:directories {self.id}", "Directory")
                     return
 
-                removed_files: list[dict[str, Any]] = connection.execute(
+                removed_files: list[dict[str, int | str]] = connection.execute(
                     """
                     DELETE
                     FROM files

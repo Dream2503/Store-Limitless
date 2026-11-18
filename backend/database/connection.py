@@ -4,7 +4,7 @@ the users, directories, and files tables when imported.
 """
 
 from datetime import datetime
-from typing import cast
+from typing import TypeAlias, cast
 
 from psycopg import Connection
 from psycopg.rows import dict_row
@@ -13,9 +13,9 @@ from psycopg_pool import ConnectionPool
 from core.utils.env import DATABASE_URL
 
 try:
-    UserDict = dict[str, str | datetime]
-    DirectoryDict = dict[str, int | str | datetime | None]
-    FileDict = dict[str, int | str | datetime | list[str] | None]
+    UserDict: TypeAlias = dict[str, str | datetime]
+    DirectoryDict: TypeAlias = dict[str, int | str | datetime | None]
+    FileDict: TypeAlias = dict[str, int | str | datetime | list[str] | None]
 
     POOL: ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]] = cast(
         ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]], cast(object, ConnectionPool(
@@ -76,4 +76,14 @@ try:
         connection.commit()
 
 except Exception as e:
-    print(f"Failed to connect: {e}")
+    from core.data_center import Database
+    from core.utils import sanitize_sensitive_urls, write_log
+
+    write_log(
+        "ERROR",
+        Database,
+        "DATABASE INIT",
+        "server",
+        f"PostgreSQL connection or schema initialization failed: {type(e).__name__}: "
+        f"{sanitize_sensitive_urls(str(e))[:300]}",
+    )

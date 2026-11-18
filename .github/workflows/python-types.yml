@@ -1,0 +1,30 @@
+name: Python type checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13.7"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install type-checking dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Compile Python source
+        run: python -m compileall -q backend core
+      - name: Check all annotations
+        run: ruff check --select ANN .
+      - name: Run Ruff rules
+        run: ruff check .
+      - name: Run strict mypy
+        run: mypy --strict backend core

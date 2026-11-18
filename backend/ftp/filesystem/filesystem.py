@@ -18,6 +18,8 @@ from backend.ftp.filesystem.download import FTPDownloadFile
 from backend.ftp.filesystem.upload import FTPUploadFile
 from backend.ftp.filesystem.utils import FilesystemUtils
 from core.config import TRANSFER_PATH
+from core.data_center import Database
+from core.utils import write_log
 
 if TYPE_CHECKING:
     from backend.ftp.handler import StoreLimitlessHandler
@@ -179,6 +181,7 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
             raise OSError(2, "No such file or directory", parent)
 
         self.run(Directory(path=directory.path / name, modified_at=datetime.now(timezone.utc), username=self.user.username).save())
+        write_log("INFO", Database, "FTP FILESYSTEM", self.user.username, f"Created directory path={path}")
 
     def remove(self, path: str) -> None:
         """Move a file to the user's trash."""
@@ -193,6 +196,7 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
             raise OSError(2, "No such file or directory", path)
 
         self.run(file.move_to_trash())
+        write_log("INFO", Database, "FTP FILESYSTEM", self.user.username, f"Moved file to trash path={path} file_id={file.id}")
 
     def rmdir(self, path: str) -> None:
         """Move a non-root, non-home directory to the user's trash."""
@@ -213,11 +217,13 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
             raise OSError(1, "Permission denied", path)
 
         self.run(directory.move_to_trash())
+        write_log("INFO", Database, "FTP FILESYSTEM", self.user.username, f"Moved directory to trash path={path} directory_id={directory.id}")
 
     def rename(self, src: str, dst: str) -> None:
         """Rename or move a file or directory to a destination path."""
 
         self.rename_path(src, dst)
+        write_log("INFO", Database, "FTP FILESYSTEM", self.user.username, f"Renamed/moved virtual path src={src!r} dst={dst!r}")
 
     def chmod(self, path: str, mode: int) -> None:
         """Reject permission changes, which the virtual filesystem does not support."""
@@ -238,6 +244,7 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
             if file is None:
                 raise OSError(2, "No such file or directory", filename)
 
+            write_log("INFO", Database, "FTP DOWNLOAD", self.user.username, f"Opened file_id={file.id} name={file.name!r} size={file.size}")
             return FTPDownloadFile(file, self.event_loop)
 
         if "w" in mode or "a" in mode:

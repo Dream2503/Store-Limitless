@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from asyncio import CancelledError, Queue, Task, create_task, gather, sleep, to_thread
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from shutil import rmtree
 from re import fullmatch
 from time import monotonic, sleep as thread_sleep
 from traceback import format_exc
-from typing import Any, AsyncGenerator, Callable, cast
+from typing import Protocol, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -31,7 +32,7 @@ from yt_dlp import YoutubeDL
 from backend.database.models import Directory, File
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter
-from core.utils import sanitize_sensitive_urls, write_log
+from core.utils import JsonObject, sanitize_sensitive_urls, write_log
 from core.utils.progress import Progress
 from core.utils.upload_manager import (
     IngestionUploadTicket,
@@ -84,6 +85,41 @@ def download_google_drive_file(link: str, output: Path) -> None:
 
     if not output.is_file():
         raise OSError("Google Drive download failed")
+
+
+
+class TorrentFileStorage(Protocol):
+    """Structural interface for libtorrent's file-storage view."""
+
+    def num_files(self) -> int: ...
+    def file_path(self, index: int) -> str: ...
+    def file_size(self, index: int) -> int: ...
+    def pad_file_at(self, index: int) -> bool: ...
+
+
+class TorrentInfo(Protocol):
+    """Structural interface for libtorrent torrent metadata."""
+
+    def files(self) -> TorrentFileStorage: ...
+    def name(self) -> str: ...
+
+
+class TorrentHandle(Protocol):
+    """Structural interface for the small part of a libtorrent handle used here."""
+
+    def status(self) -> object: ...
+    def torrent_file(self) -> TorrentInfo: ...
+    def file_progress(self) -> Sequence[int]: ...
+    def prioritize_files(self, priorities: Sequence[int]) -> None: ...
+    def pause(self) -> None: ...
+
+
+class TorrentSession(Protocol):
+    """Structural interface for the libtorrent session operations used here."""
+
+    def add_torrent(self, parameters: Mapping[str, object]) -> TorrentHandle: ...
+    def remove_torrent(self, handle: TorrentHandle) -> None: ...
+
 
 MAX_STREAM_RETRIES: int = 50
 STREAM_RETRY_MAX_DELAY: float = 5.0
@@ -317,10 +353,10 @@ def update_progress_name(file: File, name: str, progress_state: ProcessedDownloa
     progress_state.current.name = name
 
 
-def get_download_name(data: dict[str, Any]) -> str | None:
+def get_download_name(data: Mapping[str, object]) -> str | None:
     """Derive a stable output filename from yt-dlp's hook data."""
 
-    info: dict[str, Any] = data.get("info_dict") or {}
+    info: JsonObject = data.get("info_dict") or {}
     raw_filename: str = str(data.get("tmpfilename") or data.get("filename") or "")
 
     if not raw_filename:
@@ -362,10 +398,10 @@ def get_download_name(data: dict[str, Any]) -> str | None:
     return f"{stem}{extension}" if extension else stem
 
 
-def youtube_progress_hook(data: dict[str, Any], *, file: File, progress_state: ProcessedDownloadProgress) -> None:
+def youtube_progress_hook(data: Mapping[str, object], *, file: File, progress_state: ProcessedDownloadProgress) -> None:
     """Update video/audio progress from yt-dlp's download hook."""
 
-    info: dict[str, Any] = data.get("info_dict") or {}
+    info: JsonObject = data.get("info_dict") or {}
     resolved_name: str | None = get_download_name(data)
 
     if resolved_name is not None and resolved_name != file.name:
@@ -397,7 +433,7 @@ def youtube_progress_hook(data: dict[str, Any], *, file: File, progress_state: P
         progress.transfer = progress.total
 
 
-def youtube_postprocessor_hook(data: dict[str, Any], *, progress_state: ProcessedDownloadProgress) -> None:
+def youtube_postprocessor_hook(data: Mapping[str, object], *, progress_state: ProcessedDownloadProgress) -> None:
     """Update progress while yt-dlp merges audio and video streams."""
 
     if data.get("status") == "started":
@@ -411,7 +447,7 @@ def youtube_postprocessor_hook(data: dict[str, Any], *, progress_state: Processe
 def download_youtube_file(link: str, temp_dir: Path, ffmpeg_path: Path, file: File, progress_state: ProcessedDownloadProgress) -> None:
     """Run yt-dlp synchronously; the caller runs this helper in a worker thread."""
 
-    options: dict[str, Any] = {
+    options: JsonObject = {
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
@@ -456,7 +492,7 @@ def torrent_relative_parts(raw_path: str) -> tuple[str, ...]:
     return parts
 
 
-def raise_torrent_error(status: Any) -> None:
+def raise_torrent_error(status: object) -> None:
     """Raise only for a non-zero libtorrent error code.
 
     Some libtorrent bindings expose ``errc`` as an error_code object whose
@@ -464,12 +500,12 @@ def raise_torrent_error(status: Any) -> None:
     code can stringify to ``Success`` while still evaluating as truthy.
     """
 
-    error_code: Any | None = getattr(status, "errc", None)
+    error_code: object | None = getattr(status, "errc", None)
 
     if error_code is None:
         return
 
-    code_value: Any | None = getattr(error_code, "value", None)
+    code_value: object | None = getattr(error_code, "value", None)
 
     if callable(code_value):
         try:
@@ -498,11 +534,11 @@ def raise_torrent_error(status: Any) -> None:
     raise OSError(f"Torrent engine error: {detail}")
 
 
-async def wait_for_torrent_metadata(handle: Any, progress: Progress, fallback_name: str) -> AsyncGenerator[Progress, None]:
+async def wait_for_torrent_metadata(handle: TorrentHandle, progress: Progress, fallback_name: str) -> AsyncGenerator[Progress, None]:
     """Wait for magnet metadata and report peer discovery while waiting."""
 
     while True:
-        status: Any = handle.status()
+        status: object = handle.status()
         raise_torrent_error(status)
 
         if bool(getattr(status, "has_metadata", False)):
@@ -518,18 +554,18 @@ async def wait_for_torrent_metadata(handle: Any, progress: Progress, fallback_na
 
 
 async def wait_for_torrent_download(
-        handle: Any,
+        handle: object,
         progress: Progress,
         torrent_name: str,
         expected_total: int,
         processed_download: dict[str, bool],
-        torrent_files: Any | None = None,
+        torrent_files: TorrentFileStorage | None = None,
         selected_indices: set[int] | None = None,
 ) -> AsyncGenerator[Progress, None]:
     """Report torrent download stages until libtorrent confirms completion."""
 
     while True:
-        status: Any = handle.status()
+        status: object = handle.status()
         raise_torrent_error(status)
 
         if not bool(getattr(status, "has_metadata", False)):
@@ -547,8 +583,8 @@ async def wait_for_torrent_download(
             if torrent_files is not None:
                 try:
                     file_progress: list[int] = [int(value) for value in handle.file_progress()]
-                    padding_check: Callable = cast(Callable, getattr(torrent_files, "pad_file_at", None))
-                    item_progress: list[dict[str, Any]] = []
+                    padding_check: Callable[[int], bool] | None = cast(Callable[[int], bool] | None, getattr(torrent_files, "pad_file_at", None))
+                    item_progress: list[JsonObject] = []
 
                     for file_index in range(int(torrent_files.num_files())):
                         if (
@@ -624,30 +660,30 @@ async def ensure_torrent_directory(username: str, base_directory: Directory, rel
     return current
 
 
-async def preview_torrent_files(link: str, timeout_seconds: int = 120) -> dict[str, Any]:
+async def preview_torrent_files(link: str, timeout_seconds: int = 120) -> JsonObject:
     """Read magnet metadata without downloading the torrent payload."""
-    session: Any | None = None
-    handle: Any | None = None
+    session: TorrentSession | None = None
+    handle: TorrentHandle | None = None
     preview_dir: Path = TRANSFER_PATH / "torrent-preview" / uuid4().hex
     preview_dir.mkdir(parents=True, exist_ok=True)
     deadline: float = monotonic() + timeout_seconds
 
     try:
-        session = libtorrent.session({
+        session = cast(TorrentSession, libtorrent.session({
             "listen_interfaces": "0.0.0.0:0",
             "enable_dht": True,
             "enable_lsd": True,
             "enable_upnp": True,
             "enable_natpmp": True,
-        })
+        }))
         handle = session.add_torrent({"url": link, "save_path": str(preview_dir)})
 
         while True:
-            status: Any = handle.status()
+            status: object = handle.status()
             raise_torrent_error(status)
 
             if bool(getattr(status, "has_metadata", False)):
-                info: Any = handle.torrent_file()
+                info: TorrentInfo = handle.torrent_file()
                 handle.prioritize_files([0] * int(info.files().num_files()))
                 break
 
@@ -656,11 +692,11 @@ async def preview_torrent_files(link: str, timeout_seconds: int = 120) -> dict[s
 
             await sleep(0.5)
 
-        info: Any = handle.torrent_file()
-        torrent_files: Any = info.files()
+        info: TorrentInfo = handle.torrent_file()
+        torrent_files: object = info.files()
         torrent_name: str = safe_torrent_component(str(info.name()))
         padding_check: Callable = cast(Callable, getattr(torrent_files, "pad_file_at", None))
-        entries: list[dict[str, Any]] = []
+        entries: list[JsonObject] = []
 
         for index in range(int(torrent_files.num_files())):
             if callable(padding_check) and padding_check(index):
@@ -685,7 +721,7 @@ async def preview_torrent_files(link: str, timeout_seconds: int = 120) -> dict[s
 
 
 def get_downloadable_torrent_files(
-        torrent_files: Any,
+        torrent_files: TorrentFileStorage,
         temp_dir: Path,
         torrent_name_raw: str,
         torrent_name: str,
@@ -749,7 +785,7 @@ async def download_torrent_to_disk(
         temp_dir: Path,
         progress: Progress,
         fallback_name: str,
-        result: dict[str, Any],
+        result: JsonObject,
         selected_indices: set[int] | None = None,
 ) -> AsyncGenerator[Progress, None]:
     """Download a complete torrent and return its metadata through ``result``."""
@@ -760,12 +796,12 @@ async def download_torrent_to_disk(
     except ImportError as error:
         raise RuntimeError("Torrent downloads require the optional 'python-libtorrent' dependency") from error
 
-    torrent_session: Any | None = None
-    handle: Any | None = None
+    torrent_session: TorrentSession | None = None
+    handle: object | None = None
     processed_download: bool = False
 
     try:
-        torrent_session = libtorrent.session({
+        torrent_session = cast(TorrentSession, libtorrent.session({
             "listen_interfaces": "0.0.0.0:0",
             "enable_dht": True,
             "enable_lsd": True,
@@ -777,8 +813,8 @@ async def download_torrent_to_disk(
         async for progress_value in wait_for_torrent_metadata(handle, progress, fallback_name):
             yield progress_value
 
-        torrent_info: Any = handle.torrent_file()
-        torrent_files: Any = torrent_info.files()
+        torrent_info: TorrentInfo = handle.torrent_file()
+        torrent_files: object = torrent_info.files()
         torrent_name_raw: str = str(torrent_info.name())
         torrent_name_parts: tuple[str, ...] = torrent_relative_parts(torrent_name_raw)
 
@@ -882,14 +918,14 @@ def _public_google_drive_folder_title(link: str) -> str:
 def _download_google_drive_entry(
         file_id: str,
         output_path: Path,
-        item: dict[str, Any],
+        item: JsonObject,
 ) -> Path:
     """Download one public Google Drive file using gdown into a unique staging path."""
 
     parameters = inspect.signature(gdown.download).parameters
     output: str = str(output_path) if output_path.suffix else f"{output_path.parent}{os.sep}"
 
-    kwargs: dict[str, Any] = {
+    kwargs: JsonObject = {
         "id": file_id,
         "output": output,
         "quiet": True,
@@ -956,10 +992,10 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
     progress = Progress(file.name or "Google Drive folder", "Discovering folder contents", 0)
     progress.ingestion_type = "google_drive_folder"
     progress.download_active = True
-    items: list[dict[str, Any]] = []
+    items: list[JsonObject] = []
     tickets: dict[int, IngestionUploadTicket] = {}
-    ready_queue: Queue[Any] = Queue(maxsize=max_downloads * 2)
-    download_queue: Queue[Any] = Queue()
+    ready_queue: Queue[tuple[int, Path, Directory, JsonObject, IngestionUploadTicket] | None] = Queue(maxsize=max_downloads * 2)
+    download_queue: Queue[tuple[int, str, tuple[str, ...], Directory, JsonObject] | None] = Queue()
     download_workers: list[Task[None]] = []
     coordinator: Task[None] | None = None
     uploader: Task[None] | None = None
@@ -1222,7 +1258,7 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
         base_directory = cast(Directory, await Directory.get(file.username, did=file.directory_id))
         await ensure_torrent_directory(file.username, base_directory, (root_name,))
 
-        descriptors: list[tuple[Any, tuple[str, ...], Directory]] = []
+        descriptors: list[tuple[object, tuple[str, ...], Directory]] = []
         for index, entry in enumerate(entries):
             file_id = str(getattr(entry, "id", "") or "")
             raw_path = str(getattr(entry, "path", "") or "")
@@ -1356,17 +1392,17 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
     progress: Progress = Progress(file.name or "Torrent", "Connecting to torrent network", 0)
     progress.ingestion_type = "torrent"
     progress.download_active = True
-    torrent_session: Any | None = None
-    handle: Any | None = None
+    torrent_session: object | None = None
+    handle: object | None = None
     active_uploads: dict[int, Task[File]] = {}
-    pending_uploads: dict[int, tuple[File, Path, dict[str, Any], str, int, int, IngestionUploadTicket]] = {}
+    pending_uploads: dict[int, tuple[File, Path, JsonObject, str, int, int, IngestionUploadTicket]] = {}
     max_concurrent_file_uploads: int = max(1, min(2, int(data_center.MAX_PARALLEL_UPLOADS)))
-    tray_items: list[dict[str, Any]] = []
+    tray_items: list[JsonObject] = []
 
     async def upload_completed_file(
             torrent_file: File,
             local_path: Path,
-            item: dict[str, Any],
+            item: JsonObject,
             relative_name: str,
             local_size: int,
             sequence: int,
@@ -1475,8 +1511,8 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
         async for progress_value in wait_for_torrent_metadata(handle, progress, file.name or "Torrent"):
             yield progress_value
 
-        torrent_info: Any = handle.torrent_file()
-        torrent_files: Any = torrent_info.files()
+        torrent_info: object = handle.torrent_file()
+        torrent_files: object = torrent_info.files()
         torrent_name_raw: str = str(torrent_info.name())
         torrent_name_parts: tuple[str, ...] = torrent_relative_parts(torrent_name_raw)
 
@@ -1562,7 +1598,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                     first_saved_id = saved_file.id
 
             start_pending_uploads()
-            status: Any = handle.status()
+            status: object = handle.status()
             raise_torrent_error(status)
             raw_file_progress = handle.file_progress()
             file_progress = [max(0, int(value)) for value in raw_file_progress]

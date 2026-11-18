@@ -8,13 +8,13 @@ or archives on disk.
 from __future__ import annotations
 
 from asyncio import Semaphore, Task, create_task, gather
-from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import Final, TypeVar
 
-T = TypeVar("T")
+T: TypeVar = TypeVar("T")
 
-DOWNLOAD_CONCURRENCY = 1
-_DOWNLOAD_SLOTS = Semaphore(DOWNLOAD_CONCURRENCY)
+DOWNLOAD_CONCURRENCY: Final[int] = 1
+_DOWNLOAD_SLOTS: Final[Semaphore] = Semaphore(DOWNLOAD_CONCURRENCY)
 
 
 async def download_with_slot(operation: Callable[[], Awaitable[T]]) -> T:
@@ -29,7 +29,7 @@ async def ordered_parallel_downloads(
     operation: Callable[[int], Awaitable[T]],
     *,
     concurrency: int = DOWNLOAD_CONCURRENCY,
-) :
+) -> AsyncGenerator[T, None]:
     """Fetch links sequentially and yield results in index order."""
 
     if concurrency < 1:

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import re
-from asyncio import Task, gather, sleep
+from asyncio import CancelledError, Task, gather, sleep
 from pathlib import Path
 from time import time
-from typing import Any, cast, Iterable
+from collections.abc import Iterable
+from typing import cast
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 
 from backend.database.models import File
 from backend.database.redis_server import Redis
+from core.data_center import Database
+from core.utils import sanitize_sensitive_urls, write_log
 from core.transfer import file_upload
 from core.utils.progress import Progress
 
@@ -44,7 +47,7 @@ def terminal_upload_job_key(job_id: str) -> str:
     return f"upload:terminal:{job_id}"
 
 
-def resolve_upload_job_status(message: str, metadata: dict[str, Any]) -> str:
+def resolve_upload_job_status(message: str, metadata: dict[str, object]) -> str:
     """Classify only actual terminal messages; intermediate torrent stages aren't completion."""
 
     lowered: str = message.lower()
@@ -76,7 +79,7 @@ async def register_upload_job(job_id: str, *, username: str, name: str, kind: st
                               batch_id: str = "") -> None:
     """Persist account ownership and display metadata so any signed-in device can find a job."""
 
-    metadata: dict[str, Any] = {
+    metadata: dict[str, object] = {
         "job_id": job_id,
         "username": username,
         "name": name,
@@ -110,24 +113,33 @@ async def register_upload_job(job_id: str, *, username: str, name: str, kind: st
                 await Redis.set(job_id, Progress(name, "Upload cancelled", 0))
                 await cleanup_upload_artifacts(job_id)
 
+    write_log(
+        "INFO",
+        Database,
+        "UPLOAD STATE",
+        username,
+        f"Registered job_id={job_id} kind={kind} data_center={data_center} "
+        f"name={name!r} expected_bytes={max(0, int(total))} batch_id={batch_id or '-'}",
+    )
 
-async def get_upload_job_metadata(job_id: str) -> dict[str, Any] | None:
+
+async def get_upload_job_metadata(job_id: str) -> dict[str, object] | None:
     """Return persisted metadata for a job, if it still exists."""
 
-    value: Any = await Redis.get_json(upload_job_key(job_id))
-    return value if isinstance(value, dict) else None
+    value: object | None = await Redis.get_json(upload_job_key(job_id))
+    return cast(dict[str, object], value) if isinstance(value, dict) else None
 
 
-async def list_user_upload_jobs(username: str) -> list[dict[str, Any]]:
+async def list_user_upload_jobs(username: str) -> list[dict[str, object]]:
     """Return this user's upload jobs with current Redis-backed progress values."""
 
     index_key: str = user_upload_jobs_key(username)
     raw_job_ids: set[str] = await Redis.redis.smembers(index_key)
-    jobs: list[dict[str, Any]] = []
+    jobs: list[dict[str, object]] = []
 
     for raw_job_id in raw_job_ids:
         job_id: str = str(raw_job_id)
-        metadata: dict[str, Any] | None = await get_upload_job_metadata(job_id)
+        metadata: dict[str, object] | None = await get_upload_job_metadata(job_id)
 
         if metadata is None or metadata.get("username") != username:
             await Redis.redis.srem(index_key, job_id)
@@ -210,7 +222,7 @@ async def wait_for_all_chunks(job_id: str, file: File) -> None:
     """Wait on Redis-backed contiguous-byte metadata rather than an in-memory Event."""
 
     while True:
-        job_metadata: dict[str, Any] | None = await get_upload_job_metadata(job_id)
+        job_metadata: dict[str, object] | None = await get_upload_job_metadata(job_id)
 
         if job_metadata and bool(job_metadata.get("cancelled")):
             raise RuntimeError("Upload cancelled")
@@ -218,7 +230,7 @@ async def wait_for_all_chunks(job_id: str, file: File) -> None:
         if job_metadata and bool(job_metadata.get("failed")):
             raise RuntimeError("Upload failed: browser transfer stopped")
 
-        state: Any = await Redis.get_json(upload_session_key(job_id))
+        state: object | None = await Redis.get_json(upload_session_key(job_id))
 
         if not isinstance(state, dict):
             raise TimeoutError("Upload session expired before all chunks arrived")
@@ -242,15 +254,15 @@ async def record_written_range(job_id: str, start: int, end: int) -> int:
     """Merge a completed chunk range atomically in Redis and return contiguous bytes."""
 
     session_key: str = upload_session_key(job_id)
-    lock: Any = Redis.redis.lock(f"upload:lock:{job_id}", timeout=30, blocking_timeout=30)
+    lock: object = Redis.redis.lock(f"upload:lock:{job_id}", timeout=30, blocking_timeout=30)
 
     async with lock:
-        state: Any = await Redis.get_json(session_key)
+        state: object | None = await Redis.get_json(session_key)
 
         if not isinstance(state, dict):
             raise HTTPException(status_code=404, detail="Upload session expired")
 
-        ranges_raw: Any = state.get("ranges", [])
+        ranges_raw: Iterable[object] = cast(Iterable[object], state.get("ranges", []))
         ranges: list[list[int]] = [[int(item[0]), int(item[1])] for item in ranges_raw if isinstance(item, (list, tuple)) and len(item) == 2]
 
         if end > start:
@@ -271,7 +283,7 @@ async def record_written_range(job_id: str, start: int, end: int) -> int:
         state["contiguous"] = contiguous
         state["last_activity"] = time()
         state["received_chunk"] = True
-        file_state: Any = state.get("file")
+        file_state: object = state.get("file")
 
         if isinstance(file_state, dict):
             file_state["size"] = contiguous
@@ -293,10 +305,10 @@ def user_upload_batches_key(username: str) -> str:
 
 
 async def register_upload_batch(batch_id: str, *, username: str, name: str, kind: str, directory: str, data_center: str,
-                                items: list[dict[str, Any]]) -> None:
+                                items: list[dict[str, object]]) -> None:
     """Persist the whole user-selected upload as one queued tray task."""
 
-    metadata: dict[str, Any] = {
+    metadata: dict[str, object] = {
         "batch_id": batch_id,
         "username": username,
         "name": name[:255],
@@ -319,14 +331,14 @@ async def register_upload_batch(batch_id: str, *, username: str, name: str, kind
     await Redis.redis.sadd(user_upload_batches_key(username), batch_id)
 
 
-async def get_upload_batch_metadata(batch_id: str) -> dict[str, Any] | None:
+async def get_upload_batch_metadata(batch_id: str) -> dict[str, object] | None:
     """Return a stored batch task when present."""
 
-    value: Any = await Redis.get_json(upload_batch_key(batch_id))
+    value: object | None = await Redis.get_json(upload_batch_key(batch_id))
     return value if isinstance(value, dict) else None
 
 
-async def update_upload_batch(batch_id: str, username: str, **updates: Any) -> dict[str, Any]:
+async def update_upload_batch(batch_id: str, username: str, **updates: object) -> dict[str, object]:
     """Update owned batch metadata without ever reviving a cancelled task."""
 
     metadata = await get_upload_batch_metadata(batch_id)
@@ -434,7 +446,7 @@ async def cleanup_upload_artifacts(job_id: str) -> None:
     paths: set[Path] = set()
 
     for key in (pending_upload_key(job_id), upload_session_key(job_id)):
-        state: Any = await Redis.get_json(key)
+        state: object | None = await Redis.get_json(key)
 
         if isinstance(state, dict):
             raw_path = state.get("file_path")
@@ -497,12 +509,12 @@ async def cancel_upload_job_state(job_id: str, username: str) -> str:
     return "cancelled"
 
 
-async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
+async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
     """List batch tasks with aggregate progress and the current child stage."""
 
     index_key = user_upload_batches_key(username)
     raw_batch_ids: set[str] = await Redis.redis.smembers(index_key)
-    batches: list[dict[str, Any]] = []
+    batches: list[dict[str, object]] = []
 
     for raw_batch_id in raw_batch_ids:
         batch_id = str(raw_batch_id)
@@ -878,8 +890,16 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
 async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, producer_task: Task[None]) -> None:
     """Transfer received chunks and commit the database row only after a cancellation-safe final check."""
 
+    write_log(
+        "INFO",
+        Database,
+        "UPLOAD CHUNKS",
+        file.username,
+        f"Chunk upload worker started job_id={job_id} file={file.name!r} staged_path={file_path.name!r}",
+    )
+
     try:
-        session_state: Any = await Redis.get_json(upload_session_key(job_id))
+        session_state: object | None = await Redis.get_json(upload_session_key(job_id))
         download_total = int(session_state.get("total") or 0) if isinstance(session_state, dict) else 0
 
         async for progress in file_upload(
@@ -902,9 +922,17 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
 
             if producer_error is not None:
                 latest_metadata = await get_upload_job_metadata(job_id)
+                write_log(
+                    "ERROR",
+                    Database,
+                    "UPLOAD CHUNKS",
+                    file.username,
+                    f"Chunk producer failed job_id={job_id} error={type(producer_error).__name__}: "
+                    f"{sanitize_sensitive_urls(str(producer_error))[:250]}",
+                )
 
                 if not (latest_metadata and (latest_metadata.get("failed") or latest_metadata.get("cancelled"))):
-                    await Redis.set(job_id, Progress(file.name, f"Upload failed: {producer_error}", 0))
+                    await Redis.set(job_id, Progress(file.name, f"Upload failed: {sanitize_sensitive_urls(str(producer_error))[:250]}", 0))
 
                 return
 
@@ -923,6 +951,13 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
             latest_metadata["finalizing"] = True
             await Redis.set_json(upload_job_key(job_id), latest_metadata)
             await file.save()
+            write_log(
+                "INFO",
+                Database,
+                "UPLOAD CHUNKS",
+                file.username,
+                f"File metadata committed job_id={job_id} file_id={file.id} name={file.name!r} bytes={file.size}",
+            )
             complete = Progress(file.name, f"Upload Complete of id={file.id}", max(file.size, 0))
             complete.transfer = max(file.size, 0)
             complete.download_transfer = max(file.size, 0)
@@ -930,11 +965,23 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
             complete.download_active = True
             await Redis.set(job_id, complete)
 
+    except CancelledError:
+        write_log("INFO", Database, "UPLOAD CHUNKS", file.username, f"Chunk upload worker cancelled job_id={job_id}")
+        raise
+
     except Exception as error:
         metadata = await get_upload_job_metadata(job_id)
+        write_log(
+            "ERROR",
+            Database,
+            "UPLOAD CHUNKS",
+            file.username,
+            f"Chunk upload worker failed job_id={job_id} error={type(error).__name__}: "
+            f"{sanitize_sensitive_urls(str(error))[:300]}",
+        )
 
         if not (metadata and (metadata.get("failed") or metadata.get("cancelled"))):
-            await Redis.set(job_id, Progress(file.name, f"Upload failed: {error}", 0))
+            await Redis.set(job_id, Progress(file.name, f"Upload failed: {sanitize_sensitive_urls(str(error))[:250]}", 0))
 
     finally:
         if not producer_task.done():
@@ -942,3 +989,4 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
 
         await gather(producer_task, return_exceptions=True)
         await cleanup_upload_artifacts(job_id)
+        write_log("INFO", Database, "UPLOAD CHUNKS", file.username, f"Chunk upload cleanup completed job_id={job_id}")

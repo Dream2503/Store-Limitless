@@ -1,13 +1,13 @@
 """Input validation helpers shared by the StoreLimitless API."""
 
-from typing import Literal
+from typing import Literal, TypeAlias
 from urllib.parse import ParseResult, urlparse
 
 from fastapi import HTTPException
 
 from core.config import AVAILABLE_DATACENTERS
 
-ValueType = Literal["data_center", "directory", "file_name", "link"]
+ValueType: TypeAlias = Literal["data_center", "directory", "file_name", "link"]
 
 
 def perform_validation(value: str, value_type: ValueType) -> str:

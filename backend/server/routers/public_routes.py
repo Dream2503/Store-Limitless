@@ -8,7 +8,7 @@ import unicodedata
 from hashlib import sha256
 from pathlib import Path
 from mimetypes import guess_type
-from typing import AsyncGenerator, cast, Any
+from typing import AsyncGenerator, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -19,7 +19,9 @@ from backend.database.redis_server import Redis
 from backend.server.jwt_handler import get_current_user
 from backend.server.security import verify_public_stream_token, verify_public_zip_token
 from backend.server.zip_stream import ZipStreamEntry, stream_zip64, zip64_stored_content_length
+from core.data_center import Database
 from core.stream import Stream
+from core.utils import JsonObject, sanitize_sensitive_urls, write_log
 from core.utils.discord_ import Discord
 from core.utils.progress import Progress
 from .upload_state import get_upload_job_metadata
@@ -38,7 +40,7 @@ async def ready() -> JSONResponse:
 async def upload_status(job_id: str, user: User = Depends(get_current_user)) -> JSONResponse:
     """Return progress only to the account that owns the upload job."""
 
-    metadata: dict[str, Any] | None = await get_upload_job_metadata(job_id)
+    metadata: JsonObject | None = await get_upload_job_metadata(job_id)
 
     if metadata is None or metadata.get("username") != user.username:
         raise HTTPException(status_code=404, detail="Upload job not found")
@@ -62,7 +64,7 @@ async def upload_status(job_id: str, user: User = Depends(get_current_user)) -> 
         except (ValueError, IndexError):
             file_id = None
 
-    name: str | None | Any = progress.name if progress.name not in {"update_name_from_backend", "link", ""} else metadata.get("name")
+    name: object = progress.name if progress.name not in {"update_name_from_backend", "link", ""} else metadata.get("name")
     return JSONResponse({
         "status": "cancelled" if cancelled else "completed" if completed else "error" if failed else "uploading",
         "message": " ".join(progress.message.split()[:2]) if completed else progress.message,
@@ -146,6 +148,8 @@ async def _stream_while_connected(stream: Stream, request: Request) -> AsyncGene
             if chunk:
                 yield chunk
     finally:
+        # Seeking, closing a tab, and replacing an HTTP range normally cancel the
+        # previous stream. These are not storage failures and should not be warnings.
         await iterator.aclose()
 
 
@@ -155,7 +159,6 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
     cors_headers: dict[str, str] = _public_cors_headers(request)
     range_header = request.headers.get("range")
     if_range = request.headers.get("if-range")
-
     if not file.links and int(file.size) == 0:
         content_type = file.type or guess_type(file.name)[0] or "application/octet-stream"
         headers = {
@@ -174,13 +177,27 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
     try:
         stream = await Stream.prepare(file, range_header)
 
-    except ValueError:
+    except ValueError as error:
         size = max(0, int(file.size))
         etag = _file_etag(file)
+        write_log(
+            "WARNING",
+            Database,
+            "DOWNLOAD RESPONSE",
+            file.username,
+            f"Rejected byte range file_id={file.id} size={size} error={sanitize_sensitive_urls(str(error))[:160]}",
+        )
 
         return Response(status_code=416, headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes", "ETag": etag, **cors_headers})
 
     except OSError as error:
+        write_log(
+            "ERROR",
+            Database,
+            "DOWNLOAD RESPONSE",
+            file.username,
+            f"Stream metadata failure file_id={file.id}: {sanitize_sensitive_urls(str(error))[:250]}",
+        )
         raise HTTPException(status_code=502, detail=f"File storage metadata failure: {error}", headers=cors_headers) from error
 
     size = max(0, int(file.size))
@@ -395,13 +412,26 @@ async def public_zip_download(
         folder_roots.append(folder)
         folder_root_paths.append(folder_path)
 
-    async def stream_file(file: File):
+    async def stream_file(file: File) -> AsyncGenerator[bytes, None]:
         try:
             source = await Stream.prepare(file)
+        except (OSError, ValueError) as error:
+            # Preparation happens before Stream.stream() can record a storage failure.
+            write_log(
+                "ERROR",
+                Database,
+                "ZIP DOWNLOAD",
+                file.username,
+                f"Entry preparation failed file_id={file.id} name={file.name!r} "
+                f"error={type(error).__name__}: {sanitize_sensitive_urls(str(error))[:250]}",
+            )
+            raise OSError(f'Cannot read "{file.name}": {error}') from error
+
+        try:
             async for chunk in source.stream():
                 yield chunk
         except (OSError, ValueError) as error:
-            # The ZIP has already started by this point; a storage failure ends the stream.
+            # Stream.stream() already recorded the underlying failure.
             raise OSError(f'Cannot read "{file.name}": {error}') from error
 
     entries: list[ZipStreamEntry] = []
@@ -599,7 +629,7 @@ async def public_zip_download(
             media_type="application/zip",
         )
 
-    async def stream_zip_range():
+    async def stream_zip_range() -> AsyncGenerator[bytes, None]:
         """Replay the deterministic archive and emit only the requested byte range."""
 
         position = 0

@@ -7,14 +7,24 @@ import json
 from pathlib import Path
 import re
 import unicodedata
+from collections.abc import Iterable
 from time import monotonic
-from typing import Any
+from typing import Protocol, cast
 from urllib.parse import SplitResult, urlsplit
 
 from core.config import BASE_DIR
 from core.utils import env as env_config, write_log
 from core.utils.env import TELEGRAM_API_HASH, TELEGRAM_API_ID
 from core.utils.telegram_ import Telegram
+
+class TelegramEventLike(Protocol):
+    """Describe the message-event interface used by the Telethon callback."""
+
+    message: object
+    chat_id: int | None
+
+    async def get_sender(self) -> object: ...
+
 
 TELEGRAM_PROCESSING_BOT: str = "PremiumFiletoLink_Bot"
 TELEGRAM_PROCESSING_TIMEOUT: float = 90.0
@@ -57,32 +67,34 @@ _SMALL_CAPITAL_TRANSLATION = str.maketrans({
 })
 
 
-def _normalized_link_label(value: Any) -> str:
+def _normalized_link_label(value: object) -> str:
     """Normalize stylized Unicode button labels so matching ignores font variants."""
 
     normalized = unicodedata.normalize("NFKC", str(value or "")).translate(_SMALL_CAPITAL_TRANSLATION).casefold()
     return "".join(character for character in normalized if character.isalnum())
 
 
-def _message_buttons(message: Any) -> list[Any]:
+def _message_buttons(message: object) -> list[object]:
     """Return Telegram buttons from either Telethon's wrapper or raw reply markup."""
 
-    buttons = getattr(message, "buttons", None) or []
-    flattened: list[Any] = [button for row in buttons for button in (row or [])]
+    buttons_value: object = getattr(message, "buttons", None) or []
+    buttons: Iterable[Iterable[object]] = cast(Iterable[Iterable[object]], buttons_value)
+    flattened: list[object] = [button for row in buttons for button in (row or [])]
 
     if flattened:
         return flattened
 
     markup = getattr(message, "reply_markup", None)
-    rows = getattr(markup, "rows", None) or []
+    rows_value: object = getattr(markup, "rows", None) or []
+    rows: Iterable[object] = cast(Iterable[object], rows_value)
     return [
         button
         for row in rows
-        for button in (getattr(row, "buttons", None) or [])
+        for button in cast(Iterable[object], getattr(row, "buttons", None) or [])
     ]
 
 
-def _button_label(button: Any) -> str:
+def _button_label(button: object) -> str:
     """Read a button label from Telethon's custom wrapper or its raw TL object."""
 
     raw_button = getattr(button, "button", None)
@@ -93,7 +105,7 @@ def _button_label(button: Any) -> str:
     ).strip()
 
 
-def _button_url(button: Any) -> str | None:
+def _button_url(button: object) -> str | None:
     """Read a URL from a custom message button or the underlying Telegram button."""
 
     raw_button = getattr(button, "button", None)
@@ -116,7 +128,7 @@ def _visible_http_urls(text: str) -> list[str]:
     return [match.rstrip(".,;:!?)]}") for match in matches if match.rstrip(".,;:!?)]}")]
 
 
-def _fast_download_target(message: Any) -> str | None:
+def _fast_download_target(message: object) -> str | None:
     """Return the URL behind a FAST DOWNLOAD button, entity, or visible link."""
 
     text: str = str(getattr(message, "raw_text", "") or getattr(message, "message", "") or "")
@@ -188,7 +200,7 @@ def _fast_download_target(message: Any) -> str | None:
     return None
 
 
-async def _fast_download_callback_target(message: Any) -> str | None:
+async def _fast_download_callback_target(message: object) -> str | None:
     """Click a FAST DOWNLOAD callback button when the bot does not attach a URL."""
 
     for button in _message_buttons(message):
@@ -317,9 +329,9 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
     session_string: str = str(getattr(env_config, "TELEGRAM_USER_SESSION_STRING", "") or "").strip()
     session = StringSession(session_string) if session_string else str(TELEGRAM_USER_SESSION)
     client = TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH)
-    responses: Queue[Any] = Queue()
+    responses: Queue[object] = Queue()
 
-    async def receive_bot_message(event: Any) -> None:
+    async def receive_bot_message(event: TelegramEventLike) -> None:
         """Log and queue the full new or edited message from the processing bot."""
 
         try:
@@ -398,7 +410,7 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
             source_message = await wait_for(client.get_messages(chat_entity, ids=message_id), timeout=20)
 
             if source_message is None:
-                async def find_message_in_history() -> Any | None:
+                async def find_message_in_history() -> object | None:
                     """Retry a direct message lookup through the group's history."""
 
                     async for candidate in client.iter_messages(

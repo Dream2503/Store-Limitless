@@ -7,6 +7,9 @@ from threading import Lock
 from types import TracebackType
 from typing import TYPE_CHECKING, IO
 
+from core.data_center import Database
+from core.utils import sanitize_sensitive_urls, write_log
+
 if TYPE_CHECKING:
     from backend.database.models.file import File
     from backend.ftp.filesystem.filesystem import StoreLimitlessFS
@@ -26,6 +29,13 @@ class FTPUploadFile:
         self.closed: bool = False
         self._lock: Lock = Lock()
         self.file_object: IO = path.open(mode)
+        write_log(
+            "INFO",
+            Database,
+            "FTP UPLOAD",
+            file.username,
+            f"Opened staging file name={file.name!r} path={path.name!r} mode={mode}",
+        )
 
     def read(self, size: int = -1) -> bytes:
         """Read bytes from the staged file."""
@@ -95,7 +105,26 @@ class FTPUploadFile:
             finally:
                 self.file_object.close()
 
-        self.filesystem.finish_upload(self.file, self.path)
+        try:
+            self.filesystem.finish_upload(self.file, self.path)
+            write_log(
+                "INFO",
+                Database,
+                "FTP UPLOAD",
+                self.file.username,
+                f"Staging finalized and upload handed off name={self.file.name!r} "
+                f"staged_bytes={self.path.stat().st_size if self.path.exists() else 0}",
+            )
+        except Exception as error:
+            write_log(
+                "ERROR",
+                Database,
+                "FTP UPLOAD",
+                self.file.username,
+                f"Could not finalize FTP upload name={self.file.name!r} "
+                f"error={type(error).__name__}: {sanitize_sensitive_urls(str(error))[:250]}",
+            )
+            raise
 
     def __enter__(self) -> FTPUploadFile:
         """Return this upload object for use in a context manager."""

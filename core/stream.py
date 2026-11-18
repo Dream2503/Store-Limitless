@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from asyncio import Task, create_task, gather, sleep, wait_for
 from bisect import bisect_right
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from re import Match, fullmatch
 from typing import AsyncGenerator
@@ -37,36 +38,13 @@ class Stream:
         """Build a range stream from persisted metadata without waiting for an unrelated storage read."""
 
         if not file.links:
-            write_log("ERROR", Database, "STREAM", file.username, f"Cannot prepare file_id={file.id}: no stored data parts")
             raise OSError("File has no stored data parts")
 
         # File.size is committed by the upload pipeline. Do not download the final
         # storage part just to calculate headers: that delays the first response byte,
         # even when the browser only requests the start of a video. Each requested
         # chunk is still validated against its expected length by _load_chunk().
-        try:
-            stream = cls(file, range_header)
-        except (ValueError, OSError) as error:
-            write_log(
-                "ERROR",
-                Database,
-                "STREAM",
-                file.username,
-                f"Preparation failed file_id={file.id} name={file.name!r} provider={file.data_center} "
-                f"error={type(error).__name__}: {sanitize_sensitive_urls(str(error))[:250]}",
-            )
-            raise
-
-        write_log(
-            "INFO",
-            Database,
-            "STREAM",
-            file.username,
-            f"Prepared file_id={file.id} name={file.name!r} provider={file.data_center} "
-            f"file_bytes={file.size} range={stream.byte_range.start}-{stream.byte_range.end} "
-            f"stored_chunks={len(stream.chunks)}",
-        )
-        return stream
+        return cls(file, range_header)
 
     def __init__(self, file: File, range_header: str | None = None) -> None:
         """Build provider-sized chunk offsets and parse an optional single HTTP byte range."""
@@ -143,15 +121,6 @@ class Stream:
             if self.provider is None:
                 raise ValueError(f"Unsupported data center: {self.file.data_center}")
 
-            write_log(
-                "INFO",
-                Database,
-                "STREAM CHUNK",
-                self.file.username,
-                f"Cache miss; fetching file_id={file_id} chunk={index + 1}/{len(self.chunks)} "
-                f"expected_bytes={expected_size} provider={self.provider.NAME}",
-            )
-
             for attempt in range(5):
                 try:
                     candidate: bytes = await wait_for(self.provider.download(chunk.flink), timeout=300)
@@ -161,30 +130,15 @@ class Stream:
 
                     data = candidate
                     await DataCenter.cache_part(file_id, index, data)
-                    write_log(
-                        "INFO",
-                        Database,
-                        "STREAM CHUNK",
-                        self.file.username,
-                        f"Fetched and cached file_id={file_id} chunk={index + 1}/{len(self.chunks)} "
-                        f"bytes={len(data)} attempt={attempt + 1}",
-                    )
                     break
 
                 except Exception as error:
-                    last_error = error
-                    write_log(
-                        "WARNING",
-                        Database,
-                        "STREAM CHUNK",
-                        self.file.username,
-                        f"Fetch attempt={attempt + 1}/5 failed file_id={file_id} "
-                        f"chunk={index + 1}/{len(self.chunks)} error={type(error).__name__}: "
-                        f"{sanitize_sensitive_urls(str(error))[:200]}",
-                    )
-
+                    # Retry transient provider failures quietly. The stream logs one
+                    # terminal error only if all attempts for a chunk fail.
                     if attempt == 4:
-                        raise OSError(f"Could not retrieve storage chunk {index + 1}/{len(self.chunks)} after 5 attempts") from last_error
+                        raise OSError(
+                            f"Could not retrieve storage chunk {index + 1}/{len(self.chunks)} after 5 attempts"
+                        ) from error
 
                     await sleep(min(2 ** attempt, 16))
 
@@ -203,16 +157,6 @@ class Stream:
         last_index: int = bisect_right(self._chunk_starts, byte_range.end) - 1
         position: int = byte_range.start
         bytes_yielded: int = 0
-        completed: bool = False
-
-        write_log(
-            "INFO",
-            Database,
-            "STREAM",
-            self.file.username,
-            f"Started file_id={self.file.id} chunk_range={first_index + 1}-{last_index + 1} "
-            f"bytes={byte_range.start}-{byte_range.end}",
-        )
 
         try:
             async for index, data in _indexed_parallel_chunks(
@@ -242,22 +186,27 @@ class Stream:
 
                 position = chunk.end + 1
 
-            completed = True
-
-        finally:
-            level: str = "INFO" if completed else "WARNING"
-            state: str = "completed" if completed else "closed_early_or_failed"
+        except Exception as error:
+            cause = error.__cause__
+            detail = f"{type(error).__name__}: {sanitize_sensitive_urls(str(error))[:250]}"
+            if cause is not None:
+                detail += (
+                    f"; cause={type(cause).__name__}: "
+                    f"{sanitize_sensitive_urls(str(cause))[:200]}"
+                )
             write_log(
-                level,
+                "ERROR",
                 Database,
                 "STREAM",
                 self.file.username,
-                f"Stream {state} file_id={self.file.id} bytes_yielded={bytes_yielded} "
-                f"expected_bytes={byte_range.end - byte_range.start + 1}",
+                f"Stream failed file_id={self.file.id} name={self.file.name!r} "
+                f"bytes_yielded={bytes_yielded} "
+                f"expected_bytes={byte_range.end - byte_range.start + 1} error={detail}",
             )
+            raise
 
 
-async def _indexed_parallel_chunks(stream, first_index: int):
+async def _indexed_parallel_chunks(stream: AsyncIterator[bytes], first_index: int) -> AsyncGenerator[tuple[int, bytes], None]:
     """Attach monotonically increasing chunk indices to ordered download results."""
 
     index = first_index

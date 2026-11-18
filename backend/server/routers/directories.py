@@ -14,6 +14,8 @@ from backend.database.models import Directory, File, User
 from backend.server.jwt_handler import OAuth2_scheme, get_current_user
 from backend.server.security import create_public_stream_token, create_public_zip_token, create_session_bound_stream_token
 from backend.server.utils import perform_validation
+from core.data_center import Database
+from core.utils import write_log
 
 router: APIRouter = APIRouter()
 
@@ -60,6 +62,7 @@ async def create_zip_download_link(
         if folder is None or folder.username != user.username:
             raise HTTPException(status_code=404, detail=f"Active folder {folder_id} was not found")
 
+    write_log("INFO", Database, "ZIP LINK", user.username, f"Created ZIP link file_count={len(file_ids)} folder_count={len(folder_ids)}")
     return {
         "public_token": create_public_zip_token(file_ids, user.username, folder_ids=folder_ids, session_token=session_token),
         "expires_in": 900,
@@ -76,6 +79,7 @@ async def create_folder(directory: str, name: str, user: User = Depends(get_curr
         username=user.username,
     )
     await folder.save()
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Created directory id={folder.id} path={folder.path}")
     return JSONResponse({
         "message": "Folder created successfully",
         "directory": str(folder),
@@ -238,7 +242,9 @@ async def rename_file(fid: int, name: str = Query(..., min_length=1, max_length=
         if any(candidate.id != file.id and candidate.name == clean_name for candidate in same_directory_files):
             raise HTTPException(status_code=409, detail="A file with that name already exists in this directory")
 
+        old_name: str = file.name
         await _update_file_fields(file, name=clean_name)
+        write_log("INFO", Database, "FILESYSTEM", user.username, f"Renamed file id={fid} old_name={old_name!r} new_name={clean_name!r}")
 
     return JSONResponse({"message": "File renamed successfully", "id": fid, "name": file.name})
 
@@ -274,6 +280,7 @@ async def rename_directory(did: int, name: str = Query(..., min_length=1, max_le
         raise HTTPException(status_code=409, detail="A folder with that name already exists")
 
     await _rewrite_directory_tree_path(user, directory, new_path)
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Renamed directory id={did} old_path={old_path} new_path={new_path}")
     return JSONResponse({
         "message": "Directory renamed successfully",
         "id": did,
@@ -369,6 +376,7 @@ async def move_file(fid: int, directory: str = Query(..., min_length=1), user: U
 
     destination: Directory = await _resolve_move_destination(user, directory)
     result: dict[str, object] = await _move_file_to_directory(user, fid, destination)
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Moved file id={fid} destination={destination.path} status={result.get('status', 'moved')}")
     return JSONResponse(result)
 
 
@@ -378,6 +386,7 @@ async def move_directory(did: int, directory: str = Query(..., min_length=1), us
 
     destination: Directory = await _resolve_move_destination(user, directory)
     result: dict[str, object] = await _move_directory_to_destination(user, did, destination)
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Moved directory id={did} destination={destination.path} status={result.get('status', 'moved')}")
     return JSONResponse(result)
 
 
@@ -443,6 +452,14 @@ async def move_items(directory: str = Body(...), items: list[dict[str, object]] 
                 "status_code": error.status_code,
             })
 
+    write_log(
+        "INFO" if not failed else "WARNING",
+        Database,
+        "FILESYSTEM",
+        user.username,
+        f"Bulk move destination={destination.path} requested={len(validated_items)} moved={len(moved)} "
+        f"unchanged={len(unchanged)} failed={len(failed)}",
+    )
     return JSONResponse({
         "message": "Bulk move completed",
         "destination": str(destination.path),
@@ -465,6 +482,7 @@ async def file_delete(fid: int, user: User = Depends(get_current_user)) -> JSONR
         raise HTTPException(status_code=403, detail="Access denied")
 
     await file.move_to_trash()
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Moved file to trash id={fid} name={file.name!r}")
     return JSONResponse({"message": "File moved to trash"})
 
 
@@ -481,6 +499,7 @@ async def directory_delete(did: int, user: User = Depends(get_current_user)) -> 
         raise HTTPException(status_code=403, detail="Access denied")
 
     await directory.move_to_trash()
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Moved directory to trash id={did} path={directory.path}")
     return JSONResponse({"message": "Directory moved to trash"})
 
 
@@ -494,6 +513,7 @@ async def permanently_delete(fid: int, user: User = Depends(get_current_user)) -
         raise HTTPException(status_code=404, detail="File not found")
 
     await file.delete()
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Permanently deleted file id={fid} name={file.name!r} bytes={file.size}")
     return JSONResponse({"message": "Permanently deleted"})
 
 
@@ -531,6 +551,7 @@ async def permanently_delete_directory(did: int, user: User = Depends(get_curren
         raise HTTPException(status_code=404, detail="Directory not found")
 
     await _permanently_delete_directory_tree(user, directory)
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Permanently deleted directory tree id={did} path={directory.path}")
     return JSONResponse({"message": "Permanently deleted"})
 
 
@@ -544,6 +565,7 @@ async def restore_file(fid: int, user: User = Depends(get_current_user)) -> JSON
         raise HTTPException(status_code=404, detail="File not found")
 
     await file.restore()
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Restored file id={fid} name={file.name!r}")
     return JSONResponse({"message": "Restored"})
 
 
@@ -557,6 +579,7 @@ async def restore_directory(did: int, user: User = Depends(get_current_user)) ->
         raise HTTPException(status_code=404, detail="Directory not found")
 
     await directory.restore()
+    write_log("INFO", Database, "FILESYSTEM", user.username, f"Restored directory id={did} path={directory.path}")
     return JSONResponse({"message": "Restored"})
 
 
@@ -592,6 +615,7 @@ async def create_public_link(fid: int, user: User = Depends(get_current_user)) -
     if file.username != user.username:
         raise HTTPException(status_code=403, detail="Access denied")
 
+    write_log("INFO", Database, "PUBLIC LINK", user.username, f"Created public stream link file_id={fid} name={file.name!r}")
     return {"public_token": create_public_stream_token(file=file, username=file.username)}
 
 @router.post("/file/{fid}/private-stream-link")

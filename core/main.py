@@ -25,7 +25,7 @@ from backend.server.app import app
 from backend.server.frontend import frontend_app
 from core.config import HOST, TRANSFER_PATH
 from core.data_center import DataCenter, Database
-from core.utils import write_log
+from core.utils import sanitize_sensitive_urls, write_log
 from core.utils.binaries import start_cloudflare_tunnel, start_redis_server
 from core.utils.discord_ import Discord
 from core.utils.telegram_ import Telegram
@@ -488,5 +488,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         write_log("INFO", Database, "LIFECYCLE", "server", "Interrupted by keyboard")
     except Exception as error:
-        write_log("ERROR", Database, "LIFECYCLE", "server", f"Fatal startup/runtime error: {type(error).__name__}: {error}")
+        write_log("ERROR", Database, "LIFECYCLE", "server", f"Fatal startup/runtime error: {type(error).__name__}: {sanitize_sensitive_urls(str(error))[:400]}")
         raise

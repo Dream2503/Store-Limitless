@@ -14,7 +14,7 @@ BASE_DIR: Path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[
 FRONTEND_DIR: Path = (BASE_DIR / "frontend" / "dist").resolve()
 INDEX_FILE: Path = FRONTEND_DIR / "index.html"
 
-frontend_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+frontend_app: FastAPI = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @frontend_app.get("/config.js")

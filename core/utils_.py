@@ -10,7 +10,6 @@ from shutil import which
 from socket import AF_INET, SOCK_DGRAM, socket
 from subprocess import Popen, TimeoutExpired, run as subprocess_run
 from time import monotonic
-from typing import Any
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as URLRequest, urlopen
@@ -138,7 +137,7 @@ def get_local_ip() -> str:
         return "127.0.0.1"
 
 
-def stop_process(process: Popen[Any], timeout: int | float = 5) -> None:
+def stop_process(process: Popen[bytes] | Popen[str], timeout: int | float = 5) -> None:
     """Terminate a child process, escalating to kill if graceful shutdown times out."""
 
     if process.poll() is not None:

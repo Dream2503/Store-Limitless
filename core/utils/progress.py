@@ -5,7 +5,7 @@ from __future__ import annotations
 from asyncio import Task, create_task, gather, sleep, to_thread, wait
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncGenerator
+from typing import TYPE_CHECKING, AsyncGenerator
 
 from core.utils import write_log, read_chunk
 
@@ -36,7 +36,7 @@ class Progress:
         self.ingestion_type: str = ""
         self.file_counts: dict[str, int] = {}
         self.last_updated_at: float = 0.0
-        self.torrent_items: list[dict[str, Any]] = []
+        self.torrent_items: list[dict[str, object]] = []
 
     @property
     def value(self) -> tuple[str, str, int, int]:
@@ -67,7 +67,7 @@ async def upload_growing_file(
         path: Path,
         data_center: type[DataCenter],
         progress: Progress,
-        producer: Task[Any] | None = None,
+        producer: Task[None] | None = None,
         total_size: int = 0,
         start_part: int = 1,
         track_download: bool = False,

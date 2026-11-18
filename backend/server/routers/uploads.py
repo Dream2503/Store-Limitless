@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from mimetypes import guess_type
 from pathlib import Path
 from time import time
-from typing import Any, cast
+from typing import cast
 from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 from uuid import uuid4
 
@@ -22,7 +22,7 @@ from backend.database.redis_server import Redis
 from backend.server.jwt_handler import get_current_user
 from backend.server.utils import perform_validation
 from core.config import TRANSFER_PATH
-from core.data_center import DataCenter
+from core.data_center import DataCenter, Database
 from core.transfer import link_upload
 from core.utils.telegram_link import resolve_telegram_message_link
 from core.utils import sanitize_sensitive_urls, write_log
@@ -114,6 +114,14 @@ async def upload_file(
         total=file_size,
         batch_id=batch_id,
     )
+    write_log(
+        "INFO",
+        Database,
+        "UPLOAD JOB",
+        user.username,
+        f"Registered browser upload job_id={job_id} name={file_name!r} data_center={data_center} "
+        f"directory={directory_obj.path} expected_bytes={file_size} batch_id={batch_id or '-'}",
+    )
     if batch_id:
         latest_batch = await get_upload_batch_metadata(batch_id)
 
@@ -129,7 +137,7 @@ async def upload_file(
 
 
 @router.post("/upload-batches")
-async def create_upload_batch(payload: dict[str, Any] = Body(...), user: User = Depends(get_current_user)) -> JSONResponse:
+async def create_upload_batch(payload: dict[str, object] = Body(...), user: User = Depends(get_current_user)) -> JSONResponse:
     """Register one tray task for a multi-file upload or a single link import."""
 
     name = str(payload.get("name") or "Upload task").strip()[:255]
@@ -149,7 +157,7 @@ async def create_upload_batch(payload: dict[str, Any] = Body(...), user: User = 
     if directory_obj is None:
         raise HTTPException(status_code=404, detail="Destination directory not found")
 
-    items: list[dict[str, Any]] = []
+    items: list[dict[str, object]] = []
 
     for item in raw_items:
         if isinstance(item, str):
@@ -193,7 +201,7 @@ async def get_upload_batches(user: User = Depends(get_current_user)) -> JSONResp
 
 
 @router.patch("/upload-batches/{batch_id}")
-async def patch_upload_batch(batch_id: str, payload: dict[str, Any] = Body(...), user: User = Depends(get_current_user)) -> JSONResponse:
+async def patch_upload_batch(batch_id: str, payload: dict[str, object] = Body(...), user: User = Depends(get_current_user)) -> JSONResponse:
     """Publish the queue's current item and task-level status."""
 
     metadata = await get_upload_batch_metadata(batch_id)
@@ -211,7 +219,7 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, Any] = Body(...),
     if status not in {"queued", "uploading", "completed", "error", "cancelled"}:
         raise HTTPException(status_code=422, detail="Invalid upload task status")
 
-    updates: dict[str, Any] = {"status": status}
+    updates: dict[str, object] = {"status": status}
 
     if "message" in payload:
         updates["message"] = str(payload.get("message") or "")[:500]
@@ -279,7 +287,7 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, Any] = Body(...),
 
     if "item_index" in payload and "item_status" in payload:
         try:
-            item_index = int(cast(Any, payload.get("item_index")))
+            item_index = int(cast(str | int | float | bool, payload.get("item_index")))
 
         except (TypeError, ValueError):
             raise HTTPException(status_code=422, detail="Invalid upload item index")
@@ -535,7 +543,7 @@ async def get_upload_jobs(user: User = Depends(get_current_user)) -> JSONRespons
 async def get_upload_job_status(job_id: str, user: User = Depends(get_current_user)) -> JSONResponse:
     """Return one job's status, including a short-lived result after tray cleanup."""
 
-    metadata: dict[str, Any] | None = await get_upload_job_metadata(job_id)
+    metadata: dict[str, object] | None = await get_upload_job_metadata(job_id)
 
     if metadata is not None:
         if metadata.get("username") != user.username:
@@ -567,7 +575,7 @@ async def get_upload_job_status(job_id: str, user: User = Depends(get_current_us
             "last_updated_at": max(0.0, float(getattr(progress, "last_updated_at", 0) or 0)),
         })
 
-    terminal: Any = await Redis.get_json(terminal_upload_job_key(job_id))
+    terminal: object = await Redis.get_json(terminal_upload_job_key(job_id))
 
     if not isinstance(terminal, dict) or terminal.get("username") != user.username:
         raise HTTPException(status_code=404, detail="Upload job not found")
@@ -584,7 +592,7 @@ async def get_upload_job_status(job_id: str, user: User = Depends(get_current_us
 async def dismiss_upload_job(job_id: str, user: User = Depends(get_current_user)) -> JSONResponse:
     """Dismiss a terminal upload job from the shared account tray."""
 
-    metadata: dict[str, Any] | None = await get_upload_job_metadata(job_id)
+    metadata: dict[str, object] | None = await get_upload_job_metadata(job_id)
 
     if metadata is None:
         await Redis.redis.srem(user_upload_jobs_key(user.username), job_id)
@@ -626,7 +634,7 @@ async def dismiss_upload_job(job_id: str, user: User = Depends(get_current_user)
 async def fail_upload_job(job_id: str, message: str = Body(..., embed=True, max_length=1000), user: User = Depends(get_current_user)) -> JSONResponse:
     """Publish a browser-side file-transfer failure to every device on the account."""
 
-    metadata: dict[str, Any] | None = await get_upload_job_metadata(job_id)
+    metadata: dict[str, object] | None = await get_upload_job_metadata(job_id)
 
     if metadata is None or metadata.get("username") != user.username:
         raise HTTPException(status_code=404, detail="Upload job not found")
@@ -678,7 +686,7 @@ async def upload_chunk(
 ) -> JSONResponse:
     """Write an uploaded byte range and update the Redis range metadata."""
 
-    metadata: dict[str, Any] | None = await get_upload_job_metadata(job_id)
+    metadata: dict[str, object] | None = await get_upload_job_metadata(job_id)
 
     if metadata is None or metadata.get("username") != user.username:
         raise HTTPException(status_code=404, detail="Upload job not found")
@@ -690,15 +698,15 @@ async def upload_chunk(
         raise HTTPException(status_code=409, detail="Upload has already failed")
 
     session_key: str = upload_session_key(job_id)
-    state: Any = await Redis.get_json(session_key)
+    state: object = await Redis.get_json(session_key)
 
     if not isinstance(state, dict):
-        pending: Any = await Redis.get_json(pending_upload_key(job_id))
+        pending: object = await Redis.get_json(pending_upload_key(job_id))
 
         if not isinstance(pending, dict):
             raise HTTPException(status_code=404, detail="Upload job not found")
 
-        pending_file_data: Any = pending.get("file")
+        pending_file_data: object = pending.get("file")
 
         if not isinstance(pending_file_data, dict):
             raise HTTPException(status_code=404, detail="Upload job metadata is invalid")
@@ -708,7 +716,7 @@ async def upload_chunk(
         if pending_file.username != user.username:
             raise HTTPException(status_code=403, detail="Access denied")
 
-        raw_file_path: Any = pending.get("file_path")
+        raw_file_path: object = pending.get("file_path")
 
         if not isinstance(raw_file_path, str) or not raw_file_path:
             raise HTTPException(status_code=404, detail="Upload file path is missing")
@@ -718,7 +726,7 @@ async def upload_chunk(
         file_path.touch(exist_ok=True)
         metadata["total"] = total
         await Redis.set_json(upload_job_key(job_id), metadata)
-        new_state: dict[str, Any] = {
+        new_state: dict[str, object] = {
             "file": pending_file.model_dump(mode="json"),
             "file_path": str(file_path),
             "username": user.username,
@@ -753,7 +761,7 @@ async def upload_chunk(
     file_path: Path = Path(str(state.get("file_path", "")))
 
     if not file_path.is_file():
-        file_state: Any = state.get("file")
+        file_state: object = state.get("file")
         fallback_name: str = (str(file_state.get("name", "upload")) if isinstance(file_state, dict) else "upload")
         await Redis.delete_key(session_key)
         await Redis.set(job_id, Progress(fallback_name, "Upload failed: temporary file is missing; please restart the upload", 0))
@@ -805,7 +813,7 @@ async def torrent_preview(link: str, user: User = Depends(get_current_user)) -> 
         raise HTTPException(status_code=400, detail="Invalid torrent magnet URI")
 
     try:
-        preview: dict[str, Any] = await preview_torrent_files(raw_link)
+        preview: dict[str, object] = await preview_torrent_files(raw_link)
 
     except TimeoutError as error:
         raise HTTPException(status_code=504, detail=str(error)) from error
@@ -853,7 +861,7 @@ async def upload_link(
             raise HTTPException(status_code=400, detail="Select at least one valid torrent file")
 
     else:
-        selected_torrent_files = None
+        selected_torrent_files: set[int] | None = None
         link = perform_validation(raw_link, "link")
         parsed_link = urlsplit(link)
         raw_name = "Telegram message" if is_telegram_message_link else (unquote(Path(parsed_link.path).name).strip() or (parsed_link.hostname or "Link import"))
@@ -898,6 +906,19 @@ async def upload_link(
         data_center=data_center,
         batch_id=batch_id,
     )
+    import_kind: str = (
+        "torrent" if is_magnet else "telegram-message" if is_telegram_message_link
+        else "youtube" if is_youtube else "http-link"
+    )
+    write_log(
+        "INFO",
+        Database,
+        "UPLOAD JOB",
+        user.username,
+        f"Registered link import job_id={job_id} kind={import_kind} source_host={source_host or 'unknown'} "
+        f"name={link_name!r} data_center={data_center} directory={directory_obj.path} "
+        f"batch_id={batch_id or '-'}",
+    )
 
     if batch_id:
         latest_batch = await get_upload_batch_metadata(batch_id)
@@ -917,6 +938,14 @@ async def upload_link(
 
         progress: Progress
 
+        write_log(
+            "INFO",
+            Database,
+            "UPLOAD JOB",
+            user.username,
+            f"Background import started job_id={job_id} kind={import_kind} name={file.name!r}",
+        )
+
         try:
             download_link: str = link
 
@@ -924,6 +953,7 @@ async def upload_link(
                 # Telegram processing happens inside this persistent job so the API request
                 # can return immediately while the bot works. Never pass the original
                 # Telegram message URL to the normal downloader.
+                write_log("INFO", Database, "TELEGRAM IMPORT", user.username, f"Resolving message link job_id={job_id}")
                 await Redis.set(job_id, Progress(file.name, "Processing Telegram message", 0))
 
                 if batch_id:
@@ -931,6 +961,13 @@ async def upload_link(
 
                 download_link, source_name = await resolve_telegram_message_link(link)
                 resolved_name: str = source_name.replace("\\", "/").rsplit("/", 1)[-1].strip()[:255] or "Telegram download"
+                write_log(
+                    "INFO",
+                    Database,
+                    "TELEGRAM IMPORT",
+                    user.username,
+                    f"Resolved message link job_id={job_id} filename={resolved_name!r} download_url_received={bool(download_link)}",
+                )
                 file.name = resolved_name
                 file.type = guess_type(file.name)[0] or "application/octet-stream"
                 await Redis.set(job_id, Progress(file.name, "Starting download", 0))
@@ -945,11 +982,11 @@ async def upload_link(
                     latest_batch = await get_upload_batch_metadata(batch_id)
 
                     if latest_batch and latest_batch.get("username") == user.username:
-                        batch_updates: dict[str, Any] = {"current_name": file.name, "message": "Downloading file"}
-                        batch_items: Any = latest_batch.get("items")
+                        batch_updates: dict[str, object] = {"current_name": file.name, "message": "Downloading file"}
+                        batch_items: object = latest_batch.get("items")
 
                         if isinstance(batch_items, list):
-                            normalized_items: list[dict[str, Any]] = [
+                            normalized_items: list[dict[str, object]] = [
                                 dict(item) if isinstance(item, dict) else {"name": str(item)}
                                 for item in batch_items
                             ]
@@ -994,16 +1031,16 @@ async def upload_link(
                         latest_batch = await get_upload_batch_metadata(batch_id)
 
                         if latest_batch and latest_batch.get("username") == user.username:
-                            batch_updates: dict[str, Any] = {}
+                            batch_updates: dict[str, object] = {}
 
                             if is_resolved_name:
                                 if str(latest_batch.get("current_name") or "") != candidate_name:
                                     batch_updates["current_name"] = candidate_name
 
-                                batch_items: Any = latest_batch.get("items")
+                                batch_items: object = latest_batch.get("items")
 
                                 if isinstance(batch_items, list):
-                                    normalized_items: list[dict[str, Any]] = [
+                                    normalized_items: list[dict[str, object]] = [
                                         dict(item) if isinstance(item, dict) else {"name": str(item)}
                                         for item in batch_items
                                     ]
@@ -1048,10 +1085,18 @@ async def upload_link(
             # The storage worker, not the browser's polling loop, owns successful completion.
             # This avoids leaving a finished link/torrent batch stuck at 95% when a proxy
             # request drops the child's final status or the browser's final PATCH.
+            write_log(
+                "INFO",
+                Database,
+                "UPLOAD JOB",
+                user.username,
+                f"Transfer pipeline finished job_id={job_id}; background generator exhausted",
+            )
             if batch_id:
                 await reconcile_completed_link_batch(batch_id, user.username, job_id)
 
         except CancelledError:
+            write_log("INFO", Database, "UPLOAD JOB", user.username, f"Background import cancelled job_id={job_id}")
             return
 
         except Exception as error:
@@ -1063,6 +1108,14 @@ async def upload_link(
 
             failure_detail: str = " ".join(sanitize_sensitive_urls(str(error)).split())[:400]
             failure_message: str = f"Upload failed: {failure_detail or type(error).__name__}"
+            write_log(
+                "ERROR",
+                Database,
+                "UPLOAD JOB",
+                user.username,
+                f"Background import failed job_id={job_id} kind={import_kind} "
+                f"error={type(error).__name__}: {failure_detail or 'no error detail'}",
+            )
 
             try:
                 await Redis.set(job_id, Progress(file.name, failure_message, 0))

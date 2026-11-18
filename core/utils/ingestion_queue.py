@@ -5,29 +5,29 @@ from __future__ import annotations
 from asyncio import Task, CancelledError, create_task, gather, sleep, current_task
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import AsyncIterator, Final
 from uuid import uuid4
 
 from backend.database.redis_server import Redis
 from core.data_center import Database
 from core.utils import write_log
 
-_QUEUE = "ingestion:upload:queue"
-_SEQUENCE = "ingestion:upload:sequence"
-_LOCK = "ingestion:upload:lock"
-_PREFIX = "ingestion:upload:ticket:"
-_TICKET_TTL = 300
-_LOCK_TTL_MS = 120_000
-_HEARTBEAT = 10.0
+_QUEUE: Final[str] = "ingestion:upload:queue"
+_SEQUENCE: Final[str] = "ingestion:upload:sequence"
+_LOCK: Final[str] = "ingestion:upload:lock"
+_PREFIX: Final[str] = "ingestion:upload:ticket:"
+_TICKET_TTL: Final[int] = 300
+_LOCK_TTL_MS: Final[int] = 120_000
+_HEARTBEAT: Final[float] = 10.0
 
-_ENQUEUE = """
+_ENQUEUE: Final[str] = """
 -- storelimitless-ingestion-enqueue
 local sequence = redis.call('INCR', KEYS[2])
 redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[2])
 redis.call('ZADD', KEYS[1], sequence, ARGV[1])
 return sequence
 """
-_CLAIM = """
+_CLAIM: Final[str] = """
 -- storelimitless-ingestion-claim
 local head
 while true do
@@ -49,22 +49,22 @@ redis.call('ZREM', KEYS[1], ARGV[1])
 redis.call('DEL', KEYS[3])
 return 1
 """
-_RENEW_TICKET = """
+_RENEW_TICKET: Final[str] = """
 -- storelimitless-ingestion-renew-ticket
 if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
 return redis.call('EXPIRE', KEYS[1], ARGV[1])
 """
-_RENEW_LOCK = """
+_RENEW_LOCK: Final[str] = """
 -- storelimitless-ingestion-renew-lock
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 return redis.call('PEXPIRE', KEYS[1], ARGV[2])
 """
-_RELEASE_LOCK = """
+_RELEASE_LOCK: Final[str] = """
 -- storelimitless-ingestion-release-lock
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 return redis.call('DEL', KEYS[1])
 """
-_CANCEL = """
+_CANCEL: Final[str] = """
 -- storelimitless-ingestion-cancel-ticket
 redis.call('ZREM', KEYS[1], ARGV[1])
 return redis.call('DEL', KEYS[2])
@@ -159,7 +159,7 @@ async def _keep_lock_alive(ticket_id: str, owner: Task[object]) -> None:
 async def ingestion_upload_slot(ticket: IngestionUploadTicket) -> AsyncIterator[None]:
     """Wait for a FIFO turn and hold the single shared upload lease until the file is saved."""
 
-    acquired = False
+    acquired: bool = False
     ticket_heartbeat = ticket.heartbeat
     lock_heartbeat: Task[None] | None = None
 

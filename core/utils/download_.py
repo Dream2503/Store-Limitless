@@ -9,7 +9,7 @@ from mimetypes import guess_type
 from pathlib import Path
 from shutil import rmtree
 from traceback import format_exc
-from typing import Any, AsyncGenerator, cast
+from typing import AsyncGenerator, cast
 from urllib.parse import parse_qs, unquote, urlparse, ParseResult
 from uuid import uuid4
 
@@ -109,7 +109,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
     is_google_drive: bool = parsed.hostname.lower().removeprefix("www.") == "drive.google.com"
     temp_dir: Path = TRANSFER_PATH / file.username / "link-download" / uuid4().hex
     temp_dir.mkdir(parents=True, exist_ok=True)
-    download_task: Task[Any] | None = None
+    download_task: Task[None] | None = None
     response: Response | None = None
     ticket: IngestionUploadTicket | None = None
     temp_dir / "pending-download"
@@ -139,7 +139,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
                 if not metadata_response.ok:
                     raise OSError(f"Google Drive API error: {metadata_response.status_code}: {metadata_response.text}")
 
-                metadata: dict[str, Any] = metadata_response.json()
+                metadata: dict[str, object] = cast(dict[str, object], metadata_response.json())
 
             finally:
                 metadata_response.close()

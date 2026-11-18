@@ -3,6 +3,7 @@ import {useLocation, useNavigate} from "react-router-dom";
 import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
 import {endAuthSession, getFileKind, getToken} from "../utils.js";
 import {API_URL} from "../../../api.js";
+import {DASHBOARD_SELECTION_STORAGE_KEY} from "../constants.js";
 
 async function copyTextToClipboard(value) {
     try {
@@ -866,7 +867,23 @@ export default function ViewFile({active = true} = {}) {
             if (isTextEntry) return;
 
             event.preventDefault();
-            navigate(-1);
+
+            // DashboardPage records the exact folder route before opening a file.
+            // Navigate to it directly instead of relying on an arbitrary history
+            // entry, which can leave the hidden dashboard on a stale route.
+            let returnPath = "/home";
+            try {
+                const saved = JSON.parse(sessionStorage.getItem(DASHBOARD_SELECTION_STORAGE_KEY) || "null");
+                if (saved && typeof saved.pathname === "string") {
+                    const candidate = saved.pathname;
+                    if (candidate === "/home" || candidate.startsWith("/home/")) {
+                        returnPath = candidate;
+                    }
+                }
+            } catch {
+                // The root dashboard remains the safe fallback for invalid session data.
+            }
+            navigate(returnPath, {replace: true});
         };
 
         window.addEventListener("keydown", handleKeyDown);

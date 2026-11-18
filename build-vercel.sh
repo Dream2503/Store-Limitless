@@ -55,6 +55,73 @@ RELEASE_ROOT="$REPO_ROOT/releases"
 LINUX_RELEASE_DIR="$RELEASE_ROOT/linux"
 WINDOWS_RELEASE_DIR="$RELEASE_ROOT/windows"
 
+VERCEL_IGNORE_FILE="$REPO_ROOT/.vercelignore"
+VERCEL_IGNORE_BACKUP=""
+VERCEL_IGNORE_EXISTED=0
+VERCEL_IGNORE_SAVED=0
+
+save_original_vercelignore() {
+    [[ "$VERCEL_IGNORE_SAVED" == "1" ]] && return 0
+
+    if [[ -f "$VERCEL_IGNORE_FILE" ]]; then
+        VERCEL_IGNORE_BACKUP="$(mktemp "$REPO_ROOT/.vercelignore.backup.XXXXXX")"
+        cp -p "$VERCEL_IGNORE_FILE" "$VERCEL_IGNORE_BACKUP"
+        VERCEL_IGNORE_EXISTED=1
+    fi
+    VERCEL_IGNORE_SAVED=1
+}
+
+restore_vercelignore() {
+    [[ "$VERCEL_IGNORE_SAVED" == "1" ]] || return 0
+
+    if [[ "$VERCEL_IGNORE_EXISTED" == "1" ]]; then
+        cp -p "$VERCEL_IGNORE_BACKUP" "$VERCEL_IGNORE_FILE"
+        rm -f "$VERCEL_IGNORE_BACKUP"
+    else
+        rm -f "$VERCEL_IGNORE_FILE"
+    fi
+
+    VERCEL_IGNORE_BACKUP=""
+    VERCEL_IGNORE_EXISTED=0
+    VERCEL_IGNORE_SAVED=0
+}
+
+write_api_vercelignore() {
+    save_original_vercelignore
+    cat > "$VERCEL_IGNORE_FILE" <<'IGNORE'
+# Exclude local build output and dependency trees from the monorepo upload.
+# Keep backend/storelimitlessbackend intact so Vercel can resolve its Root Directory.
+/.git/
+/build/
+/releases/
+/data/
+/Store-Limitless-api/
+.vercel-context-backup.*
+.vercelignore.backup.*
+**/node_modules/
+**/.next/
+**/dist/
+**/target/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.venv/
+**/venv/
+**/*.pyc
+**/*.log
+IGNORE
+}
+
+write_frontend_vercelignore() {
+    # Use the same exclusion-only filter. Preserve frontend/ so Vercel can
+    # resolve the configured Root Directory and run its source build.
+    write_api_vercelignore
+}
+
+trap restore_vercelignore EXIT
+
+
 release_asset_paths() {
     printf '%s\n' \
         "$LINUX_RELEASE_DIR/StoreLimitlessServer.LOCAL._0.1.0" \
@@ -132,6 +199,28 @@ run_vercel_in() {
 # from inside that configured subdirectory makes the CLI append it twice.
 # Expose the selected app's .vercel context at the monorepo root temporarily,
 # then invoke the CLI from the repository root so Root Directory resolves once.
+restore_orphaned_root_vercel() {
+    local candidate
+    local -a candidates=()
+
+    [[ -e "$REPO_ROOT/.vercel" || -L "$REPO_ROOT/.vercel" ]] && return 0
+
+    shopt -s nullglob
+    candidates=("$REPO_ROOT"/.vercel-context-backup.*)
+    shopt -u nullglob
+
+    for candidate in "${candidates[@]}"; do
+        if [[ -e "$candidate/original" || -L "$candidate/original" ]]; then
+            mv "$candidate/original" "$REPO_ROOT/.vercel" || fail "Could not restore the previous repository-root .vercel directory from $candidate."
+            rmdir "$candidate" 2>/dev/null || true
+            log "Restored previous repository-root Vercel context"
+            return 0
+        fi
+        # Remove an empty leftover backup directory, but never delete contents.
+        rmdir "$candidate" 2>/dev/null || true
+    done
+}
+
 run_vercel_from_repo_root() {
     local project_dir="$1"
     shift
@@ -142,8 +231,10 @@ run_vercel_from_repo_root() {
 
     [[ -d "$project_dir/.vercel" ]] || fail "Missing Vercel project context: $project_dir/.vercel"
 
+    restore_orphaned_root_vercel
+
     if [[ -e "$root_vercel_dir" || -L "$root_vercel_dir" ]]; then
-        backup_dir="$(mktemp -d "$REPO_ROOT/.vercel-context-backup.XXXXXX")"
+        backup_dir="$(mktemp -d "${TMPDIR:-/tmp}/storelimitless-vercel-context.XXXXXX")"
         mv "$root_vercel_dir" "$backup_dir/original"
     fi
 
@@ -164,7 +255,7 @@ run_vercel_from_repo_root() {
     rm -f "$root_vercel_dir"
     if [[ -n "$backup_dir" ]]; then
         mv "$backup_dir/original" "$root_vercel_dir"
-        rmdir "$backup_dir"
+        rm -rf -- "$backup_dir"
     fi
 
     return "$status"
@@ -346,36 +437,29 @@ log "Building the Vite frontend locally"
 # Only file chunk PUT bodies discover and use the current Quick Tunnel directly.
 (cd "$FRONTEND_DIR" && VITE_API_URL="$BACKEND_API_URL" npm run build)
 
-log "Preparing Vercel static Build Output for the frontend"
-rm -rf "$FRONTEND_VERCEL_DIR/output"
-mkdir -p "$FRONTEND_VERCEL_DIR/output/static"
-cp -a "$FRONTEND_DIR/dist/." "$FRONTEND_VERCEL_DIR/output/static/"
+# The local Vite build above is a preflight check. The production frontend is
+# built from source by Vercel so its configured Root Directory remains present.
 
-# Build Output API v3: serve files first, then send SPA routes to index.html.
-cat > "$FRONTEND_VERCEL_DIR/output/config.json" <<'JSON'
-{
-  "version": 3,
-  "routes": [
-    { "handle": "filesystem" },
-    { "src": "/(.*)", "dest": "/index.html" }
-  ]
-}
-JSON
 
-[[ -f "$FRONTEND_VERCEL_DIR/output/config.json" ]] || fail "Failed to create frontend Vercel output configuration"
-[[ -f "$FRONTEND_VERCEL_DIR/output/static/index.html" ]] || fail "Frontend Vercel output is missing index.html"
 
 # Build and deploy through the monorepo root. Each project Root Directory is
 # repository-relative, so the CLI must not start inside the configured app path.
 # Deploy the API proxy first so /api/current-upstream exists before the new
 # frontend starts calling it for direct file uploads.
+write_api_vercelignore
+log "API upload excludes local data, releases, dependency trees, and build caches"
 deploy_project "$BACKEND_DIR" "$BACKEND_PROJECT" "API proxy" "source"
 BACKEND_DEPLOYMENT_URL="$DEPLOYMENT_URL_RESULT"
 # cdn-storelimitless.vercel.app is attached to the API proxy project; Vercel updates it on production deploy.
 
-deploy_project "$FRONTEND_DIR" "$FRONTEND_PROJECT" "frontend" "prebuilt"
+write_frontend_vercelignore
+log "Frontend source upload excludes local data, releases, dependency trees, and build caches"
+deploy_project "$FRONTEND_DIR" "$FRONTEND_PROJECT" "frontend" "source"
 FRONTEND_DEPLOYMENT_URL="$DEPLOYMENT_URL_RESULT"
 # storelimitless.vercel.app is attached to the frontend project; Vercel updates it on production deploy.
+
+# Restore the user/repository .vercelignore before leaving the deployment flow.
+restore_vercelignore
 
 # Release binaries are built separately by ./build.sh 1 1. Only publish once
 # both production deployments have succeeded.

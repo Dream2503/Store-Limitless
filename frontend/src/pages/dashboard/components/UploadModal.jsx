@@ -27,9 +27,9 @@ const isStoreLimitlessShareUrl = (value) => {
     }
 };
 
-// Each chunk is its own PUT; the server writes it to disk as it arrives.
-const CHUNK_SIZE = 1024 * 1024;
-// How many chunks are in flight at once (browsers allow ~6 connections per host).
+// Use larger ranged PUTs to reduce per-request overhead on high-latency tunnels.
+const CHUNK_SIZE = 8 * 1024 * 1024;
+// Keep a bounded set of concurrent requests while the browser multiplexes them.
 const PARALLEL_CHUNKS = 8;
 const MAX_CHUNK_ATTEMPTS = 3;
 

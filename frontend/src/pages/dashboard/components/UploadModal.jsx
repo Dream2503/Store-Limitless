@@ -1017,7 +1017,29 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 if (uploadMode === "file") {
                     try {
                         await waitWhilePaused(batchTransfer);
-                        await uploadFileInChunks(jobId, selectedFile, directUploadApiUrl, cancelToken, batchTransfer.xhrs, null, isItemCancelled);
+                        await uploadFileInChunks(
+                            jobId,
+                            selectedFile,
+                            directUploadApiUrl,
+                            cancelToken,
+                            batchTransfer.xhrs,
+                            (progress) => {
+                                // XHR reports partial bytes while each chunk is still in flight.
+                                // Persist these through the sparse Redis progress hash so the
+                                // 500ms tray poll observes fresh values without rewriting the queue.
+                                void publishBatch({
+                                    item_index: itemNumber - 1,
+                                    item_status: "uploading",
+                                    item_transfer: progress.transfer,
+                                    item_total: progress.total,
+                                    item_progress: progress.progress,
+                                    item_message: progress.message,
+                                }).catch((error) => {
+                                    console.error("Could not publish live upload progress:", error);
+                                });
+                            },
+                            isItemCancelled,
+                        );
                         await waitWhilePaused(batchTransfer);
                         if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
                         // Sending browser chunks is not enough: wait until the storage provider

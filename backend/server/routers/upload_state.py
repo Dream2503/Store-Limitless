@@ -53,6 +53,12 @@ async def touch_upload_activity(job_id: str, timestamp: float | None = None) -> 
     )
 
 
+def upload_chunk_progress_key(job_id: str) -> str:
+    """Build the Redis hash for display-only bytes currently arriving in each chunk."""
+
+    return f"upload:chunk-progress:{job_id}"
+
+
 def upload_job_key(job_id: str) -> str:
     """Build the Redis key containing ownership and display metadata for a job."""
 
@@ -596,6 +602,7 @@ async def cleanup_upload_artifacts(job_id: str) -> None:
         await Redis.delete_key(key)
 
     await Redis.delete_key(upload_activity_key(job_id))
+    await Redis.delete_key(upload_chunk_progress_key(job_id))
 
     for path in paths:
         path.unlink(missing_ok=True)
@@ -826,6 +833,53 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                 current_upload_total = current_total
                 current_download_transfer = max(0, int(getattr(child_progress, "download_transfer", 0) or 0))
                 current_download_total = max(0, int(getattr(child_progress, "download_total", 0) or 0))
+
+                # Reflect bytes currently arriving at FastAPI within each active chunk.
+                # Merge offsets with already-confirmed ranges instead of adding them to
+                # child_progress.download_transfer, which may already include completed
+                # chunks. The committed-range worker remains unchanged.
+                if str(metadata.get("kind") or "") == "file":
+                    session_state = await Redis.get_json(upload_session_key(current_job_id))
+                    raw_chunks = await Redis.redis.hgetall(upload_chunk_progress_key(current_job_id))
+                    if isinstance(session_state, dict):
+                        total_received = 0
+                        raw_ranges = session_state.get("ranges", [])
+                        confirmed_ranges = []
+                        if isinstance(raw_ranges, list):
+                            for raw_range in raw_ranges:
+                                if isinstance(raw_range, (list, tuple)) and len(raw_range) == 2:
+                                    try:
+                                        confirmed_ranges.append((int(raw_range[0]), int(raw_range[1])))
+                                    except (TypeError, ValueError):
+                                        continue
+
+                        # Count each active byte range only once, including its overlap
+                        # with committed ranges or another retried request.
+                        active_ranges = []
+                        for raw_start, raw_end in raw_chunks.items():
+                            try:
+                                start, end = int(raw_start), int(raw_end)
+                                if end > start:
+                                    active_ranges.append((start, end))
+                            except (TypeError, ValueError):
+                                continue
+
+                        all_ranges = sorted(confirmed_ranges + active_ranges)
+                        merged_end = 0
+                        for range_start, range_end in all_ranges:
+                            if range_start > merged_end:
+                                # Holes are not transferred yet; only count actual bytes.
+                                total_received += range_end - range_start
+                                merged_end = range_end
+                            elif range_end > merged_end:
+                                total_received += range_end - merged_end
+                                merged_end = range_end
+
+                        current_download_transfer = max(
+                            current_download_transfer,
+                            min(current_total, total_received),
+                        )
+
                 current_download_active = bool(getattr(child_progress, "download_active", False))
                 current_download_speed = max(0.0, float(getattr(child_progress, "download_speed", 0) or 0))
                 current_upload_speed = max(0.0, float(getattr(child_progress, "upload_speed", 0) or 0))

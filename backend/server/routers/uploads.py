@@ -51,6 +51,7 @@ from .upload_state import (
     upload_batch_key,
     upload_batch_progress_key,
     touch_upload_activity,
+    upload_chunk_progress_key,
     user_upload_batches_key,
     upload_job_key,
     upload_session_key,
@@ -1393,6 +1394,18 @@ async def upload_chunk(
 
                 await buffer.write(chunk)
                 position += len(chunk)
+
+                # Publish the in-flight body offset independently of completed ranges.
+                # GET /upload-batches can then reflect bytes arriving within a large
+                # 8 MiB request instead of waiting for the whole request to finish.
+                # This is display-only progress: record_written_range remains the sole
+                # source of committed ranges used by the storage worker.
+                await Redis.redis.hset(
+                    upload_chunk_progress_key(job_id),
+                    str(offset),
+                    str(min(total, position)),
+                )
+                await Redis.redis.expire(upload_chunk_progress_key(job_id), 60 * 60)
 
                 # A range is committed to Redis only after its complete request body
                 # arrives. Large/slow 8 MiB requests must still count as activity while

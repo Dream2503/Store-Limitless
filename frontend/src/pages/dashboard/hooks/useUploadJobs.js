@@ -151,6 +151,9 @@ export default function useUploadJobs(refreshDirectory) {
                         name: String(batch.name || "Upload task"),
                         kind: String(batch.kind || "file"),
                         directory: String(batch.directory || "/home"),
+                        directories: Array.isArray(batch.directories) && batch.directories.length
+                            ? [...new Set(batch.directories.map((value) => String(value || "").trim()).filter(Boolean))]
+                            : [String(batch.directory || "/home")],
                         dataCenter: String(batch.data_center || ""),
                         items: Array.isArray(batch.items) ? batch.items : [],
                         torrentFiles: Array.isArray(batch.torrent_files) ? batch.torrent_files : [],
@@ -357,10 +360,12 @@ export default function useUploadJobs(refreshDirectory) {
                 for (const batch of batches) {
                     if (!["completed", "error", "cancelled"].includes(batch.status) || refreshedTerminalIds.current.has(batch.jobId)) continue;
                     refreshedTerminalIds.current.add(batch.jobId);
-                    try {
-                        await refreshDirectoryRef.current(batch.directory || "/home");
-                    } catch (error) {
-                        console.error("Failed to refresh the directory after an upload task finished:", error);
+                    for (const directory of (batch.directories?.length ? batch.directories : [batch.directory || "/home"])) {
+                        try {
+                            await refreshDirectoryRef.current(directory);
+                        } catch (error) {
+                            console.error(`Failed to refresh ${directory} after an upload task finished:`, error);
+                        }
                     }
                 }
             } catch (error) {

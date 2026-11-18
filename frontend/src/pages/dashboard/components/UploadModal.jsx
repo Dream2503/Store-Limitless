@@ -402,13 +402,22 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             file: selectedFile, relativePath: getUploadRelativePath(selectedFile),
         })) : [];
         const queueItems = uploadMode === "file" ? filesWithPaths.map(({file, relativePath}) => ({
-            name: relativePath, size: file.size
+            file,
+            relativePath,
+            baseDirectory: directory,
+            dataCenter,
+            name: relativePath,
+            size: file.size,
+            status: "queued",
+            message: "Queued",
         })) : links.map((value, index) => ({
             // Do not publish pending URLs to the server before their turn starts.
             name: isStoreLimitlessShareUrl(value)
                 ? `StoreLimitless copy ${index + 1}`
                 : isTelegramMessageUrl(value) ? `Telegram message ${index + 1}` : `Link ${index + 1}`,
             size: 0,
+            status: "queued",
+            message: "Queued",
         }));
         const queueTotal = queueItems.length;
         // The browser owns queue order and actual submission; server-side tray records hold lightweight task metadata.
@@ -419,46 +428,154 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         let batchTransfer = null;
         let cancelToken = {cancelled: false, paused: false, pauseWaiters: []};
 
+        let isQueueRunner = false;
+        let sharedFileQueue = null;
+
         try {
-            const folderRoots = [...new Set(filesWithPaths.map(({relativePath}) => relativePath.split("/").filter(Boolean)[0]).filter(Boolean))];
-            const batchName = uploadMode === "link" ? "Link import" : folderRoots.length === 1 && filesWithPaths.some(({relativePath}) => relativePath.includes("/")) ? `${folderRoots[0]} (${filesWithPaths.length} file${filesWithPaths.length === 1 ? "" : "s"})` : `${filesWithPaths.length} file${filesWithPaths.length === 1 ? "" : "s"}`;
-            // Create one tray card per item. These records contain task metadata only;
-            // the frontend still decides when each file or URL is submitted for processing.
-            const createdTasks = [];
-            try {
-                for (const [index, item] of queueItems.entries()) {
-                    const taskName = queueItems.length === 1 ? batchName : item.name;
-                    const batchResponse = await fetch(`${API_URL}/auth/upload-batches`, {
-                        method: "POST",
-                        headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
-                        body: JSON.stringify({
-                            name: taskName,
-                            kind: uploadMode,
-                            directory,
-                            data_center: dataCenter,
-                            items: [item],
-                        }),
-                    });
-                    if (!batchResponse.ok) {
-                        let detail = `Could not create upload task ${index + 1} of ${queueTotal} (${batchResponse.status})`;
-                        try {
-                            const payload = await batchResponse.json();
-                            detail = payload.detail || detail;
-                        } catch {
-                            // Keep the HTTP status text if the response isn't JSON.
-                        }
-                        throw new Error(detail);
+            const batchItemPayload = (item) => {
+                const relativeParts = String(item.relativePath || "").split("/").filter(Boolean);
+                relativeParts.pop();
+                const baseDirectory = String(item.baseDirectory || item.directory || directory).replace(/\/$/, "");
+                const destinationDirectory = relativeParts.length
+                    ? `${baseDirectory}/${relativeParts.join("/")}`
+                    : baseDirectory;
+
+                return {
+                    name: String(item.name || "Upload item"),
+                    size: Math.max(0, Number(item.size) || 0),
+                    status: String(item.status || "queued"),
+                    message: String(item.message || "Queued"),
+                    directory: destinationDirectory,
+                    data_center: String(item.dataCenter || item.data_center || dataCenter),
+                    ...(["transfer", "total", "progress", "download_transfer", "download_total", "download_speed", "download_eta",
+                        "upload_transfer", "upload_total", "upload_speed", "upload_eta"].reduce((values, key) => {
+                        if (item[key] !== undefined) values[key] = item[key];
+                        return values;
+                    }, {})),
+                };
+            };
+
+            const ensureFoldersForQueueItems = async (entries) => {
+                const folderPaths = new Set();
+                for (const item of entries) {
+                    const relativePath = String(item.relativePath || item.name || "");
+                    const parts = relativePath.split("/").filter(Boolean);
+                    parts.pop();
+                    let currentPath = String(item.baseDirectory || directory).replace(/\\/g, "/").replace(/\/$/, "");
+                    for (const part of parts) {
+                        currentPath = `${currentPath}/${part}`;
+                        folderPaths.add(currentPath);
                     }
-                    const batchPayload = await batchResponse.json();
-                    const createdBatchId = String(batchPayload.batch_id || "");
-                    if (!createdBatchId) throw new Error("The server did not return an upload task ID.");
-                    createdTasks.push({
-                        batchId: createdBatchId,
-                        transfer: {cancelToken: {cancelled: false, paused: false, pauseWaiters: []}, xhrs: new Set(), activeJobId: ""},
+                }
+
+                if (!folderPaths.size) return;
+                const treeResponse = await fetch(`${API_URL}/auth/tree`, {headers: {Authorization: `Bearer ${token}`}});
+                if (!treeResponse.ok) throw new Error(`Could not load existing folders (${treeResponse.status})`);
+                const tree = await treeResponse.json();
+                const existingPaths = new Set((tree.directories || [])
+                    .filter((folder) => !folder.is_deleted)
+                    .map((folder) => String(folder.path || "").replace(/\\/g, "/").replace(/\/$/, "")));
+                const orderedFolderPaths = Array.from(folderPaths).sort((a, b) => a.split("/").length - b.split("/").length);
+
+                for (const folderPath of orderedFolderPaths) {
+                    if (existingPaths.has(folderPath)) continue;
+                    const parentPath = folderPath.slice(0, folderPath.lastIndexOf("/")) || "/";
+                    const folderName = folderPath.slice(folderPath.lastIndexOf("/") + 1);
+                    const params = new URLSearchParams({directory: parentPath, name: folderName});
+                    const folderResponse = await fetch(`${API_URL}/auth/create-folder?${params.toString()}`, {
+                        method: "POST", headers: {Authorization: `Bearer ${token}`},
                     });
+                    if (!folderResponse.ok) {
+                        let errorMessage = `Could not create folder ${folderName} (${folderResponse.status})`;
+                        try {
+                            const errorData = await folderResponse.json();
+                            errorMessage = errorData.detail || errorMessage;
+                        } catch {
+                            // Keep the status message when no JSON response is available.
+                        }
+                        throw new Error(errorMessage);
+                    }
+                    existingPaths.add(folderPath);
+                }
+            };
+
+            // Append newly selected files to the current queue instead of creating
+            // independent tasks. The existing worker will pick them up in order.
+            if (uploadMode === "file") {
+                const activeQueue = window.__storeLimitlessFileUploadQueue;
+                if (activeQueue?.accepting && activeQueue.token === token && activeQueue.items && activeQueue.transfer) {
+                    activeQueue.pendingAppends = Math.max(0, Number(activeQueue.pendingAppends) || 0) + 1;
+                    try {
+                        await ensureFoldersForQueueItems(queueItems);
+                        const appendResponse = await fetch(
+                            `${API_URL}/auth/upload-batches/${encodeURIComponent(activeQueue.batchId)}/append`,
+                            {
+                                method: "POST",
+                                headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
+                                body: JSON.stringify({items: queueItems.map(batchItemPayload)}),
+                            },
+                        );
+                        const appendPayload = await appendResponse.json().catch(() => ({}));
+                        if (!appendResponse.ok) {
+                            throw new Error(appendPayload.detail || `Could not append files to the upload queue (${appendResponse.status})`);
+                        }
+                        activeQueue.items.push(...queueItems);
+                        setQueueProgress({current: 0, total: activeQueue.items.length});
+                        if (modal) onClose?.(); else navigate(directoryToRoute(directory));
+                        return;
+                    } finally {
+                        activeQueue.pendingAppends = Math.max(0, Number(activeQueue.pendingAppends) - 1);
+                    }
+                }
+
+                await ensureFoldersForQueueItems(queueItems);
+            }
+
+            const batchName = uploadMode === "link" ? "Link import" : "Upload queue";
+            // File selections share one batch with every selected item. Link imports keep
+            // their existing per-link task behavior.
+            const createdTasks = [];
+            const createBatch = async (taskName, items) => {
+                const batchResponse = await fetch(`${API_URL}/auth/upload-batches`, {
+                    method: "POST",
+                    headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        name: taskName,
+                        kind: uploadMode,
+                        directory,
+                        data_center: dataCenter,
+                        items,
+                    }),
+                });
+                if (!batchResponse.ok) {
+                    let detail = `Could not create upload task (${batchResponse.status})`;
+                    try {
+                        const payload = await batchResponse.json();
+                        detail = payload.detail || detail;
+                    } catch {
+                        // Keep the HTTP status text if the response isn't JSON.
+                    }
+                    throw new Error(detail);
+                }
+                const batchPayload = await batchResponse.json();
+                const createdBatchId = String(batchPayload.batch_id || "");
+                if (!createdBatchId) throw new Error("The server did not return an upload task ID.");
+                createdTasks.push({
+                    batchId: createdBatchId,
+                    transfer: {cancelToken: {cancelled: false, paused: false, pauseWaiters: []}, xhrs: new Set(), activeJobId: ""},
+                });
+            };
+
+            try {
+                if (uploadMode === "file") {
+                    await createBatch(batchName, queueItems.map(batchItemPayload));
+                } else {
+                    for (const item of queueItems) {
+                        const taskName = queueItems.length === 1 ? batchName : item.name;
+                        await createBatch(taskName, [item]);
+                    }
                 }
             } catch (error) {
-                // Remove any partial set of cards if registering the whole local queue fails.
                 await Promise.all(createdTasks.map(({batchId: createdBatchId}) =>
                     fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(createdBatchId)}`, {
                         method: "DELETE",
@@ -477,11 +594,23 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             batchId = batchIds[0];
             batchTransfer = createdTasks[0].transfer;
             cancelToken = batchTransfer.cancelToken;
+            if (uploadMode === "file") {
+                isQueueRunner = true;
+                sharedFileQueue = {
+                    batchId,
+                    transfer: batchTransfer,
+                    items: queueItems,
+                    token,
+                    pendingAppends: 0,
+                    accepting: true,
+                };
+                window.__storeLimitlessFileUploadQueue = sharedFileQueue;
+            }
 
             /**
-             * Publish progress for the active item only. The browser retains file objects
-             * and processing order; pending links are represented by safe placeholder names
-             * until their individual turns begin.
+             * Publish the complete file queue and the active item's progress. Browser File
+             * objects stay local; Redis stores safe metadata so every signed-in device can
+             * display the shared queue and its current item.
              */
             const publishBatch = async (updates) => {
                 if (!batchId) return;
@@ -492,20 +621,51 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     batchUpdates.status = "paused";
                     batchUpdates.message = "Paused by you";
                 }
-                // Every server task represents exactly one queue item; the browser
-                // coordinates the full queue and publishes progress only for the active task.
-                if (batchUpdates.item_index != null) batchUpdates.item_index = 0;
-                if (batchUpdates.current_index != null) {
-                    batchUpdates.current_index = batchUpdates.status === "completed" ? 1 : 0;
-                }
-                if (batchUpdates.completed_items != null) {
-                    batchUpdates.completed_items = batchUpdates.item_status === "completed" || batchUpdates.status === "completed" ? 1 : 0;
-                }
-                if (Array.isArray(batchUpdates.items)) {
-                    batchUpdates.items = [{
-                        ...(queueItems[activeQueueIndex] || queueItems[0]),
-                        ...(batchUpdates.items[0] || {}),
-                    }];
+                if (uploadMode === "file") {
+                    const itemIndex = Math.max(0, Math.min(queueItems.length - 1,
+                        Number.isInteger(Number(batchUpdates.item_index)) ? Number(batchUpdates.item_index) : activeQueueIndex));
+                    if (Array.isArray(batchUpdates.items) && batchUpdates.items.length) {
+                        if (batchUpdates.items.length === queueItems.length) {
+                            batchUpdates.items.forEach((item, index) => {
+                                queueItems[index] = {...queueItems[index], ...item};
+                            });
+                        } else {
+                            queueItems[itemIndex] = {...queueItems[itemIndex], ...batchUpdates.items[0]};
+                        }
+                    }
+                    if (queueItems[itemIndex]) {
+                        const currentItem = queueItems[itemIndex];
+                        if (batchUpdates.item_status != null) currentItem.status = String(batchUpdates.item_status);
+                        if (batchUpdates.item_message != null) currentItem.message = String(batchUpdates.item_message);
+                        if (batchUpdates.item_transfer != null) currentItem.transfer = Number(batchUpdates.item_transfer) || 0;
+                        if (batchUpdates.item_total != null) currentItem.total = Number(batchUpdates.item_total) || 0;
+                        if (batchUpdates.item_progress != null) currentItem.progress = Number(batchUpdates.item_progress) || 0;
+                    }
+                    batchUpdates.items = queueItems.map(batchItemPayload);
+                    batchUpdates.total_items = queueItems.length;
+                    batchUpdates.completed_items = queueItems.filter((item) => item.status === "completed").length;
+                    if (batchUpdates.current_index == null) batchUpdates.current_index = activeQueueIndex;
+                    delete batchUpdates.item_index;
+                    delete batchUpdates.item_status;
+                    delete batchUpdates.item_message;
+                    delete batchUpdates.item_transfer;
+                    delete batchUpdates.item_total;
+                    delete batchUpdates.item_progress;
+                } else {
+                    // Link imports still use one tray task per submitted link.
+                    if (batchUpdates.item_index != null) batchUpdates.item_index = 0;
+                    if (batchUpdates.current_index != null) {
+                        batchUpdates.current_index = batchUpdates.status === "completed" ? 1 : 0;
+                    }
+                    if (batchUpdates.completed_items != null) {
+                        batchUpdates.completed_items = batchUpdates.item_status === "completed" || batchUpdates.status === "completed" ? 1 : 0;
+                    }
+                    if (Array.isArray(batchUpdates.items)) {
+                        batchUpdates.items = [{
+                            ...(queueItems[activeQueueIndex] || queueItems[0]),
+                            ...(batchUpdates.items[0] || {}),
+                        }];
+                    }
                 }
                 const currentToken = localStorage.getItem("token");
                 if (!currentToken) throw new Error("Your session has expired.");
@@ -721,7 +881,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             }
 
             /** Create one child upload job, and fully finish it before starting the next item. */
-            const createJob = async (selectedFile, selectedLink = "", destinationDirectory = directory, displayName = selectedFile?.name || selectedLink, itemNumber = 1) => {
+            const createJob = async (selectedFile, selectedLink = "", destinationDirectory = directory, displayName = selectedFile?.name || selectedLink, itemNumber = 1, itemDataCenter = dataCenter) => {
                 await waitWhilePaused(cancelToken);
                 if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
                 let response;
@@ -732,13 +892,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             "X-File-Name": selectedFile.name,
                             "X-File-Size": String(selectedFile.size),
                             "X-Upload-Batch-Id": batchId,
-                            "X-Data-Center": dataCenter,
+                            "X-Data-Center": itemDataCenter,
                             "X-Directory": destinationDirectory,
                         },
                     });
                 } else {
                     const params = new URLSearchParams({
-                        link: selectedLink, data_center: dataCenter, directory: destinationDirectory, batch_id: batchId
+                        link: selectedLink, data_center: itemDataCenter, directory: destinationDirectory, batch_id: batchId
                     });
                     if (selectedLink.toLowerCase().startsWith("magnet:?")) {
                         const selectedIndexes = torrentSelections[selectedLink];
@@ -788,7 +948,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     }],
                     message: isStoreLimitlessCopy
                         ? "Copying StoreLimitless file reference"
-                        : telegramProcessing ? "Processing Telegram message" : `Uploading ${itemNumber} of ${queueTotal}`
+                        : telegramProcessing ? "Processing Telegram message" : `Uploading ${itemNumber} of ${queueItems.length}`
                 });
 
                 const publishCurrentFileProgress = (progress, immediate = false) => {
@@ -850,114 +1010,127 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             let successfulItems = 0;
 
             if (uploadMode === "file") {
-                // Preserve the nested folder layout, but cancel checks prevent the next
-                // directory or file request from starting after the user cancels the task.
-                const folderPaths = new Set();
-                for (const {relativePath} of filesWithPaths) {
-                    const parts = relativePath.split("/").filter(Boolean);
-                    parts.pop();
-                    let path = directory;
-                    for (const part of parts) {
-                        path = `${path.replace(/\/$/, "")}/${part}`;
-                        folderPaths.add(path);
-                    }
-                }
-
-                if (folderPaths.size) {
-                    const treeResponse = await fetch(`${API_URL}/auth/tree`, {headers: {Authorization: `Bearer ${token}`}});
-                    if (!treeResponse.ok) throw new Error(`Could not load existing folders (${treeResponse.status})`);
-                    const tree = await treeResponse.json();
-                    const existingPaths = new Set((tree.directories || [])
-                        .filter((folder) => !folder.is_deleted)
-                        .map((folder) => String(folder.path || "").replace(/\\/g, "/").replace(/\/$/, "")));
-                    const orderedFolderPaths = Array.from(folderPaths).sort((a, b) => a.split("/").length - b.split("/").length);
-                    for (const folderPath of orderedFolderPaths) {
-                        if (existingPaths.has(folderPath)) continue;
-                        const parentPath = folderPath.slice(0, folderPath.lastIndexOf("/")) || "/";
-                        const folderName = folderPath.slice(folderPath.lastIndexOf("/") + 1);
-                        const params = new URLSearchParams({directory: parentPath, name: folderName});
-                        const folderResponse = await fetch(`${API_URL}/auth/create-folder?${params.toString()}`, {
-                            method: "POST", headers: {Authorization: `Bearer ${token}`},
-                        });
-                        if (!folderResponse.ok) {
-                            let errorMessage = `Could not create folder ${folderName} (${folderResponse.status})`;
-                            try {
-                                const errorData = await folderResponse.json();
-                                errorMessage = errorData.detail || errorMessage;
-                            } catch {
-                                // Keep the status message when no JSON response is available.
-                            }
-                            throw new Error(errorMessage);
+                // Consume a growing shared queue. New file selections append to the same
+                // array while this worker is active, so only this loop can start a file.
+                let index = 0;
+                while (true) {
+                    if (index >= queueItems.length) {
+                        if (sharedFileQueue && Number(sharedFileQueue.pendingAppends) > 0) {
+                            await sleep(150);
+                            continue;
                         }
-                        existingPaths.add(folderPath);
+                        if (sharedFileQueue) sharedFileQueue.accepting = false;
+                        break;
                     }
-                }
 
-                for (const [index, {file: selectedFile, relativePath}] of filesWithPaths.entries()) {
                     activeQueueIndex = index;
-                    batchId = batchIds[index];
-                    batchTransfer = window.__storeLimitlessUploadTransfers?.get(batchId);
-                    if (!batchTransfer) throw new Error(`Upload task ${index + 1} is no longer available.`);
+                    batchId = batchIds[0];
+                    batchTransfer = sharedFileQueue?.transfer || window.__storeLimitlessUploadTransfers?.get(batchId);
+                    if (!batchTransfer) throw new Error("The shared upload queue is no longer available.");
                     cancelToken = batchTransfer.cancelToken;
-                    if (cancelToken.cancelled) continue;
+                    const queueItem = queueItems[index];
+                    const selectedFile = queueItem.file;
+                    const relativePath = String(queueItem.relativePath || queueItem.name || selectedFile?.name || "Upload");
+                    if (!selectedFile) {
+                        queueItem.status = "error";
+                        queueItem.message = "The browser file is no longer available";
+                        index += 1;
+                        continue;
+                    }
 
-                    setQueueProgress({current: index + 1, total: filesWithPaths.length});
+                    if (cancelToken.cancelled) {
+                        queueItem.status = "cancelled";
+                        queueItem.message = "Cancelled";
+                        index += 1;
+                        continue;
+                    }
+
+                    setQueueProgress({current: index + 1, total: queueItems.length});
                     const parts = relativePath.split("/").filter(Boolean);
                     parts.pop();
-                    const destinationDirectory = parts.length ? `${directory.replace(/\/$/, "")}/${parts.join("/")}` : directory;
+                    const baseDirectory = String(queueItem.baseDirectory || directory).replace(/\/$/, "");
+                    const destinationDirectory = parts.length ? `${baseDirectory}/${parts.join("/")}` : baseDirectory;
+
                     try {
-                        // Keep startup inside this item's catch block so a cancellation
-                        // during the status update cannot stop the remaining queue.
                         await publishBatch({
-                            items: [{...queueItems[index], status: "queued", message: "Queued in browser"}],
-                            total_items: 1,
+                            items: [{...queueItem, status: "uploading", message: "Queued in browser"}],
+                            total_items: queueItems.length,
                             status: "uploading",
-                            current_index: 0,
-                            completed_items: 0,
+                            current_index: index,
                             current_job_id: "",
                             current_name: relativePath,
-                            item_index: 0,
+                            item_index: index,
                             item_status: "uploading",
                             item_message: "Uploading",
-                            message: `Uploading ${index + 1} of ${queueTotal}`
+                            message: `Uploading ${index + 1} of ${queueItems.length}`,
                         });
-                        await createJob(selectedFile, "", destinationDirectory, relativePath, index + 1);
-                        successfulItems++;
+                        await createJob(
+                            selectedFile,
+                            "",
+                            destinationDirectory,
+                            relativePath,
+                            index + 1,
+                            String(queueItem.dataCenter || dataCenter),
+                        );
+                        successfulItems += 1;
                         await publishBatch({
-                            status: "completed",
-                            current_index: 1,
-                            completed_items: 1,
+                            status: "uploading",
+                            current_index: index + 1,
                             current_job_id: "",
                             current_name: "",
-                            item_index: 0,
+                            item_index: index,
                             item_status: "completed",
                             item_message: "Uploaded successfully",
-                            message: `Completed ${successfulItems} of ${queueTotal}`
+                            message: `Completed ${successfulItems} of ${queueItems.length}`,
                         });
                     } catch (error) {
                         if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) {
-                            // Cancellation belongs to this file only. Continue with its siblings.
+                            queueItem.status = "cancelled";
+                            queueItem.message = "Cancelled";
+                            index += 1;
                             continue;
                         }
                         const failureMessage = error instanceof Error ? error.message : "Upload failed";
                         try {
                             await publishBatch({
-                                status: "error",
-                                current_index: 0,
-                                completed_items: 0,
+                                status: "uploading",
+                                current_index: index + 1,
                                 current_job_id: "",
                                 current_name: "",
-                                item_index: 0,
+                                item_index: index,
                                 item_status: "error",
                                 item_message: failureMessage,
-                                message: failureMessage
+                                message: failureMessage,
                             });
                         } catch (publishError) {
-                            if (cancelToken.cancelled || /cancelled/i.test(publishError instanceof Error ? publishError.message : "")) continue;
+                            if (cancelToken.cancelled || /cancelled/i.test(publishError instanceof Error ? publishError.message : "")) {
+                                queueItem.status = "cancelled";
+                                queueItem.message = "Cancelled";
+                                index += 1;
+                                continue;
+                            }
                             throw publishError;
                         }
                     }
+                    index += 1;
                 }
+
+                const hasFailures = queueItems.some((item) => item.status === "error");
+                const wasCancelled = Boolean(cancelToken.cancelled);
+                await publishBatch({
+                    status: wasCancelled ? "cancelled" : hasFailures ? "error" : "completed",
+                    items: queueItems,
+                    total_items: queueItems.length,
+                    current_index: queueItems.length,
+                    current_job_id: "",
+                    current_name: "",
+                    completed_items: queueItems.filter((item) => item.status === "completed").length,
+                    message: wasCancelled
+                        ? "Upload queue cancelled"
+                        : hasFailures
+                            ? `Queue finished with errors · ${successfulItems} of ${queueItems.length} completed`
+                            : `Upload queue completed · ${successfulItems} files uploaded`,
+                });
             } else {
                 for (const [index, selectedLink] of links.entries()) {
                     activeQueueIndex = index;
@@ -981,7 +1154,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             item_index: 0,
                             item_status: "uploading",
                             item_message: "Queued in browser",
-                            message: `Queued ${index + 1} of ${queueTotal}`
+                            message: `Queued ${index + 1} of ${queueItems.length}`
                         });
                         const jobResult = await createJob(null, selectedLink, directory, selectedLink, index + 1);
                         successfulItems++;
@@ -1003,7 +1176,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                 status: "completed",
                                 message: wasStoreLimitlessCopy ? "Copied existing storage references" : "Uploaded successfully",
                             }],
-                            message: `Completed ${successfulItems} of ${queueTotal}`
+                            message: `Completed ${successfulItems} of ${queueItems.length}`
                         });
                     } catch (error) {
                         if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) {
@@ -1040,12 +1213,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             if (batchIds.length) {
                 const currentToken = localStorage.getItem("token");
                 if (currentToken) {
-                    for (let index = activeQueueIndex; index < batchIds.length; index += 1) {
+                    const firstBatchIndex = uploadMode === "file" ? 0 : activeQueueIndex;
+                    for (let index = firstBatchIndex; index < batchIds.length; index += 1) {
                         const taskId = batchIds[index];
                         const taskTransfer = window.__storeLimitlessUploadTransfers?.get(taskId);
-                        // Never propagate a single-file cancellation to queued siblings.
-                        if (wasCancelled && index > activeQueueIndex) continue;
-                        if (index > activeQueueIndex && taskTransfer?.cancelToken.cancelled) continue;
+                        // The file queue has one shared task; link queues retain their per-link tasks.
+                        if (!isQueueRunner && wasCancelled && index > activeQueueIndex) continue;
+                        if (!isQueueRunner && index > activeQueueIndex && taskTransfer?.cancelToken.cancelled) continue;
                         if (wasCancelled && taskTransfer) taskTransfer.cancelToken.cancelled = true;
                         try {
                             await fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(taskId)}`, {
@@ -1055,9 +1229,11 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                     status: wasCancelled ? "cancelled" : "error",
                                     current_job_id: "",
                                     current_name: "",
-                                    message: index === activeQueueIndex
-                                        ? (wasCancelled ? "Upload task cancelled" : detail)
-                                        : "Not started because an earlier queue step failed",
+                                    message: isQueueRunner
+                                        ? (wasCancelled ? "Upload queue cancelled" : detail)
+                                        : index === activeQueueIndex
+                                            ? (wasCancelled ? "Upload task cancelled" : detail)
+                                            : "Not started because an earlier queue step failed",
                                 }),
                             });
                         } catch (publishError) {
@@ -1075,11 +1251,16 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             for (const taskId of batchIds) {
                 const transfer = transfers?.get(taskId);
                 if (transfer?.cancelToken) {
-                    transfer.cancelToken.cancelled = true;
                     transfer.cancelToken.paused = false;
                     notifyPauseWaiters(transfer.cancelToken);
                 }
                 if (transfers?.has(taskId)) transfers.delete(taskId);
+            }
+            if (isQueueRunner && sharedFileQueue) {
+                sharedFileQueue.accepting = false;
+                if (window.__storeLimitlessFileUploadQueue === sharedFileQueue) {
+                    delete window.__storeLimitlessFileUploadQueue;
+                }
             }
             uploadRunRef.current = false;
         }

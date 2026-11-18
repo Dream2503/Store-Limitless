@@ -663,7 +663,12 @@ async def replace_text_file_content(
         # Upload brand-new storage chunks but keep this file's database identity.
         # The old links remain in PostgreSQL until every new chunk is uploaded.
         file.links = []
-        async with aclosing(file_upload(file, file_path, intermediate=True)) as upload_stream:
+        async with aclosing(file_upload(
+                file,
+                file_path,
+                intermediate=True,
+                bypass_queue=True,
+        )) as upload_stream:
             async for _ in upload_stream:
                 pass
 

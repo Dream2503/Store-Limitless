@@ -180,27 +180,50 @@ async def create_upload_batch(payload: dict[str, object] = Body(...), user: User
         raise HTTPException(status_code=404, detail="Destination directory not found")
 
     items: list[dict[str, object]] = []
+    known_directories: dict[str, Directory] = {str(directory_obj.path): directory_obj}
 
     for item in raw_items:
         if isinstance(item, str):
             item_name = item.strip()
             item_size = 0
+            item_directory = str(directory_obj.path)
+            item_data_center = data_center
 
         elif isinstance(item, dict):
             item_name = str(item.get("name") or "Upload item").strip()[:500]
 
             try:
                 item_size = max(0, int(item.get("size") or 0))
-
             except (TypeError, ValueError):
                 item_size = 0
+
+            item_directory = perform_validation(
+                str(item.get("directory") or directory_obj.path),
+                "directory",
+            )
+            item_data_center = perform_validation(
+                str(item.get("data_center") or data_center),
+                "data_center",
+            )
         else:
             raise HTTPException(status_code=422, detail="Invalid upload batch item")
 
         if not item_name:
             item_name = "Upload item"
 
-        items.append({"name": item_name, "size": item_size})
+        destination = known_directories.get(item_directory)
+        if destination is None:
+            destination = await Directory.get(user.username, path=Path(item_directory))
+            if destination is None:
+                raise HTTPException(status_code=404, detail=f"Destination directory not found: {item_directory}")
+            known_directories[item_directory] = destination
+
+        items.append({
+            "name": item_name,
+            "size": item_size,
+            "directory": str(destination.path),
+            "data_center": item_data_center,
+        })
 
     batch_id = str(uuid4())
     await register_upload_batch(
@@ -213,6 +236,100 @@ async def create_upload_batch(payload: dict[str, object] = Body(...), user: User
         items=items,
     )
     return JSONResponse({"batch_id": batch_id, "status": "queued"})
+
+
+@router.post("/upload-batches/{batch_id}/append")
+async def append_upload_batch(
+    batch_id: str,
+    payload: dict[str, object] = Body(...),
+    user: User = Depends(get_current_user),
+) -> JSONResponse:
+    """Append newly selected browser files to the user's active sequential queue."""
+
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items or len(raw_items) > 2000:
+        raise HTTPException(status_code=422, detail="Append between 1 and 2000 upload items")
+
+    lock = Redis.redis.lock(f"upload:batch-lock:{batch_id}", timeout=60, blocking_timeout=30)
+    async with lock:
+        metadata = await get_upload_batch_metadata(batch_id)
+        if metadata is None or metadata.get("username") != user.username:
+            raise HTTPException(status_code=404, detail="Upload queue not found")
+
+        if metadata.get("kind") != "file" or not metadata.get("appendable"):
+            raise HTTPException(status_code=409, detail="This upload queue does not accept additional files")
+
+        if metadata.get("cancelled") or metadata.get("status") in {"completed", "error", "cancelled"}:
+            raise HTTPException(status_code=409, detail="This upload queue has already finished")
+
+        existing_items = [
+            dict(item) if isinstance(item, dict) else {"name": str(item)}
+            for item in metadata.get("items", [])
+        ]
+        if len(existing_items) + len(raw_items) > 2000:
+            raise HTTPException(status_code=422, detail="An upload queue cannot contain more than 2000 files")
+
+        appended_items: list[dict[str, object]] = []
+        directories = {str(value) for value in metadata.get("directories", []) if str(value)}
+        if metadata.get("directory"):
+            directories.add(str(metadata["directory"]))
+        known_directories: dict[str, Directory] = {}
+
+        for raw_item in raw_items:
+            if isinstance(raw_item, str):
+                item_name = raw_item.strip()[:500]
+                item_size = 0
+                item_directory = str(metadata.get("directory") or "/home")
+                item_data_center = str(metadata.get("data_center") or "Discord")
+            elif isinstance(raw_item, dict):
+                item_name = str(raw_item.get("name") or "Upload item").strip()[:500]
+                try:
+                    item_size = max(0, int(raw_item.get("size") or 0))
+                except (TypeError, ValueError):
+                    item_size = 0
+                item_directory = perform_validation(
+                    str(raw_item.get("directory") or metadata.get("directory") or "/home"),
+                    "directory",
+                )
+                item_data_center = perform_validation(
+                    str(raw_item.get("data_center") or metadata.get("data_center") or "Discord"),
+                    "data_center",
+                )
+            else:
+                raise HTTPException(status_code=422, detail="Invalid upload queue item")
+
+            if not item_name:
+                item_name = "Upload item"
+
+            destination = known_directories.get(item_directory)
+            if destination is None:
+                destination = await Directory.get(user.username, path=Path(item_directory))
+                if destination is None:
+                    raise HTTPException(status_code=404, detail=f"Destination directory not found: {item_directory}")
+                known_directories[item_directory] = destination
+
+            directories.add(str(destination.path))
+            appended_items.append({
+                "name": item_name,
+                "size": item_size,
+                "directory": str(destination.path),
+                "data_center": item_data_center,
+                "status": "queued",
+                "message": "Queued",
+            })
+
+        metadata["items"] = existing_items + appended_items
+        metadata["total_items"] = len(metadata["items"])
+        metadata["directories"] = sorted(directories)
+        metadata["message"] = f"{metadata['total_items']} files in upload queue"
+        await Redis.set_json(upload_batch_key(batch_id), metadata)
+
+    return JSONResponse({
+        "batch_id": batch_id,
+        "status": str(metadata.get("status") or "queued"),
+        "total_items": int(metadata.get("total_items") or 0),
+        "appended_items": len(appended_items),
+    })
 
 
 @router.get("/upload-batches")
@@ -269,6 +386,8 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, object] = Body(..
                 "size": max(0, int(item.get("size") or 0)),
                 "status": str(item.get("status") or "queued"),
                 "message": str(item.get("message") or "Queued")[:300],
+                **({"directory": perform_validation(str(item["directory"]), "directory")} if item.get("directory") else {}),
+                **({"data_center": perform_validation(str(item["data_center"]), "data_center")} if item.get("data_center") else {}),
                 **({"index": int(item["index"])} if "index" in item else {}),
                 **({"path": str(item["path"])[:1000]} if "path" in item else {}),
                 **({"torrent_link": str(item["torrent_link"])} if "torrent_link" in item else {}),
@@ -288,17 +407,29 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, object] = Body(..
             }
             for item in items_payload if isinstance(item, dict)
         ]
+        if metadata.get("appendable"):
+            persisted_items = [
+                dict(item) if isinstance(item, dict) else {"name": str(item)}
+                for item in metadata.get("items", [])
+            ]
+            if len(updates["items"]) < len(persisted_items):
+                updates["items"].extend(persisted_items[len(updates["items"]):])
+
         updates["total_items"] = len(updates["items"])
         updates["completed_items"] = sum(item["status"] == "completed" for item in updates["items"])
 
     if "current_name" in payload:
         updates["current_name"] = str(payload.get("current_name") or "")[:500]
 
+    latest_item_count = len(updates.get("items", metadata.get("items", []))) if isinstance(
+        updates.get("items", metadata.get("items", [])), list
+    ) else max(0, int(metadata.get("total_items") or 0))
+
     if "current_index" in payload:
-        updates["current_index"] = max(0, min(int(payload.get("current_index") or 0), int(metadata.get("total_items") or 0)))
+        updates["current_index"] = max(0, min(int(payload.get("current_index") or 0), latest_item_count))
 
     if "completed_items" in payload:
-        updates["completed_items"] = max(0, min(int(payload.get("completed_items") or 0), int(metadata.get("total_items") or 0)))
+        updates["completed_items"] = max(0, min(int(payload.get("completed_items") or 0), latest_item_count))
 
     if "current_job_id" in payload:
         current_job_id = str(payload.get("current_job_id") or "")
@@ -449,12 +580,15 @@ async def pause_upload_batch(
             except KeyError:
                 pass
 
-    metadata["paused"] = paused
-    metadata["status"] = "paused" if paused else ("uploading" if metadata.get("current_job_id") else "queued")
-    metadata["message"] = "Paused by you" if paused else "Resuming upload"
-    metadata["paused_at"] = time() if paused else None
-    await Redis.set_json(upload_batch_key(batch_id), metadata)
-    return JSONResponse({"batch_id": batch_id, "status": str(metadata["status"]), "paused": paused})
+    metadata = await update_upload_batch(
+        batch_id,
+        user.username,
+        paused=paused,
+        status="paused" if paused else ("uploading" if metadata.get("current_job_id") else "queued"),
+        message="Paused by you" if paused else "Resuming upload",
+        paused_at=time() if paused else None,
+    )
+    return JSONResponse({"batch_id": batch_id, "status": str(metadata.get("status") or "queued"), "paused": bool(metadata.get("paused"))})
 
 
 @router.post("/upload-batches/{batch_id}/cancel")
@@ -468,6 +602,17 @@ async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_us
 
     if metadata.get("status") in {"completed", "error", "cancelled"}:
         return JSONResponse({"batch_id": batch_id, "status": str(metadata.get("status"))})
+
+    metadata = await update_upload_batch(
+        batch_id,
+        user.username,
+        cancelled=True,
+        cancelled_at=time(),
+        status="cancelled",
+        message="Upload task cancelled",
+    )
+    if metadata.get("status") != "cancelled":
+        return JSONResponse({"batch_id": batch_id, "status": str(metadata.get("status") or "queued")})
 
     child_ids = [str(value) for value in metadata.get("child_job_ids", [])]
     current_child = str(metadata.get("current_job_id") or "")
@@ -510,20 +655,16 @@ async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_us
 
         break
 
-    metadata["cancelled"] = True
-    metadata["cancelled_at"] = time()
-    metadata["status"] = "cancelled"
-    metadata["message"] = "Upload task cancelled"
+    metadata = await get_upload_batch_metadata(batch_id) or metadata
     item_states = [dict(item) if isinstance(item, dict) else {"name": str(item)} for item in metadata.get("items", [])]
     current_index = int(metadata.get("current_index") or 0)
+    message = "Upload task cancelled"
 
     if completed_during_cancel and 0 <= current_index < len(item_states):
         current_item = item_states[current_index]
         current_item["status"] = "completed"
         current_item["message"] = "Completed while cancellation was requested"
-        metadata["completed_items"] = min(int(metadata.get("total_items") or len(item_states)),
-                                          max(int(metadata.get("completed_items") or 0), current_index + 1))
-        metadata["message"] = "Cancelled remaining items; the active item completed as cancellation arrived"
+        message = "Cancelled remaining items; the active item completed as cancellation arrived"
 
     for item in item_states:
         # A torrent row can be actively downloading without having entered the
@@ -533,8 +674,16 @@ async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_us
             item["status"] = "cancelled"
             item["message"] = "Cancelled or skipped"
 
-    metadata["items"] = item_states
-    await Redis.set_json(upload_batch_key(batch_id), metadata)
+    await update_upload_batch(
+        batch_id,
+        user.username,
+        cancelled=True,
+        status="cancelled",
+        message=message,
+        items=item_states,
+        total_items=len(item_states),
+        completed_items=sum(1 for item in item_states if item.get("status") == "completed"),
+    )
     return JSONResponse({"batch_id": batch_id, "status": "cancelled"})
 
 
@@ -552,10 +701,22 @@ async def _delete_upload_batch(batch_id: str, username: str, *, cancel_active: b
 
     child_ids = [str(value) for value in metadata.get("child_job_ids", [])]
 
-    if metadata.get("status") in {"queued", "uploading"}:
+    if metadata.get("status") in {"queued", "uploading", "paused"}:
         if not cancel_active:
             raise HTTPException(status_code=409, detail="Cancel the active upload task before removing it")
 
+        metadata = await update_upload_batch(
+            batch_id,
+            username,
+            cancelled=True,
+            cancelled_at=time(),
+            status="cancelled",
+            message="Upload task cancelled and removed",
+        )
+        if metadata.get("status") != "cancelled":
+            raise HTTPException(status_code=409, detail="Upload task is already finishing")
+
+        child_ids = [str(value) for value in metadata.get("child_job_ids", [])]
         current_child = str(metadata.get("current_job_id") or "")
 
         if current_child and current_child not in child_ids:
@@ -584,10 +745,13 @@ async def _delete_upload_batch(batch_id: str, username: str, *, cancel_active: b
                 if error.status_code != 409:
                     raise
 
-        metadata["cancelled"] = True
-        metadata["status"] = "cancelled"
-        metadata["message"] = "Upload task cancelled and removed"
-        await Redis.set_json(upload_batch_key(batch_id), metadata)
+        await update_upload_batch(
+            batch_id,
+            username,
+            cancelled=True,
+            status="cancelled",
+            message="Upload task cancelled and removed",
+        )
 
     for child_id in child_ids:
 

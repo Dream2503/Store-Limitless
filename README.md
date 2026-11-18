@@ -595,9 +595,11 @@ The dashboard applies local state changes before waiting for the database respon
   file is already finishing rather than pretending a completed database write can be undone.
 
 The browser upload queue remains sequential across files and links to avoid overlapping storage-provider jobs. Within one file, chunk uploads can
-still run concurrently (up to the configured chunk-lane limit). Nested folder uploads create missing directories before the file queue starts, then
-send each file to its relative destination. If a multi-file batch is cancelled after earlier files have completed, those already completed files
-remain saved; cancellation prevents the active incomplete browser file from being registered and skips the remaining queued items.
+still run concurrently (up to the configured chunk-lane limit). Saving an edited text or source-code file deliberately bypasses the shared ingestion
+FIFO, so its replacement chunks can upload in parallel with an active browser upload or link import. Nested folder uploads create missing directories
+before the file queue starts, then send each file to its relative destination. If a multi-file batch is cancelled after earlier files have completed,
+those already completed files remain saved; cancellation prevents the active incomplete browser file from being registered and skips the remaining
+queued items.
 
 Optimistic UI means the interface reacts immediately; it does not make PostgreSQL operations themselves faster. A failed request is reconciled against
 backend state, and the error remains visible after the refresh.

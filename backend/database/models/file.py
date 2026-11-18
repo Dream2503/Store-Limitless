@@ -2,6 +2,7 @@
 File model and persistence operations. File metadata is stored in PostgreSQL and mirrored in Redis for lookup, listing, trash, and restore operations.
 """
 
+from asyncio import to_thread
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
@@ -47,24 +48,47 @@ class File(BaseModel):
             f"public_slug={self.public_slug!r})"
         )
 
-    async def save(self) -> None:
-        """
-        Insert the file metadata, choosing a numbered name when the target directory already contains the same name. Cache the saved file in Redis.
-        """
-
-        if await self.get(self.username, did=self.directory_id, name=self.name):
-            path: Path = Path(self.name)
-            stem, extension = path.stem, path.suffix
-            i = 1
-
-            while await self.get(self.username, did=self.directory_id, name=f"{stem}({i}){extension}"):
-                i += 1
-
-            self.name = f"{stem}({i}){extension}"
-
+    def _save_to_database(self) -> None:
+        """Choose an available active filename and insert its metadata in one synchronous PostgreSQL transaction."""
 
         with POOL.connection() as connection:
             try:
+                existing = connection.execute(
+                    """
+                    SELECT 1
+                    FROM files
+                    WHERE username = %s
+                      AND directory_id = %s
+                      AND name = %s
+                      AND deleted_at IS NULL
+                    LIMIT 1;
+                    """,
+                    (self.username, self.directory_id, self.name),
+                ).fetchone()
+
+                if existing is not None:
+                    path: Path = Path(self.name)
+                    stem, extension = path.stem, path.suffix
+                    suffix = 1
+                    candidate = f"{stem}({suffix}){extension}"
+
+                    while connection.execute(
+                        """
+                        SELECT 1
+                        FROM files
+                        WHERE username = %s
+                          AND directory_id = %s
+                          AND name = %s
+                          AND deleted_at IS NULL
+                        LIMIT 1;
+                        """,
+                        (self.username, self.directory_id, candidate),
+                    ).fetchone() is not None:
+                        suffix += 1
+                        candidate = f"{stem}({suffix}){extension}"
+
+                    self.name = candidate
+
                 inserted = connection.execute(
                     """
                     INSERT INTO files (directory_id, name, type, size, modified_at, data_center, links, deleted_at, username)
@@ -89,14 +113,32 @@ class File(BaseModel):
 
                 self.id = int(inserted["id"])
                 self.public_slug = str(inserted["public_slug"])
-
                 connection.commit()
-                await Redis.set(f"user:{self.username}:files", self)
 
-            except Exception as e:
+            except Exception as error:
                 connection.rollback()
-                write_log("ERROR", Database, "INSERT FILE", self.username, f"Failed to insert file: {e}")
+                write_log("ERROR", Database, "INSERT FILE", self.username, f"Failed to insert file: {error}")
                 raise
+
+    async def save(self) -> None:
+        """
+        Insert file metadata using an indexed, directory-scoped PostgreSQL lookup without blocking the async event loop.
+        Cache the saved file in Redis after the database transaction commits.
+        """
+
+        await to_thread(self._save_to_database)
+
+        try:
+            await Redis.set(f"user:{self.username}:files", self)
+        except Exception as error:
+            write_log(
+                "ERROR",
+                Database,
+                "INSERT FILE CACHE",
+                self.username,
+                f"File metadata committed but Redis cache update failed: {error}",
+            )
+            raise
 
     @classmethod
     async def get(

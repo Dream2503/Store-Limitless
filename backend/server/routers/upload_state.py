@@ -97,23 +97,25 @@ async def register_upload_job(job_id: str, *, username: str, name: str, kind: st
     await Redis.redis.sadd(user_upload_jobs_key(username), job_id)
 
     if batch_id:
-        batch = await get_upload_batch_metadata(batch_id)
+        batch_lock = Redis.redis.lock(f"upload:batch-lock:{batch_id}", timeout=60, blocking_timeout=30)
+        async with batch_lock:
+            batch = await get_upload_batch_metadata(batch_id)
 
-        if batch and batch.get("username") == username:
-            children = [str(value) for value in batch.get("child_job_ids", [])]
+            if batch and batch.get("username") == username:
+                children = [str(value) for value in batch.get("child_job_ids", [])]
 
-            if job_id not in children:
-                children.append(job_id)
+                if job_id not in children:
+                    children.append(job_id)
 
-            batch["child_job_ids"] = children
-            await Redis.set_json(upload_batch_key(batch_id), batch)
+                batch["child_job_ids"] = children
+                await Redis.set_json(upload_batch_key(batch_id), batch)
 
-            if batch.get("cancelled"):
-                metadata["cancelled"] = True
-                metadata["cancelled_at"] = time()
-                await Redis.set_json(upload_job_key(job_id), metadata)
-                await Redis.set(job_id, Progress(name, "Upload cancelled", 0))
-                await cleanup_upload_artifacts(job_id)
+                if batch.get("cancelled"):
+                    metadata["cancelled"] = True
+                    metadata["cancelled_at"] = time()
+                    await Redis.set_json(upload_job_key(job_id), metadata)
+                    await Redis.set(job_id, Progress(name, "Upload cancelled", 0))
+                    await cleanup_upload_artifacts(job_id)
 
     write_log(
         "INFO",
@@ -324,7 +326,11 @@ async def register_upload_batch(batch_id: str, *, username: str, name: str, kind
         "name": name[:255],
         "kind": kind,
         "directory": directory,
-        "directories": [directory],
+        "directories": sorted({
+            str(item.get("directory") or directory)
+            for item in items
+            if str(item.get("directory") or directory)
+        } | {directory}),
         "data_center": data_center,
         "appendable": kind == "file",
         "items": [dict(item, status=str(item.get("status") or "queued"), message=str(item.get("message") or "Queued")) for item in items],
@@ -352,19 +358,38 @@ async def get_upload_batch_metadata(batch_id: str) -> dict[str, object] | None:
 
 
 async def update_upload_batch(batch_id: str, username: str, **updates: object) -> dict[str, object]:
-    """Update owned batch metadata without ever reviving a cancelled task."""
+    """Update owned batch metadata atomically, preserving files appended during progress updates."""
 
-    metadata = await get_upload_batch_metadata(batch_id)
+    lock = Redis.redis.lock(f"upload:batch-lock:{batch_id}", timeout=60, blocking_timeout=30)
+    async with lock:
+        metadata = await get_upload_batch_metadata(batch_id)
 
-    if metadata is None or metadata.get("username") != username:
-        raise KeyError(batch_id)
+        if metadata is None or metadata.get("username") != username:
+            raise KeyError(batch_id)
 
-    if metadata.get("cancelled") and updates.get("status") not in {None, "cancelled"}:
+        current_status = str(metadata.get("status") or "queued")
+        requested_status = updates.get("status")
+        if current_status in {"completed", "error", "cancelled"} and requested_status not in {None, current_status}:
+            return metadata
+
+        if metadata.get("cancelled") and requested_status not in {None, "cancelled"}:
+            return metadata
+
+        # A progress snapshot may have been prepared before another modal appended
+        # files. Never let that older, shorter snapshot remove the queue's tail.
+        incoming_items = updates.get("items")
+        if metadata.get("appendable") and isinstance(incoming_items, list):
+            existing_items = [
+                dict(item) if isinstance(item, dict) else {"name": str(item)}
+                for item in metadata.get("items", [])
+            ]
+            if len(incoming_items) < len(existing_items):
+                updates["items"] = list(incoming_items) + existing_items[len(incoming_items):]
+            updates["total_items"] = len(updates["items"])
+
+        metadata.update(updates)
+        await Redis.set_json(upload_batch_key(batch_id), metadata)
         return metadata
-
-    metadata.update(updates)
-    await Redis.set_json(upload_batch_key(batch_id), metadata)
-    return metadata
 
 
 async def reconcile_completed_link_batch(batch_id: str, username: str, child_job_id: str) -> bool:
@@ -556,8 +581,8 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                         and child_metadata.get("kind") == "link"
                 ):
                     if current_child_id != candidate_id:
-                        metadata["current_job_id"] = candidate_id
-                        await Redis.set_json(upload_batch_key(batch_id), metadata)
+                        await update_upload_batch(batch_id, username, current_job_id=candidate_id)
+                        metadata = await get_upload_batch_metadata(batch_id) or metadata
                     current_child_id = candidate_id
                     break
 
@@ -813,8 +838,23 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                 items_changed = True
 
         if items_changed:
-            metadata["items"] = items
-            await Redis.set_json(upload_batch_key(batch_id), metadata)
+            updates: dict[str, object] = {
+                "items": items,
+                "total_items": len(items),
+                "completed_items": sum(1 for item in items if item.get("status") == "completed"),
+                "status": str(metadata.get("status") or "queued"),
+            }
+            for key in ("message", "current_job_id", "current_name", "current_index", "paused", "cancelled"):
+                if key in metadata:
+                    updates[key] = metadata[key]
+            if ingestion_type:
+                updates["ingestion_type"] = ingestion_type
+
+            metadata = await update_upload_batch(batch_id, username, **updates)
+            items = [
+                dict(item) if isinstance(item, dict) else {"name": str(item)}
+                for item in metadata.get("items", [])
+            ]
 
         # The child progress above may have completed another file during this poll.
         # Re-read totals after rebuilding folder/torrent items rather than using stale batch metadata.
@@ -871,6 +911,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
             "name": str(metadata.get("name") or "Upload task"),
             "kind": str(metadata.get("kind") or "file"),
             "directory": str(metadata.get("directory") or "/home"),
+            "directories": [str(value) for value in metadata.get("directories", []) if str(value)],
             "data_center": str(metadata.get("data_center") or ""),
             "items": items,
             "torrent_files": metadata.get("torrent_files", []) if isinstance(metadata.get("torrent_files", []), list) else [],

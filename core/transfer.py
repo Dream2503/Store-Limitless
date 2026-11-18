@@ -32,8 +32,9 @@ async def file_upload(
         download_total: int = 0,
         queue_slot_held: bool = False,
         pause_check: Callable[[], Awaitable[bool]] | None = None,
+        bypass_queue: bool = False,
 ) -> AsyncGenerator[Progress]:
-    """Upload one file through the shared FIFO, optionally leaving its database save to the caller."""
+    """Upload a file, optionally bypassing the shared FIFO for interactive edits."""
 
     data_center: type[DataCenter] | None = DataCenter(file.data_center)
 
@@ -41,8 +42,13 @@ async def file_upload(
         raise ValueError(f"Unsupported data center: {file.data_center}")
 
     ticket: IngestionUploadTicket | None = None
-    if not queue_slot_held:
+    if not queue_slot_held and not bypass_queue:
         ticket = await enqueue_ingestion_upload(file.name, file.username)
+    elif bypass_queue:
+        write_log(
+            "INFO", data_center, "UPLOAD QUEUE", file.username,
+            f"Bypassing the shared FIFO for interactive file edit name={file.name!r}.",
+        )
 
     async def upload_and_finalize() -> AsyncGenerator[Progress]:
         """Upload the original and persist it when this caller owns finalization."""
@@ -91,7 +97,9 @@ async def file_upload(
             raise
 
     try:
-        if queue_slot_held:
+        if queue_slot_held or bypass_queue:
+            # Callers holding the slot, and explicitly opted-out interactive edits,
+            # can upload without waiting behind unrelated ingestion jobs.
             async for progress in upload_and_finalize():
                 yield progress
         else:

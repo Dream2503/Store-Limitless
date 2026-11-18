@@ -108,6 +108,11 @@ try:
             CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug
                 ON files (public_slug);
 
+            -- Match active filenames without loading and deserializing the user's full Redis file cache.
+            CREATE INDEX IF NOT EXISTS idx_files_active_name_lookup
+                ON files (username, directory_id, name)
+                WHERE deleted_at IS NULL;
+
             ALTER TABLE files DROP CONSTRAINT IF EXISTS ck_files_public_slug_format;
             ALTER TABLE files ADD CONSTRAINT ck_files_public_slug_format
                 CHECK (length(public_slug) = 32 AND public_slug ~ '^[0-9a-f]+$');

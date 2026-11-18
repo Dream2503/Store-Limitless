@@ -1,10 +1,11 @@
-import asyncio
 import os
-import time
+from asyncio import Lock, to_thread
 from collections import OrderedDict
 from pathlib import Path
+from shutil import rmtree
+from time import monotonic
 
-from core.config import TRANSFER_PATH
+from core import TRANSFER_PATH
 
 
 class DataCenter:
@@ -19,7 +20,7 @@ class DataCenter:
 
     _cache: OrderedDict[str, tuple[int, float]] = OrderedDict()
     _cache_size: int = 0
-    _cache_lock: asyncio.Lock | None = None
+    _cache_lock: Lock | None = None
 
     def __new__(cls, name: str):
         from core.discord_utils import Discord
@@ -29,21 +30,25 @@ class DataCenter:
         match name:
             case Discord.NAME:
                 return Discord
+
             case Telegram.NAME:
                 return Telegram
+
             case GitHub.NAME:
                 return GitHub
+
             case Database.NAME:
                 return Database
+
             case BackEnd.NAME:
                 return BackEnd
 
         return None
 
     @staticmethod
-    def _lock() -> asyncio.Lock:
+    def _lock() -> Lock:
         if DataCenter._cache_lock is None:
-            DataCenter._cache_lock = asyncio.Lock()
+            DataCenter._cache_lock = Lock()
 
         return DataCenter._cache_lock
 
@@ -53,55 +58,51 @@ class DataCenter:
 
     @staticmethod
     async def cache_part(fid: str, part: int, data: bytes) -> Path:
-        path = DataCenter._part_path(fid, part)
+        path: Path = DataCenter._part_path(fid, part)
         path.parent.mkdir(parents=True, exist_ok=True)
-
-        temp = path.with_suffix(".tmp")
-
-        await asyncio.to_thread(temp.write_bytes, data)
+        temp: Path = path.with_suffix(".tmp")
+        await to_thread(temp.write_bytes, data)
         os.replace(temp, path)
-
-        key = str(path)
-        new_size = len(data)
+        key: str = str(path)
+        new_size: int = len(data)
 
         async with DataCenter._lock():
-            old = DataCenter._cache.pop(key, None)
+            old: tuple[int, float | int] | None = DataCenter._cache.pop(key, None)
 
             if old:
                 DataCenter._cache_size -= old[0]
 
-            DataCenter._cache[key] = (new_size, time.monotonic())
+            DataCenter._cache[key] = (new_size, monotonic())
             DataCenter._cache_size += new_size
-
             await DataCenter._evict()
 
         return path
 
     @staticmethod
     async def get_cached_part(fid: str, part: int) -> bytes | None:
-        path = DataCenter._part_path(fid, part)
+        path: Path = DataCenter._part_path(fid, part)
 
         if not path.is_file() or path.stat().st_size <= 0:
             return None
 
-        data = await asyncio.to_thread(path.read_bytes)
-        key = str(path)
-        size = len(data)
+        data: bytes = await to_thread(path.read_bytes)
+        key: str = str(path)
+        size: int = len(data)
 
         async with DataCenter._lock():
-            old = DataCenter._cache.pop(key, None)
+            old: tuple[int, float | int] | None = DataCenter._cache.pop(key, None)
 
             if old:
                 DataCenter._cache_size -= old[0]
 
-            DataCenter._cache[key] = (size, time.monotonic())
+            DataCenter._cache[key] = (size, monotonic())
             DataCenter._cache_size += size
 
         return data
 
     @staticmethod
     async def has_cached_part(fid: str, part: int) -> bool:
-        path = DataCenter._part_path(fid, part)
+        path: Path = DataCenter._part_path(fid, part)
 
         if not path.is_file() or path.stat().st_size <= 0:
             return False
@@ -113,22 +114,22 @@ class DataCenter:
     async def touch_cache(path: str) -> bool:
         if not os.path.isfile(path):
             async with DataCenter._lock():
-                old = DataCenter._cache.pop(path, None)
+                old: tuple[int, float | int] | None = DataCenter._cache.pop(path, None)
 
                 if old:
                     DataCenter._cache_size -= old[0]
 
             return False
 
-        size = os.path.getsize(path)
+        size: int = os.path.getsize(path)
 
         async with DataCenter._lock():
-            old = DataCenter._cache.pop(path, None)
+            old: tuple[int, float | int] | None = DataCenter._cache.pop(path, None)
 
             if old:
                 DataCenter._cache_size -= old[0]
 
-            DataCenter._cache[path] = (size, time.monotonic())
+            DataCenter._cache[path] = (size, monotonic())
             DataCenter._cache_size += size
 
         return True
@@ -137,13 +138,14 @@ class DataCenter:
     async def _evict() -> None:
         while DataCenter._cache_size > DataCenter.CACHE_LIMIT and DataCenter._cache:
             key, (size, _) = DataCenter._cache.popitem(last=False)
-            path = Path(key)
+            path: Path = Path(key)
 
             try:
                 path.unlink(missing_ok=True)
 
                 try:
                     path.parent.rmdir()
+
                 except OSError:
                     pass
 
@@ -152,23 +154,21 @@ class DataCenter:
 
     @staticmethod
     async def clear_cache(fid: str | None = None) -> None:
-        import shutil
-
         async with DataCenter._lock():
             if fid is None:
                 if DataCenter.CACHE_DIR.exists():
-                    await asyncio.to_thread(shutil.rmtree, DataCenter.CACHE_DIR)
+                    await to_thread(rmtree, DataCenter.CACHE_DIR)
 
                 DataCenter._cache.clear()
                 DataCenter._cache_size = 0
                 return
 
-            folder = DataCenter.CACHE_DIR / fid
+            folder: Path = DataCenter.CACHE_DIR / fid
 
             if folder.exists():
-                await asyncio.to_thread(shutil.rmtree, folder)
+                await to_thread(rmtree, folder)
 
-            prefix = str(folder) + os.sep
+            prefix: str = str(folder) + os.sep
 
             for key, (size, _) in list(DataCenter._cache.items()):
                 if key.startswith(prefix):
@@ -177,11 +177,9 @@ class DataCenter:
 
     @staticmethod
     async def initialize_cache() -> None:
-        import shutil
-
         async with DataCenter._lock():
             if DataCenter.CACHE_DIR.exists():
-                await asyncio.to_thread(shutil.rmtree, DataCenter.CACHE_DIR)
+                await to_thread(rmtree, DataCenter.CACHE_DIR)
 
             DataCenter.CACHE_DIR.mkdir(parents=True, exist_ok=True)
             DataCenter._cache.clear()

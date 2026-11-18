@@ -1,21 +1,20 @@
-import json
-import mimetypes
 from datetime import datetime, timezone
+from json import dumps
+from mimetypes import guess_type
 from pathlib import Path
 from typing import AsyncGenerator
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from backend.database import add_user, File, get_files, get_user, LoginRequest, User, get_file, add_file
+from backend.database import (add_user, File, get_files, get_user, LoginRequest, User, get_file,
+                              add_file, update_file, purge_expired_trash, get_trashed_files, delete_file)
 from backend.server.jwt_handler import create_access_token, get_current_user
 from backend.server.security import hash_password, verify_password, create_public_stream_token, verify_public_stream_token
-from core.config import TRANSFER_PATH
-from core.data_center import BackEnd
-from core.parser import parse_link
-from core.stream import ChunkCache, get_chunks, parse_range, stream_range, ByteRange
-from core.transfer import upload
+from core import (TRANSFER_PATH, get_transfer_path, BackEnd, download_link, ChunkCache,
+                  get_chunks, parse_range, stream_range, ByteRange, upload, FileChunk)
 
 auth: APIRouter = APIRouter(prefix="/auth")
 
@@ -24,10 +23,41 @@ class CreateFolderRequest(BaseModel):
     directory: str
 
 
-class GoogleDriveDownloadRequest(BaseModel):
-    google_drive_url: str
+class LinkDownloadRequest(BaseModel):
+    link: str
     data_center: str
     directory: str = ""
+
+
+def validate_directory_path(directory: str) -> str:
+    directory = directory.strip().strip("/")
+
+    if not directory:
+        return directory
+
+    for segment in directory.split("/"):
+        if not segment or segment in {".", ".."} or "\\" in segment:
+            raise HTTPException(status_code=400, detail="Invalid folder name")
+
+    return directory
+
+
+# Ensure there is a .__folder__ chain cause the frontend is accessing the files through that chain only
+def ensure_folder_chain(username: str, directory: str) -> None:
+    if not directory:
+        return
+
+    segments: list[str] = directory.split("/")
+    existing: set[str] = {f.directory for f in (get_files(username=username) or []) if f.name == ".__folder__"}
+    path_so_far: str = ""
+
+    for segment in segments:
+        path_so_far = f"{path_so_far}/{segment}" if path_so_far else segment
+
+        if path_so_far not in existing:
+            add_file(File(directory=path_so_far, name=".__folder__", type="folder", size=0,
+                          modified_at=datetime.now(timezone.utc), links=[], data_center="", username=username))
+            existing.add(path_so_far)
 
 
 @auth.post("/register")
@@ -45,7 +75,6 @@ def register(user: User) -> dict[str, str]:
 @auth.post("/login")
 def login(credentials: LoginRequest) -> dict[str, str]:
     user: User | None = get_user(username=credentials.username)
-    print(user)
 
     if not user or not verify_password(credentials.password, user.password):
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -63,53 +92,37 @@ async def upload_route(file: UploadFile, data_center: str = Form(...), directory
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file name provided")
 
-    filename = Path(file.filename).name
-    directory = directory.strip().strip("/")
+    filename: str = Path(file.filename).name
+    directory: str = validate_directory_path(directory)
 
-    if directory in {".", ".."} or "/" in directory or "\\" in directory:
-        raise HTTPException(status_code=400, detail="Invalid folder name")
+    ensure_folder_chain(current_user.username, directory)
 
-    user_transfer_path = TRANSFER_PATH / current_user.username
-
-    if directory:
-        user_transfer_path = user_transfer_path / directory
-
-    user_transfer_path.mkdir(parents=True, exist_ok=True)
-    file_path = user_transfer_path / filename
+    file_path: Path = get_transfer_path(current_user.username, directory, filename)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(file_path, "wb") as buffer:
         while chunk := await file.read(BackEnd.MAX_SIZE):
             buffer.write(chunk)
 
-    file_job: File = File(
-        directory=directory,
-        name=file.filename,
-        type=mimetypes.guess_type(filename)[0] or "application/octet-stream",
-        size=file_path.stat().st_size,
-        modified_at=datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc),
-        links=[],
-        data_center=data_center,
-        username=current_user.username,
-    )
+    file_job: File = File(directory=directory, name=file.filename, type=guess_type(filename)[0] or "application/octet-stream",
+                          size=file_path.stat().st_size, modified_at=datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc),
+                          links=[], data_center=data_center, username=current_user.username)
 
     async def progress_stream() -> AsyncGenerator[str, None]:
         async for progress in upload(file_job):
-            yield json.dumps({"progress": progress}) + "\n"
+            yield dumps({"progress": progress}) + "\n"
 
     return StreamingResponse(progress_stream(), media_type="application/x-ndjson")
 
 
-@auth.post("/upload-from-drive")
-async def upload_from_drive_route(request: GoogleDriveDownloadRequest, current_user: User = Depends(get_current_user), ) -> StreamingResponse:
-    google_drive_url = request.google_drive_url.strip()
-    data_center = request.data_center.strip()
-    directory = request.directory.strip().strip("/")
+@auth.post("/upload-from-link")
+async def upload_from_link_route(request: LinkDownloadRequest, current_user: User = Depends(get_current_user)) -> StreamingResponse:
+    link: str = request.link.strip()
+    data_center: str = request.data_center.strip()
+    directory: str = request.directory.strip()
 
-    if not google_drive_url:
-        raise HTTPException(status_code=400, detail="Google Drive URL is required")
-
-    if "drive.google.com" not in google_drive_url:
-        raise HTTPException(status_code=400, detail="Please provide a valid Google Drive link")
+    if not link:
+        raise HTTPException(status_code=400, detail="Link is required")
 
     if not data_center:
         raise HTTPException(status_code=400, detail="Data center is required")
@@ -117,80 +130,78 @@ async def upload_from_drive_route(request: GoogleDriveDownloadRequest, current_u
     if data_center not in {"Discord", "Telegram"}:
         raise HTTPException(status_code=400, detail="Invalid data center")
 
-    if directory in {".", ".."} or "/" in directory or "\\" in directory:
-        raise HTTPException(status_code=400, detail="Invalid folder name")
-
-    file_job = File(
-        directory=directory,
-        name="google_drive_file",
-        type="application/octet-stream",
-        size=0,
-        modified_at=datetime.now(timezone.utc),
-        links=[],
-        data_center=data_center,
-        username=current_user.username,
-    )
+    directory = validate_directory_path(directory)
+    ensure_folder_chain(current_user.username, directory)
+    file_job = File(directory=directory, name="link_file", type="application/octet-stream", size=0,
+                    modified_at=datetime.now(timezone.utc), links=[], data_center=data_center, username=current_user.username)
 
     async def progress_stream() -> AsyncGenerator[str, None]:
         try:
-            async for progress in parse_link(file_job, google_drive_url):
-                yield json.dumps({
-                    "status": "uploading",
-                    "progress": progress,
-                }) + "\n"
+            async for progress in download_link(file_job, link):
+                yield dumps({"status": "uploading", "progress": progress}) + "\n"
 
-            yield json.dumps({"status": "completed", "progress": 100, }) + "\n"
+            yield dumps({"status": "completed", "progress": 100}) + "\n"
 
         except Exception as e:
-            print(f"Google Drive upload error: {e}")
-            yield json.dumps({"status": "error", "error": str(e), }) + "\n"
+            print(f"Link upload error: {e}")
+            yield dumps({"status": "error", "error": str(e)}) + "\n"
 
     return StreamingResponse(progress_stream(), media_type="application/x-ndjson")
 
 
 @auth.post("/create-folder")
 def create_folder(folder: CreateFolderRequest, current_user: User = Depends(get_current_user)):
-    directory = folder.directory.strip().strip("/")
+    directory: str = folder.directory.strip().strip("/")
 
     if not directory:
         raise HTTPException(status_code=400, detail="Folder name cannot be empty")
 
-    # Prevent nested/invalid paths if you only want one folder name
-    if directory in {".", ".."} or "/" in directory or "\\" in directory:
-        raise HTTPException(status_code=400, detail="Invalid folder name")
-
-    # Check existing folders/files
-    files = get_files(username=current_user.username) or []
-    existing_folder = next((file for file in files if file.directory == directory and file.name == ".__folder__"), None)
+    directory: str = validate_directory_path(directory)
+    files: list[File] = get_files(username=current_user.username) or []
+    existing_folder: File | None = next((f for f in files if f.directory == directory and f.name == ".__folder__"), None)
 
     if existing_folder:
         raise HTTPException(status_code=400, detail="Folder already exists")
 
-    # Create actual folder on disk
-    folder_path = TRANSFER_PATH / current_user.username / directory
+    folder_path: Path = TRANSFER_PATH / current_user.username / directory
     folder_path.mkdir(parents=True, exist_ok=True)
-
-    # Create database entry representing the folder
-    add_file(File(
-        directory=directory,
-        name=".__folder__",
-        type="folder",
-        size=0,
-        modified_at=datetime.now(timezone.utc),
-        links=[],
-        data_center="",
-        username=current_user.username,
-    ))
-    return {
-        "message": "Folder created successfully",
-        "directory": directory,
-    }
+    ensure_folder_chain(current_user.username, directory)
+    return {"message": "Folder created successfully", "directory": directory}
 
 
 @auth.get("/files")
 def get_user_files(current_user: User = Depends(get_current_user)) -> list[File]:
-    files = get_files(username=current_user.username) or []
+    files: list[File] = get_files(username=current_user.username) or []
     return [file for file in files if file.directory != "__trash__"]
+
+
+@auth.get("/trash")
+def get_trash(current_user: User = Depends(get_current_user)) -> list[File]:
+    purge_expired_trash(username=current_user.username)
+    return get_trashed_files(username=current_user.username)
+
+
+@auth.post("/trash/{file_id}/restore")
+def restore_file(file_id: int, current_user: User = Depends(get_current_user)) -> dict[str, str]:
+    file: File | None = get_file(file_id=file_id, include_trashed=True)
+
+    if file is None or file.username != current_user.username:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if file.name == ".__folder__":
+        prefix: str = f"{file.directory}/"
+        trashed: list[File] = get_trashed_files(username=current_user.username)
+        targets: list[File] = [file] + [f for f in trashed if f.directory == file.directory or f.directory.startswith(prefix)]
+
+        for target in targets:
+            target.deleted_at = None
+            update_file(target)
+
+    else:
+        file.deleted_at = None
+        update_file(file)
+
+    return {"message": "Restored"}
 
 
 @auth.post("/files/{file_id}/public-link")
@@ -206,13 +217,13 @@ def create_public_link(file_id: int, current_user: User = Depends(get_current_us
     if file.id is None:
         raise HTTPException(status_code=400, detail="Invalid file metadata")
 
-    return {"url": f"/auth/public-stream/{create_public_stream_token(file=file, username=file.username)}"}
+    return {"url": f"/auth/stream/{create_public_stream_token(file=file, username=file.username)}"}
 
 
 @auth.get("/stream/{token}")
 async def public_stream_route(token: str, request: Request):
     try:
-        payload = verify_public_stream_token(token)
+        payload: dict[str, str | int] = verify_public_stream_token(token)
 
     except ValueError:
         raise HTTPException(status_code=404, detail="Invalid public stream link")
@@ -223,7 +234,7 @@ async def public_stream_route(token: str, request: Request):
         raise HTTPException(status_code=404, detail="File not found")
 
     try:
-        parts = get_chunks(file.links, file.size)
+        parts: list[FileChunk] = get_chunks(file.links, file.size)
 
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"File metadata failure: {e}") from e
@@ -231,10 +242,10 @@ async def public_stream_route(token: str, request: Request):
     if not parts:
         raise HTTPException(status_code=404, detail="File has no parts")
 
-    size = parts[-1].end + 1
+    size: int = parts[-1].end + 1
 
     try:
-        byte_range = parse_range(request.headers.get("range"), size)
+        byte_range: ByteRange = parse_range(request.headers.get("range"), size)
 
     except (ValueError, IndexError):
         return Response(
@@ -245,20 +256,19 @@ async def public_stream_route(token: str, request: Request):
             },
         )
 
-    cache = ChunkCache(str(file.id), file.data_center)
-    length = byte_range.end - byte_range.start + 1
-    content_type = file.type or mimetypes.guess_type(file.name)[0] or "application/octet-stream"
-    headers = {
+    cache: ChunkCache = ChunkCache(str(file.id), file.data_center)
+    length: int = byte_range.end - byte_range.start + 1
+    content_type: str = file.type or guess_type(file.name)[0] or "application/octet-stream"
+    headers: dict[str, str] = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
         "Content-Type": content_type,
-        "Content-Disposition": f'inline; filename="{file.name}"',
+        "Content-Disposition": f"inline; filename=\"{file.name.encode('ascii', 'ignore').decode()}\"; filename*=UTF-8''{quote(file.name)}",
         "Cache-Control": "public, max-age=3600",
     }
-
     if request.headers.get("range") is not None:
         headers["Content-Range"] = f"bytes {byte_range.start}-{byte_range.end}/{size}"
-        status_code = 206
+        status_code: int = 206
 
     else:
         status_code = 200
@@ -269,7 +279,8 @@ async def public_stream_route(token: str, request: Request):
 @auth.get("/download/{token}")
 async def public_download_route(token: str):
     try:
-        payload = verify_public_stream_token(token)
+        payload: dict[str, int] = verify_public_stream_token(token)
+
     except ValueError:
         raise HTTPException(status_code=404, detail="Invalid public download link")
 
@@ -279,24 +290,24 @@ async def public_download_route(token: str):
         raise HTTPException(status_code=404, detail="File not found")
 
     try:
-        parts = get_chunks(file.links, file.size)
+        parts: list[FileChunk] = get_chunks(file.links, file.size)
+
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"File metadata failure: {e}") from e
 
     if not parts:
         raise HTTPException(status_code=404, detail="File has no parts")
 
-    size = parts[-1].end + 1
-    cache = ChunkCache(str(file.id), file.data_center)
-    content_type = file.type or mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+    size: int = parts[-1].end + 1
+    cache: ChunkCache = ChunkCache(str(file.id), file.data_center)
+    content_type: str = file.type or guess_type(file.name)[0] or "application/octet-stream"
 
-    headers = {
+    headers: dict[str, str] = {
         "Content-Length": str(size),
         "Content-Type": content_type,
         "Content-Disposition": f'attachment; filename="{file.name}"',
         "Cache-Control": "public, max-age=3600",
     }
-
     return StreamingResponse(
         stream_range(parts, ByteRange(0, size - 1), cache),
         status_code=200,
@@ -315,5 +326,17 @@ def delete_file_route(file_id: int, current_user: User = Depends(get_current_use
     if file.username != current_user.username:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    file.directory = "__trash__"
+    file.deleted_at = datetime.now(timezone.utc)
+    update_file(file)
     return {"message": "File moved to trash"}
+
+
+@auth.delete("/trash/{file_id}")
+def permanently_delete(file_id: int, current_user: User = Depends(get_current_user)) -> dict[str, str]:
+    file: File | None = get_file(file_id=file_id, include_trashed=True)
+
+    if file is None or file.username != current_user.username:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    delete_file(file)
+    return {"message": "Permanently deleted"}

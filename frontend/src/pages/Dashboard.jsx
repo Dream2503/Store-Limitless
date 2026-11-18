@@ -127,14 +127,14 @@ function Sidebar({onUpload, onGoHome, onLogout}) {
 
 /* -------------------------------------------------------------------- */
 
-function CreateFolderModal({nestedDisabled, onClose, onCreate}) {
+function CreateFolderModal({targetPath, onClose, onCreate}) {
     const [name, setName] = useState("");
     const [error, setError] = useState("");
     const [creating, setCreating] = useState(false);
 
     useEffect(() => {
-        const onKeyDown = (event) => {
-            if (event.key === "Escape" && !creating) onClose();
+        const onKeyDown = (e) => {
+            if (e.key === "Escape" && !creating) onClose();
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
@@ -142,14 +142,12 @@ function CreateFolderModal({nestedDisabled, onClose, onCreate}) {
 
     const handleSubmit = async (event) => {
         event.preventDefault();
-
         const cleanName = name.trim();
 
         if (!cleanName) {
             setError("Folder name cannot be empty.");
             return;
         }
-
         if (cleanName === "." || cleanName === ".." || cleanName.includes("/") || cleanName.includes("\\")) {
             setError("Folder name contains invalid characters.");
             return;
@@ -157,7 +155,6 @@ function CreateFolderModal({nestedDisabled, onClose, onCreate}) {
 
         setCreating(true);
         setError("");
-
         try {
             await onCreate(cleanName);
         } catch (err) {
@@ -167,42 +164,29 @@ function CreateFolderModal({nestedDisabled, onClose, onCreate}) {
         }
     };
 
-    return (<div
-        className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm"
-        onClick={() => !creating && onClose()}
-    >
-        <div
-            className="w-full max-w-md rounded-2xl border border-outline-variant/20 bg-surface p-6 shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-        >
+    return (<div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm"
+                 onClick={() => !creating && onClose()}>
+        <div className="w-full max-w-md rounded-2xl border border-outline-variant/20 bg-surface p-6 shadow-2xl"
+             onClick={(e) => e.stopPropagation()}>
             <div className="mb-5 flex items-center justify-between">
                 <div>
                     <h2 className="text-lg font-semibold text-on-surface">Create New Folder</h2>
-                    <p className="mt-1 text-sm text-on-surface-variant">Enter a name for your folder.</p>
+                    <p className="mt-1 text-sm text-on-surface-variant">
+                        Will be created inside <span className="text-on-surface font-medium">{targetPath || "Root"}</span>.
+                    </p>
                 </div>
-                <button
-                    type="button"
-                    onClick={onClose}
-                    disabled={creating}
-                    aria-label="Close"
-                    className="text-on-surface-variant hover:text-on-surface disabled:opacity-50"
-                >
-            <span className="material-symbols-outlined" aria-hidden="true">
-              close
-            </span>
+                <button type="button" onClick={onClose} disabled={creating} aria-label="Close"
+                        className="text-on-surface-variant hover:text-on-surface disabled:opacity-50">
+                    <span className="material-symbols-outlined" aria-hidden="true">close</span>
                 </button>
             </div>
-
-            {nestedDisabled && (<p className="mb-4 rounded-lg bg-surface-container-high px-3 py-2 text-xs text-on-surface-variant">
-                Nested folders aren't supported yet — this folder will be created at the top level.
-            </p>)}
 
             <form onSubmit={handleSubmit}>
                 <input
                     type="text"
                     value={name}
-                    onChange={(event) => {
-                        setName(event.target.value);
+                    onChange={(e) => {
+                        setName(e.target.value);
                         setError("");
                     }}
                     placeholder="Folder name"
@@ -210,23 +194,13 @@ function CreateFolderModal({nestedDisabled, onClose, onCreate}) {
                     disabled={creating}
                     className="w-full rounded-xl border border-outline-variant/30 bg-surface-container-low px-4 py-3 text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30 disabled:opacity-60"
                 />
-
                 {error && <p className="mt-2 text-sm text-error">{error}</p>}
-
                 <div className="mt-6 flex justify-end gap-3">
-                    <button
-                        type="button"
-                        onClick={onClose}
-                        disabled={creating}
-                        className="rounded-xl px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-container disabled:opacity-50"
-                    >
-                        Cancel
+                    <button type="button" onClick={onClose} disabled={creating}
+                            className="rounded-xl px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-container disabled:opacity-50">Cancel
                     </button>
-                    <button
-                        type="submit"
-                        disabled={creating}
-                        className="rounded-xl bg-primary px-5 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary/90 disabled:opacity-60"
-                    >
+                    <button type="submit" disabled={creating}
+                            className="rounded-xl bg-primary px-5 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary/90 disabled:opacity-60">
                         {creating ? "Creating…" : "Create Folder"}
                     </button>
                 </div>
@@ -285,10 +259,14 @@ export default function DashboardPage() {
             setFiles(allFiles);
 
             // Folders are represented as placeholder records: name === ".__folder__"
-            const uniqueFolders = [...new Set(allFiles
-                .filter((file) => file.name === ".__folder__")
-                .map((file) => file.directory)
-                .filter(Boolean)),];
+            const uniqueFolders = [];
+            const seenPaths = new Set();
+            allFiles.forEach((file) => {
+                if (file.name === ".__folder__" && file.directory && !seenPaths.has(file.directory)) {
+                    seenPaths.add(file.directory);
+                    uniqueFolders.push({path: file.directory, id: file.id});
+                }
+            });
             setFolders(uniqueFolders);
         } catch (error) {
             console.error("Failed to fetch files:", error);
@@ -321,30 +299,24 @@ export default function DashboardPage() {
         }
 
         try {
-            const response = await fetch(`${API_URL}/auth/download/${fileId}`, {
-                headers: {Authorization: `Bearer ${token}`},
+            const linkRes = await fetch(`${API_URL}/auth/files/${fileId}/public-link`, {
+                method: "POST", headers: {Authorization: `Bearer ${token}`},
             });
+            if (!linkRes.ok) throw new Error("Failed to get download link.");
+            const {url} = await linkRes.json();
 
-            if (!response.ok) {
-                let message = "Failed to download file.";
-                try {
-                    const data = await response.json();
-                    message = data.detail || message;
-                } catch {
-                    // response wasn't JSON — keep the default message
-                }
-                throw new Error(message);
-            }
+            const response = await fetch(`${API_URL}${url.replace("/stream/", "/download/")}`);
+            if (!response.ok) throw new Error("Failed to download file.");
 
             const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
+            const objectUrl = window.URL.createObjectURL(blob);
             const anchor = document.createElement("a");
-            anchor.href = url;
+            anchor.href = objectUrl;
             anchor.download = filename;
             document.body.appendChild(anchor);
             anchor.click();
             anchor.remove();
-            window.URL.revokeObjectURL(url);
+            window.URL.revokeObjectURL(objectUrl);
         } catch (error) {
             console.error("Download failed:", error);
             alert(error.message || "Failed to download file.");
@@ -363,7 +335,7 @@ export default function DashboardPage() {
             return;
         }
 
-        if (!window.confirm(`Delete "${filename}"? This can't be undone.`)) {
+        if (!window.confirm(`Move "${filename}" to Trash?`)) {
             return;
         }
 
@@ -403,24 +375,83 @@ export default function DashboardPage() {
             return;
         }
 
-        // The backend rejects "/" in folder names, so nested folders aren't
-        // possible yet — new folders always land at the top level.
-        const folderPath = cleanName;
+        const folderPath = currentFolder ? `${currentFolder}/${cleanName}` : cleanName;
 
         const response = await fetch(`${API_URL}/auth/create-folder`, {
-            method: "POST", headers: {
-                "Content-Type": "application/json", Authorization: `Bearer ${token}`,
-            }, body: JSON.stringify({directory: folderPath}),
+            method: "POST",
+            headers: {"Content-Type": "application/json", Authorization: `Bearer ${token}`},
+            body: JSON.stringify({directory: folderPath}),
         });
 
         const data = await response.json();
-
-        if (!response.ok) {
-            throw new Error(data.detail || "Failed to create folder.");
-        }
+        if (!response.ok) throw new Error(data.detail || "Failed to create folder.");
 
         await fetchFiles();
         setShowFolderModal(false);
+    };
+
+    const isFolderEmpty = (path) => {
+        const hasFiles = files.some((f) => f.name !== ".__folder__" && (f.directory || "") === path);
+        const hasSubfolders = folders.some((f) => f.path !== path && f.path.startsWith(`${path}/`));
+        return !hasFiles && !hasSubfolders;
+    };
+
+    const deleteFolder = async (folderId, folderPath) => {
+        const token = getToken();
+
+        if (!token) {
+            navigate("/");
+            return;
+        }
+
+        // Don't allow deletion if folder contains anything
+        if (!isFolderEmpty(folderPath)) {
+            alert("This folder isn't empty. Delete its contents first.");
+            return;
+        }
+
+        const folderName = folderPath.split("/").pop();
+
+        if (!window.confirm(`Move folder "${folderName}" to Trash?`)) {
+            return;
+        }
+
+        setDeletingId(`folder-${folderId}`);
+
+        try {
+            const response = await fetch(`${API_URL}/auth/files/${folderId}`, {
+                method: "DELETE", headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+            });
+
+            let data = {};
+
+            try {
+                data = await response.json();
+            } catch {
+                // Response may not contain JSON
+            }
+
+            if (response.status === 401) {
+                localStorage.removeItem("token");
+                navigate("/");
+                return;
+            }
+
+            if (!response.ok) {
+                throw new Error(data.detail || "Failed to delete folder.");
+            }
+
+            // Refresh both files and folders from backend
+            await fetchFiles();
+
+        } catch (error) {
+            console.error("Folder deletion failed:", error);
+            alert(error.message || "Failed to delete folder.");
+        } finally {
+            setDeletingId(null);
+        }
     };
 
     const handleLogout = () => {
@@ -444,10 +475,10 @@ export default function DashboardPage() {
 
     // Direct-child folders of the current directory.
     const visibleFolders = useMemo(() => {
-        return folders.filter((folderPath) => {
-            if (!currentFolder) return !folderPath.includes("/");
-            if (!folderPath.startsWith(`${currentFolder}/`)) return false;
-            const remainder = folderPath.slice(currentFolder.length + 1);
+        return folders.filter(({path}) => {
+            if (!currentFolder) return !path.includes("/");
+            if (!path.startsWith(`${currentFolder}/`)) return false;
+            const remainder = path.slice(currentFolder.length + 1);
             return remainder && !remainder.includes("/");
         });
     }, [folders, currentFolder]);
@@ -465,8 +496,14 @@ export default function DashboardPage() {
     const filteredFolders = useMemo(() => {
         const query = searchQuery.trim().toLowerCase();
         if (!query) return visibleFolders;
-        return visibleFolders.filter((folderPath) => folderPath.split("/").pop()?.toLowerCase().includes(query));
+        return visibleFolders.filter(({path}) => path.split("/").pop()?.toLowerCase().includes(query));
     }, [visibleFolders, searchQuery]);
+
+    const breadcrumbSegments = useMemo(() => {
+        if (!currentFolder) return [];
+        const parts = currentFolder.split("/");
+        return parts.map((label, i) => ({label, path: parts.slice(0, i + 1).join("/")}));
+    }, [currentFolder]);
 
     const isEmpty = filteredFiles.length === 0 && filteredFolders.length === 0;
 
@@ -476,7 +513,7 @@ export default function DashboardPage() {
         {/* Desktop sidebar */}
         <div className="fixed left-0 top-0 hidden h-screen md:flex">
             <Sidebar
-                onUpload={() => navigate("/upload")}
+                onUpload={() => navigate(`/upload?directory=${encodeURIComponent(currentFolder)}`)}
                 onGoHome={() => setCurrentFolder("")}
                 onLogout={handleLogout}
             />
@@ -486,7 +523,7 @@ export default function DashboardPage() {
         {sidebarOpen && (<div className="fixed inset-0 z-50 flex md:hidden">
             <div className="flex-shrink-0">
                 <Sidebar
-                    onUpload={() => navigate("/upload")}
+                    onUpload={() => navigate(`/upload?directory=${encodeURIComponent(currentFolder)}`)}
                     onGoHome={() => {
                         setCurrentFolder("");
                         setSidebarOpen(false);
@@ -571,7 +608,14 @@ export default function DashboardPage() {
                         <h2 className="text-2xl font-semibold tracking-tight text-on-surface">
                             Your Files
                         </h2>
-                        {currentFolder && (<p className="mt-1 text-sm text-on-surface-variant">{currentFolder}</p>)}
+                        {currentFolder && (<div className="mb-4 flex items-center gap-1 text-sm text-on-surface-variant">
+                            <button onClick={() => setCurrentFolder("")} className="hover:text-primary hover:underline">All Files</button>
+                            {breadcrumbSegments.map(({label, path}, i) => (<span key={path} className="flex items-center gap-1">
+                                        <span className="text-on-surface-variant/40">/</span>
+                                {i === breadcrumbSegments.length - 1 ? <span className="text-on-surface font-medium">{label}</span> :
+                                    <button onClick={() => openFolder(path)} className="hover:text-primary hover:underline">{label}</button>}
+                                    </span>))}
+                        </div>)}
                     </div>
 
                     <div className="flex gap-2">
@@ -586,14 +630,13 @@ export default function DashboardPage() {
                             New Folder
                         </button>
 
+                        {/*Top-right button*/}
                         <button
                             type="button"
-                            onClick={() => navigate("/upload")}
+                            onClick={() => navigate(`/upload?directory=${encodeURIComponent(currentFolder)}`)}
                             className="flex items-center gap-1 rounded-xl bg-primary px-4 py-2 text-xs font-medium text-on-primary shadow-[0_0_15px_rgba(192,193,255,0.15)] transition-colors hover:bg-primary/90"
                         >
-                <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
-                  cloud_upload
-                </span>
+                            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">cloud_upload</span>
                             Upload
                         </button>
                     </div>
@@ -656,21 +699,29 @@ export default function DashboardPage() {
                         </h3>
 
                         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                            {filteredFolders.map((folderPath) => {
-                                const displayName = folderPath.split("/").pop();
-                                return (<button
-                                    key={folderPath}
-                                    type="button"
-                                    onClick={() => openFolder(folderPath)}
-                                    className="rounded-2xl border border-outline-variant/10 bg-surface-container-lowest p-4 text-left transition-all hover:border-primary/30 hover:bg-surface-container-low"
+                            {filteredFolders.map(({path, id}) => {
+                                const displayName = path.split("/").pop();
+                                return (<div
+                                    key={path}
+                                    className="group relative rounded-2xl border border-outline-variant/10 bg-surface-container-lowest p-4 text-left transition-all hover:border-primary/30 hover:bg-surface-container-low"
                                 >
-                          <span className="material-symbols-outlined text-[42px] text-primary" aria-hidden="true">
-                            folder
-                          </span>
-                                    <p className="mt-3 truncate text-sm font-medium text-on-surface">
-                                        {displayName}
-                                    </p>
-                                </button>);
+                                    <button type="button" onClick={() => openFolder(path)} className="block w-full text-left">
+                                        <span className="material-symbols-outlined text-[42px] text-primary" aria-hidden="true">folder</span>
+                                        <p className="mt-3 truncate text-sm font-medium text-on-surface">{displayName}</p>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => deleteFolder(id, path)}
+                                        disabled={deletingId === `folder-${id}`}
+                                        title="Delete folder"
+                                        aria-label={`Delete folder ${displayName}`}
+                                        className="absolute right-2 top-2 rounded-lg p-1 text-on-surface-variant opacity-0 transition-opacity hover:bg-error/10 hover:text-error group-hover:opacity-100 disabled:opacity-50"
+                                    >
+                                            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                                                {deletingId === `folder-${id}` ? "progress_activity" : "delete"}
+                                            </span>
+                                    </button>
+                                </div>);
                             })}
                         </div>
                     </div>)}
@@ -805,7 +856,7 @@ export default function DashboardPage() {
         </div>
 
         {showFolderModal && (<CreateFolderModal
-            nestedDisabled={Boolean(currentFolder)}
+            targetPath={currentFolder}
             onClose={() => setShowFolderModal(false)}
             onCreate={createFolder}
         />)}

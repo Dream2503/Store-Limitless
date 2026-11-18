@@ -13,4 +13,4 @@ python-jose
 python-telegram-bot
 requests
 uvicorn
-
+yt-dlp

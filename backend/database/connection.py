@@ -27,6 +27,7 @@ try:
             modified_at TEXT    NOT NULL,
             data_center TEXT    NOT NULL,
             links       TEXT    NOT NULL,
+            deleted_at  TEXT,
             username    TEXT,
             FOREIGN KEY (username) REFERENCES users (username)
         );

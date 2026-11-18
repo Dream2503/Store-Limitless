@@ -10,7 +10,7 @@ import ItemDetailsModal from "./dashboard/components/ItemDetailsModal.jsx";
 import DashboardContextMenu from "./dashboard/components/DashboardContextMenu.jsx";
 import DashboardWorkspace from "./dashboard/components/DashboardWorkspace.jsx";
 import UploadJobsTray from "./dashboard/components/UploadJobsTray.jsx";
-import {listResumableDownloads, listResumableDownloadChunks, removeResumableDownload, removeResumableDownloadChunks, removeResumableDownloadChunksFrom, saveResumableDownload, saveResumableDownloadChunk} from "./dashboard/utils/resumableDownloads.js";
+import {cancelQueuedDownloadTask, enqueueDownloadTask, listResumableDownloads, listResumableDownloadChunks, removeResumableDownload, removeResumableDownloadChunks, removeResumableDownloadChunksFrom, saveResumableDownload, saveResumableDownloadChunk} from "./dashboard/utils/resumableDownloads.js";
 import BulkActionConfirmModal from "./dashboard/components/BulkActionConfirmModal.jsx";
 import useDashboardData, {clearDashboardTreeCache} from "./dashboard/hooks/useDashboardData.js";
 import useGlobalFileSearch from "./dashboard/hooks/useGlobalFileSearch.js";
@@ -134,7 +134,7 @@ export default function DashboardPage({active = true} = {}) {
         let cancelled = false;
         listResumableDownloads().then((storedJobs) => {
             if (cancelled) return;
-            const restored = storedJobs.map((job) => job.status === "downloading" ? {
+            const restored = storedJobs.map((job) => ["downloading", "queued"].includes(job.status) ? {
                 ...job, status: "paused", message: "Paused after page reload"
             } : job);
             downloadJobsRef.current = restored;
@@ -160,7 +160,7 @@ export default function DashboardPage({active = true} = {}) {
         saveResumableDownload(updated).catch((error) => console.warn("Could not persist download progress:", error));
     };
 
-    const runResumableDownload = async (job, sessionToken = getToken()) => {
+    const performResumableDownload = async (job, sessionToken = getToken()) => {
         if (!sessionToken || getToken() !== sessionToken || downloadControllersRef.current.has(job.id)) return;
         const controller = new AbortController();
         downloadControllersRef.current.set(job.id, controller);
@@ -587,14 +587,43 @@ export default function DashboardPage({active = true} = {}) {
             downloadControllersRef.current.delete(job.id);
             // Retry cleanup after all in-flight writes have unwound. The logout
             // listener may have tried removing an OPFS file while a writer held it.
-            if (getToken() !== sessionToken) {
+            const jobStillTracked = downloadJobsRef.current.some((item) => item.id === job.id);
+            if (getToken() !== sessionToken || !jobStillTracked) {
                 removeStagedFile(job);
                 removeResumableDownloadChunks(job.id).catch(() => {});
                 removeResumableDownload(job.id).catch(() => {});
             }
         }
     };
-    const pauseDownload = (jobId) => downloadControllersRef.current.get(jobId)?.abort();
+    const runResumableDownload = (job, sessionToken = getToken()) => {
+        if (!sessionToken || getToken() !== sessionToken) return;
+
+        const queueStatus = enqueueDownloadTask(job.id, async () => {
+            const currentJob = downloadJobsRef.current.find((item) => item.id === job.id);
+            if (!currentJob || getToken() !== sessionToken) return;
+            await performResumableDownload(currentJob, sessionToken);
+        });
+        if (queueStatus === "queued") {
+            updateDownloadJob(job.id, {
+                status: "queued",
+                message: "Queued · waiting for the previous download",
+            });
+        }
+    };
+
+    const pauseDownload = (jobId) => {
+        const controller = downloadControllersRef.current.get(jobId);
+        if (controller) {
+            controller.abort();
+            return;
+        }
+        if (cancelQueuedDownloadTask(jobId)) {
+            updateDownloadJob(jobId, {
+                status: "paused",
+                message: "Paused while queued",
+            });
+        }
+    };
     const resumeDownload = (jobId) => {
         const job = downloadJobsRef.current.find((item) => item.id === jobId);
         const token = getToken();
@@ -607,15 +636,21 @@ export default function DashboardPage({active = true} = {}) {
             .catch((error) => console.warn("Could not remove temporary download file:", error));
     };
     const removeDownload = (jobId) => {
-        downloadControllersRef.current.get(jobId)?.abort();
-        downloadControllersRef.current.delete(jobId);
+        cancelQueuedDownloadTask(jobId);
+        const controller = downloadControllersRef.current.get(jobId);
         const job = downloadJobsRef.current.find((item) => item.id === jobId);
-        removeStagedFile(job);
-        removeResumableDownloadChunks(jobId).catch((error) => console.warn("Could not remove saved download chunks:", error));
+        controller?.abort();
+
         const next = downloadJobsRef.current.filter((item) => item.id !== jobId);
         downloadJobsRef.current = next;
         setDownloadJobs(next);
-        removeResumableDownload(jobId).catch((error) => console.warn("Could not remove download task:", error));
+
+        // Keep a staged file until an active writer has settled; its finalizer cleans up after abort.
+        if (!controller) {
+            removeStagedFile(job);
+            removeResumableDownloadChunks(jobId).catch((error) => console.warn("Could not remove saved download chunks:", error));
+            removeResumableDownload(jobId).catch((error) => console.warn("Could not remove download task:", error));
+        }
     };
     const clearCompletedDownloads = () => {
         downloadJobsRef.current.filter((job) => job.status === "completed" || job.status === "error").forEach((job) => {
@@ -636,6 +671,7 @@ export default function DashboardPage({active = true} = {}) {
 
         const jobs = downloadJobsRef.current;
         for (const job of jobs) {
+            cancelQueuedDownloadTask(job.id);
             downloadControllersRef.current.get(job.id)?.abort();
             removeStagedFile(job);
             removeResumableDownloadChunks(job.id).catch((error) => console.warn("Could not clear saved download chunks:", error));
@@ -1727,10 +1763,10 @@ export default function DashboardPage({active = true} = {}) {
                 return;
             }
 
-            const singleFolderName = actionItems.length === 1 && foldersToDownload.length === 1
-                ? String(foldersToDownload[0].name || foldersToDownload[0].path || "").split(/[\\/]/).filter(Boolean).at(-1)
-                : "";
-            setZipDownloadName(singleFolderName || "StoreLimitless-items");
+            // Name the archive after the current parent folder containing the selected items.
+            // At the Home root, use "home" because there is no deeper parent directory.
+            const parentFolderName = (currentFolder || "/home").split(/[\\/]/).filter(Boolean).at(-1) || "home";
+            setZipDownloadName(parentFolderName);
             setZipDownloadNameError("");
             setZipDownloadPrompt({
                 fileIds: filesToDownload.map((candidate) => candidate.id),
@@ -2816,6 +2852,32 @@ export default function DashboardPage({active = true} = {}) {
                 event.preventDefault();
                 setSelectedItems(new Set(selectableItems.map((item) => item.key)));
                 selectionAnchorRef.current = selectableItems[0]?.key || null;
+                return;
+            }
+
+            if (event.ctrlKey && !event.metaKey && !event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key)) {
+                const selectedIndices = selectableItems
+                    .map((item, index) => selectedItems.has(item.key) ? index : -1)
+                    .filter((index) => index >= 0);
+                if (!selectedIndices.length) return;
+                event.preventDefault();
+
+                const nextIndex = event.key === "ArrowDown"
+                    ? Math.max(...selectedIndices) + 1
+                    : Math.min(...selectedIndices) - 1;
+                const nextItem = selectableItems[nextIndex];
+                if (!nextItem) return;
+
+                const nextSelection = new Set(selectedItems);
+                nextSelection.add(nextItem.key);
+                setSelectedItems(nextSelection);
+                selectionAnchorRef.current = nextItem.key;
+
+                const node = selectionSurfaceRef.current
+                    ? Array.from(selectionSurfaceRef.current.querySelectorAll("[data-selection-id]"))
+                        .find((element) => element.getAttribute("data-selection-id") === nextItem.key)
+                    : null;
+                node?.scrollIntoView({block: "nearest", inline: "nearest", behavior: "auto"});
                 return;
             }
 

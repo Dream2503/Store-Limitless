@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from asyncio import Lock, Queue, TimeoutError as AsyncTimeoutError, run, to_thread, wait_for
+import json
 from pathlib import Path
+import re
+import unicodedata
 from time import monotonic
 from typing import Any
 from urllib.parse import SplitResult, urlsplit
 
 from core.config import BASE_DIR
-from core.utils import env as env_config
+from core.utils import env as env_config, write_log
 from core.utils.env import TELEGRAM_API_HASH, TELEGRAM_API_ID
+from core.utils.telegram_ import Telegram
 
 TELEGRAM_PROCESSING_BOT: str = "PremiumFiletoLink_Bot"
 TELEGRAM_PROCESSING_TIMEOUT: float = 90.0
@@ -25,43 +29,209 @@ def _message_entity_text(text: str, offset: int, length: int) -> str:
     return encoded[offset * 2:(offset + length) * 2].decode("utf-16-le", errors="ignore")
 
 
-def _fast_download_target(message: Any) -> str | None:
-    """Return the actual URL target attached to a FAST DOWNLOAD label or button."""
+_SMALL_CAPITAL_TRANSLATION = str.maketrans({
+    "ᴀ": "a",
+    "ʙ": "b",
+    "ᴄ": "c",
+    "ᴅ": "d",
+    "ᴇ": "e",
+    "ꜰ": "f",
+    "ɢ": "g",
+    "ʜ": "h",
+    "ɪ": "i",
+    "ᴊ": "j",
+    "ᴋ": "k",
+    "ʟ": "l",
+    "ᴍ": "m",
+    "ɴ": "n",
+    "ᴏ": "o",
+    "ᴘ": "p",
+    "ʀ": "r",
+    "ꜱ": "s",
+    "ᴛ": "t",
+    "ᴜ": "u",
+    "ᴠ": "v",
+    "ᴡ": "w",
+    "ʏ": "y",
+    "ᴢ": "z",
+})
+
+
+def _normalized_link_label(value: Any) -> str:
+    """Normalize stylized Unicode button labels so matching ignores font variants."""
+
+    normalized = unicodedata.normalize("NFKC", str(value or "")).translate(_SMALL_CAPITAL_TRANSLATION).casefold()
+    return "".join(character for character in normalized if character.isalnum())
+
+
+def _message_buttons(message: Any) -> list[Any]:
+    """Return Telegram buttons from either Telethon's wrapper or raw reply markup."""
 
     buttons = getattr(message, "buttons", None) or []
+    flattened: list[Any] = [button for row in buttons for button in (row or [])]
 
-    for row in buttons:
-        for button in row:
-            label: str = str(getattr(button, "text", "") or "").strip().casefold()
+    if flattened:
+        return flattened
 
-            if "fast download" not in label:
-                continue
+    markup = getattr(message, "reply_markup", None)
+    rows = getattr(markup, "rows", None) or []
+    return [
+        button
+        for row in rows
+        for button in (getattr(row, "buttons", None) or [])
+    ]
 
-            target = getattr(button, "url", None)
 
-            if not target and getattr(button, "button", None) is not None:
-                target = getattr(button.button, "url", None)
+def _button_label(button: Any) -> str:
+    """Read a button label from Telethon's custom wrapper or its raw TL object."""
 
-            if target:
-                return str(target).strip()
+    raw_button = getattr(button, "button", None)
+    return str(
+        getattr(button, "text", None)
+        or getattr(raw_button, "text", None)
+        or ""
+    ).strip()
 
-    text: str = str(getattr(message, "raw_text", "") or "")
 
+def _button_url(button: Any) -> str | None:
+    """Read a URL from a custom message button or the underlying Telegram button."""
+
+    raw_button = getattr(button, "button", None)
+
+    for candidate in (
+        getattr(button, "url", None),
+        getattr(raw_button, "url", None),
+    ):
+        target = str(candidate or "").strip()
+        if target:
+            return target
+
+    return None
+
+
+def _visible_http_urls(text: str) -> list[str]:
+    """Extract HTTP(S) URLs written directly in a Telegram message."""
+
+    matches = re.findall(r"""https?://[^\s<>"']+""", text or "", flags=re.IGNORECASE)
+    return [match.rstrip(".,;:!?)]}") for match in matches if match.rstrip(".,;:!?)]}")]
+
+
+def _fast_download_target(message: Any) -> str | None:
+    """Return the URL behind a FAST DOWNLOAD button, entity, or visible link."""
+
+    text: str = str(getattr(message, "raw_text", "") or getattr(message, "message", "") or "")
+    normalized_text = _normalized_link_label(text)
+    buttons = _message_buttons(message)
+    matching_button_found = False
+
+    # Prefer the exact DOWNLOAD button over STREAM or any other download-labelled
+    # button. This is the file endpoint the import pipeline needs, not the web player.
+    # Normalize Unicode small caps because the bot renders labels in stylized text.
+    for button in buttons:
+        label = _normalized_link_label(_button_label(button))
+        target = _button_url(button)
+
+        if label == "download" and target:
+            return target
+
+    # Keep compatibility with bot variants that add emoji or extra words to the
+    # download button label, but only after checking for the exact DOWNLOAD label.
+    for button in buttons:
+        label = _normalized_link_label(_button_label(button))
+        target = _button_url(button)
+
+        if "download" in label and target:
+            return target
+
+    # Some bot variants only expose a STREAM button. Keep it as a fallback,
+    # although it may resolve to a web page rather than a direct file response.
+    for button in buttons:
+        label = _normalized_link_label(_button_label(button))
+        target = _button_url(button)
+
+        if "stream" in label and target:
+            return target
+
+    for button in buttons:
+        label = _normalized_link_label(_button_label(button))
+
+        if "fastdownload" not in label:
+            continue
+
+        matching_button_found = True
+        target = _button_url(button)
+        if target:
+            return target
+
+    # A text URL can be represented as a Telegram MessageEntityTextUrl, where
+    # the actual destination is stored on the entity rather than in message text.
     for entity in getattr(message, "entities", None) or []:
         offset: int = int(getattr(entity, "offset", -1))
         length: int = int(getattr(entity, "length", 0))
-        target = getattr(entity, "url", None)
+        target = str(getattr(entity, "url", "") or "").strip()
 
         if offset < 0 or length <= 0 or not target:
             continue
 
-        label: str = _message_entity_text(text, offset, length).strip().casefold()
+        label = _normalized_link_label(_message_entity_text(text, offset, length))
+        if "fastdownload" in label:
+            return target
 
-        if "fast download" in label:
-            return str(target).strip()
+    # Some bot versions send the destination as visible text instead of attaching
+    # it to the labeled button/entity. Use it only when the message identifies the
+    # FAST DOWNLOAD action and there is a single unambiguous HTTP(S) URL.
+    if "fastdownload" in normalized_text or matching_button_found:
+        visible_urls = _visible_http_urls(text)
+        if len(visible_urls) == 1:
+            return visible_urls[0]
 
     return None
 
+
+async def _fast_download_callback_target(message: Any) -> str | None:
+    """Click a FAST DOWNLOAD callback button when the bot does not attach a URL."""
+
+    for button in _message_buttons(message):
+        if "fastdownload" not in _normalized_link_label(_button_label(button)):
+            continue
+
+        if _button_url(button):
+            continue
+
+        raw_button = getattr(button, "button", None)
+        button_type = type(raw_button).__name__.casefold()
+
+        # A callback button has no URL until its bot-side action is invoked. Do
+        # not click ordinary text/reply buttons, which would send a chat message.
+        if "callback" not in button_type:
+            continue
+
+        click = getattr(button, "click", None)
+        if not callable(click):
+            continue
+
+        try:
+            answer = await wait_for(click(), timeout=12)
+        except Exception:
+            continue
+
+        target = str(getattr(answer, "url", "") or "").strip()
+        if target:
+            return target
+
+        answer_text = str(
+            getattr(answer, "message", None)
+            or getattr(answer, "text", None)
+            or ""
+        )
+        # The callback was reached through a FAST DOWNLOAD button, so an
+        # unambiguous URL in its answer is a valid result even if the bot's
+        # popup omits the button label.
+        answer_urls = _visible_http_urls(answer_text)
+        if len(answer_urls) == 1:
+            return answer_urls[0]
+
+    return None
 
 def _message_location(link: str) -> tuple[str, int]:
     """Parse a publicly accessible Telegram message link into its chat and message ID."""
@@ -150,12 +320,49 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
     responses: Queue[Any] = Queue()
 
     async def receive_bot_message(event: Any) -> None:
-        """Queue new or edited messages sent by the configured processing bot."""
+        """Log and queue the full new or edited message from the processing bot."""
 
         try:
             sender = await event.get_sender()
-            if str(getattr(sender, "username", "") or "").casefold() == TELEGRAM_PROCESSING_BOT.casefold():
-                responses.put_nowait(event.message)
+            if str(getattr(sender, "username", "") or "").casefold() != TELEGRAM_PROCESSING_BOT.casefold():
+                return
+
+            message = event.message
+            message_buttons = _message_buttons(message)
+            response_details = {
+                "message_id": getattr(message, "id", None),
+                "sender_username": getattr(sender, "username", None),
+                "sender_id": getattr(sender, "id", None),
+                "chat_id": getattr(event, "chat_id", None),
+                "date": str(getattr(message, "date", None)),
+                "raw_text": getattr(message, "raw_text", None),
+                "message_text": getattr(message, "message", None),
+                "entities": [repr(entity) for entity in (getattr(message, "entities", None) or [])],
+                "buttons": [
+                    {
+                        "text": _button_label(button),
+                        "url": _button_url(button),
+                        "raw_button": repr(getattr(button, "button", button)),
+                    }
+                    for button in message_buttons
+                ],
+                "reply_markup": repr(getattr(message, "reply_markup", None)),
+                "full_message_repr": repr(message),
+            }
+
+            try:
+                write_log(
+                    "INFO",
+                    Telegram,
+                    "FILETOLINK RESPONSE",
+                    str(getattr(sender, "username", None) or getattr(sender, "id", "unknown")),
+                    json.dumps(response_details, ensure_ascii=False, indent=2, default=repr),
+                )
+            except Exception:
+                # Diagnostics must never prevent a valid bot response from being processed.
+                pass
+
+            responses.put_nowait(message)
         except Exception:
             # Ignore unrelated incoming messages and entity-resolution failures.
             return
@@ -299,6 +506,12 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
 
                 received_bot_response = True
                 fast_url = _fast_download_target(response)
+
+                if fast_url is None:
+                    # Some FiletoLink responses expose FAST DOWNLOAD as a
+                    # Telegram callback button; its URL only arrives after it
+                    # is clicked through the authenticated user session.
+                    fast_url = await _fast_download_callback_target(response)
 
             parsed_url = urlsplit(fast_url)
 

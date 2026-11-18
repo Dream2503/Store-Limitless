@@ -11,6 +11,7 @@ from typing import Any, Literal, cast, TYPE_CHECKING
 import redis.asyncio
 
 from backend.database.connection import POOL, DirectoryDict, FileDict
+from core.utils import write_log
 from core.utils.progress import Progress
 
 if TYPE_CHECKING:
@@ -71,14 +72,24 @@ class Redis:
     async def initialize(cls) -> None:
         """Create the asynchronous Redis client and verify connectivity with PING. Existing Redis data is intentionally preserved."""
 
+        from core.data_center import Database
+
         cls.redis = redis.asyncio.Redis.from_url("redis://localhost:6379", decode_responses=True)
-        await cls.redis.ping()
+        try:
+            await cls.redis.ping()
+        except Exception as error:
+            write_log("ERROR", Database, "REDIS", "server", f"Connection check failed error={type(error).__name__}: {str(error)[:250]}")
+            raise
+
+        write_log("INFO", Database, "REDIS", "server", "Connected and PING succeeded")
 
     @classmethod
     async def close(cls) -> None:
         """Close the asynchronous Redis client connection pool."""
 
         await cls.redis.aclose()
+        from core.data_center import Database
+        write_log("INFO", Database, "REDIS", "server", "Connection pool closed")
 
     @classmethod
     async def get_json(cls, key: str) -> Any | None:

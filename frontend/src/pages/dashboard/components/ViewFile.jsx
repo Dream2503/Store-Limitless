@@ -3,7 +3,7 @@ import {useLocation, useNavigate} from "react-router-dom";
 import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
 import UploadJobsTray from "./UploadJobsTray.jsx";
 import {AUTH_SESSION_END_EVENT, createUniqueId, endAuthSession, getFileKind, getToken} from "../utils.js";
-import {listResumableDownloadChunks, removeResumableDownloadChunks, removeResumableDownloadChunksFrom, saveResumableDownloadChunk} from "../utils/resumableDownloads.js";
+import {cancelQueuedDownloadTask, enqueueDownloadTask, listResumableDownloadChunks, removeResumableDownloadChunks, removeResumableDownloadChunksFrom, saveResumableDownloadChunk} from "../utils/resumableDownloads.js";
 import {API_URL} from "../../../api.js";
 
 /**
@@ -851,6 +851,10 @@ export default function ViewFile({active = true} = {}) {
         };
     }, [active, fileId, navigate, publicFile, publicFileError, publicToken]);
 
+    useEffect(() => () => {
+        cancelQueuedDownloadTask(downloadTrayJobId);
+    }, [downloadTrayJobId]);
+
     useEffect(() => {
         downloadMountedRef.current = true;
         return () => {
@@ -867,6 +871,7 @@ export default function ViewFile({active = true} = {}) {
 
     useEffect(() => {
         const handleSessionEnded = () => {
+            cancelQueuedDownloadTask(downloadTrayJobId);
             downloadDismissedRef.current = true;
             downloadControllerRef.current?.abort();
             downloadControllerRef.current = null;
@@ -894,14 +899,14 @@ export default function ViewFile({active = true} = {}) {
 
         window.addEventListener(AUTH_SESSION_END_EVENT, handleSessionEnded);
         return () => window.removeEventListener(AUTH_SESSION_END_EVENT, handleSessionEnded);
-    }, [publicToken]);
+    }, [downloadTrayJobId, publicToken]);
 
     /**
      * Stage the file in StoreLimitless temporary storage before triggering the browser save.
      * This deliberately avoids a direct link to the download endpoint.
      * @returns {Promise<void>}
      */
-    const startStagedDownload = useCallback(async () => {
+    const performStagedDownload = useCallback(async () => {
         if (!downloadUrl || downloadControllerRef.current) return;
         const sessionToken = publicToken ? null : getToken();
         if (!publicToken && !sessionToken) {
@@ -1252,6 +1257,22 @@ export default function ViewFile({active = true} = {}) {
         }
     }, [downloadUrl, name, publicFile?.size, publicToken]);
 
+    const startStagedDownload = useCallback(() => {
+        if (!downloadUrl || downloadControllerRef.current) return;
+
+        const queueStatus = enqueueDownloadTask(downloadTrayJobId, async () => {
+            await performStagedDownload();
+        });
+        if (queueStatus === "queued") {
+            setDownloadState((current) => ({
+                status: "queued",
+                transferred: current.transferred,
+                total: current.total,
+                message: "Queued · waiting for the previous download",
+            }));
+        }
+    }, [downloadUrl, downloadTrayJobId, performStagedDownload]);
+
     /** @type {[VideoSource | null, import("react").Dispatch<import("react").SetStateAction<VideoSource | null>>]} */
     const [source, setSource] = useState(null);
     const [status, setStatus] = useState("Preparing video…");
@@ -1457,13 +1478,26 @@ export default function ViewFile({active = true} = {}) {
             uploadJobs={[]}
             downloadJobs={downloadTrayJobs}
             pauseDownload={(jobId) => {
-                if (jobId === downloadTrayJobId) downloadControllerRef.current?.abort();
+                if (jobId !== downloadTrayJobId) return;
+                if (downloadControllerRef.current) {
+                    downloadControllerRef.current.abort();
+                    return;
+                }
+                if (cancelQueuedDownloadTask(downloadTrayJobId)) {
+                    setDownloadState((current) => ({
+                        status: "paused",
+                        transferred: current.transferred,
+                        total: current.total,
+                        message: "Paused while queued",
+                    }));
+                }
             }}
             resumeDownload={(jobId) => {
                 if (jobId === downloadTrayJobId && ["paused", "error"].includes(downloadState.status)) void startStagedDownload();
             }}
             removeDownload={(jobId) => {
                 if (jobId !== downloadTrayJobId) return;
+                cancelQueuedDownloadTask(downloadTrayJobId);
                 downloadDismissedRef.current = true;
                 downloadControllerRef.current?.abort();
                 setDownloadError("");

@@ -24,7 +24,8 @@ from backend.ftp.server import StoreLimitlessFTPServer
 from backend.server.app import app
 from backend.server.frontend import frontend_app
 from core.config import HOST, TRANSFER_PATH
-from core.data_center import DataCenter
+from core.data_center import DataCenter, Database
+from core.utils import write_log
 from core.utils.binaries import start_cloudflare_tunnel, start_redis_server
 from core.utils.discord_ import Discord
 from core.utils.telegram_ import Telegram
@@ -174,6 +175,7 @@ async def main() -> None:
     """Start all StoreLimitless services and cleanly stop them on exit."""
 
     subprocess_run("cls" if sys.platform == "win32" else "clear", shell=True)
+    write_log("INFO", Database, "LIFECYCLE", "server", f"Starting StoreLimitless services host={HOST}")
     frozen: bool = bool(getattr(sys, "frozen", False))
     frontend_dir: Path | None = None
 
@@ -199,7 +201,9 @@ async def main() -> None:
 
     try:
         await Redis.initialize()
+        write_log("INFO", Database, "LIFECYCLE", "server", "Redis connection verified")
         await DataCenter.initialize_cache()
+        write_log("INFO", Database, "LIFECYCLE", "server", "Remote chunk cache initialized")
         # Connect Telegram while the API and frontend boot instead of serializing
         # this remote handshake ahead of local web-server startup.
         telegram_task = create_task(Telegram.main(), name="storelimitless-telegram")
@@ -343,6 +347,7 @@ async def main() -> None:
 
                 await sleep(0.1)
 
+            write_log("INFO", Database, "LIFECYCLE", "server", "API, frontend, FTP, Discord, and Telegram startup completed")
             print("\n" + "=" * 50)
             print("Servers started")
             print("=" * 50)
@@ -407,6 +412,7 @@ async def main() -> None:
             pass
 
     finally:
+        write_log("INFO", Database, "LIFECYCLE", "server", "Shutdown requested; stopping services")
         if server is not None:
             server.should_exit = True
 
@@ -460,6 +466,7 @@ async def main() -> None:
         # Large torrent/YouTube/FTP staging folders can contain gigabytes. Move
         # them out atomically and let a detached process delete them after exit.
         _schedule_transfer_cleanup()
+        write_log("INFO", Database, "LIFECYCLE", "server", "Service shutdown and transfer cleanup scheduling completed")
 
     if restart_requested:
         if frozen:
@@ -479,4 +486,7 @@ if __name__ == "__main__":
         run(main())
 
     except KeyboardInterrupt:
-        pass
+        write_log("INFO", Database, "LIFECYCLE", "server", "Interrupted by keyboard")
+    except Exception as error:
+        write_log("ERROR", Database, "LIFECYCLE", "server", f"Fatal startup/runtime error: {type(error).__name__}: {error}")
+        raise

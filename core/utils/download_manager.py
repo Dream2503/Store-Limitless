@@ -1,8 +1,8 @@
 """Centralized bounded concurrency for downloads from remote storage parts.
 
-The manager fetches up to eight remote links concurrently and yields their bytes
-in original order, so consumers can stream files and ZIP archives without
-staging whole files or archives on disk.
+The manager fetches one remote link at a time and yields its bytes in original
+order, so consumers can stream files and ZIP archives without staging whole files
+or archives on disk.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
-DOWNLOAD_CONCURRENCY = 8
+DOWNLOAD_CONCURRENCY = 1
 _DOWNLOAD_SLOTS = Semaphore(DOWNLOAD_CONCURRENCY)
 
 
@@ -30,7 +30,7 @@ async def ordered_parallel_downloads(
     *,
     concurrency: int = DOWNLOAD_CONCURRENCY,
 ) :
-    """Fetch a bounded window of links concurrently and yield results in index order."""
+    """Fetch links sequentially and yield results in index order."""
 
     if concurrency < 1:
         raise ValueError("Download concurrency must be at least one")

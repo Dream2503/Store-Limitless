@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar, Token
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,15 +13,32 @@ if TYPE_CHECKING:
     from core.data_center import DataCenter
 
 
+_REQUEST_ID: ContextVar[str] = ContextVar("storelimitless_request_id", default="")
+
+
+def set_log_context(request_id: str) -> Token[str]:
+    """Attach a correlation ID to log records in the current execution context."""
+
+    return _REQUEST_ID.set(request_id)
+
+
+def reset_log_context(token: Token[str]) -> None:
+    """Restore the previous log correlation context."""
+
+    _REQUEST_ID.reset(token)
+
+
 def write_log(level: str, data_center: type[DataCenter] | DataCenter, func: str, user: str, message: str) -> None:
     """Write and flush a timestamped, lock-protected application log record."""
 
     from core.config import LOG_HANDLER, LOCK
 
     timestamp: str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    request_id: str = _REQUEST_ID.get()
+    context: str = f"[request_id={request_id}] " if request_id else ""
 
     with LOCK:
-        LOG_HANDLER.write(f"[{timestamp}] [{data_center.NAME}] [{level}] [{func}] [{user}] {message}\n")
+        LOG_HANDLER.write(f"[{timestamp}] [{data_center.NAME}] [{level}] [{func}] [{user}] {context}{message}\n")
         LOG_HANDLER.flush()
 
 

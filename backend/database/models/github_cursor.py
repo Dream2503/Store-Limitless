@@ -1,8 +1,6 @@
-from sqlite3 import Row
-
 from pydantic import BaseModel, ConfigDict
 
-from backend.database.connection import CONNECTION
+from backend.database.connection import CONNECTION, GitHubCursorDict
 from core.data_center import Database
 from core.utils import write_log
 
@@ -21,7 +19,7 @@ class GitHubCursor(BaseModel):
 
     @classmethod
     def get(cls) -> "GitHubCursor":
-        row: Row | None = CONNECTION.execute(
+        row: GitHubCursorDict | None = CONNECTION.execute(
             """
             SELECT repo_id, used
             FROM github_cursor;
@@ -31,15 +29,15 @@ class GitHubCursor(BaseModel):
         if row is None:
             raise OSError("GitHub cursor not found in database.")
 
-        return cls(**dict(row))
+        return cls(**row)
 
     def save(self) -> None:
         try:
             CONNECTION.execute(
                 """
                 UPDATE github_cursor
-                SET repo_id = ?,
-                    used    = ?;
+                SET repo_id = %s,
+                    used    = %s;
                 """,
                 (
                     self.repo_id,

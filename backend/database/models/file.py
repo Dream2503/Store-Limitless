@@ -1,12 +1,11 @@
 from datetime import datetime, timedelta, timezone
-from json import dumps, loads
 from pathlib import Path
-from sqlite3 import Row
 from typing import cast
 
+from psycopg import Cursor
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.database.connection import CONNECTION
+from backend.database.connection import CONNECTION, FileDict
 from core.data_center import Database
 from core.utils import write_log
 
@@ -41,7 +40,7 @@ class File(BaseModel):
 
     def save(self) -> None:
         if self.get(did=self.directory_id, name=self.name, username=self.username):
-            path = Path(self.name)
+            path: Path = Path(self.name)
             stem, extension = path.stem, path.suffix
             i = 1
 
@@ -51,25 +50,25 @@ class File(BaseModel):
             self.name = f"{stem}({i}){extension}"
 
         try:
-            cursor = CONNECTION.execute(
+            self.id = cast(dict[str, int], CONNECTION.execute(
                 """
                 INSERT INTO files (directory_id, name, type, size, modified_at, data_center, links, deleted_at, username)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id;
                 """,
                 (
                     self.directory_id,
                     self.name,
                     self.type,
                     self.size,
-                    self.modified_at.isoformat(),
+                    self.modified_at,
                     self.data_center,
-                    dumps(self.links),
-                    self.deleted_at.isoformat() if self.deleted_at else None,
+                    self.links,
+                    self.deleted_at,
                     self.username,
                 ),
-            )
+            ).fetchone())["id"]
             CONNECTION.commit()
-            self.id = cursor.lastrowid
 
         except Exception as e:
             CONNECTION.rollback()
@@ -94,24 +93,24 @@ class File(BaseModel):
             trash_clause: str = ""
 
         if fid is not None:
-            cursor = CONNECTION.execute(
+            cursor: Cursor[FileDict] = CONNECTION.execute(
                 f"""
                 SELECT id, directory_id, name, type, size, modified_at, data_center, links, deleted_at, username
                 FROM files
-                WHERE id = ? 
+                WHERE id = %s 
                   {trash_clause};
                 """,
                 (fid,),
             )
 
         elif did is not None and name is not None and username is not None:
-            cursor = CONNECTION.execute(
+            cursor: Cursor[FileDict] = CONNECTION.execute(
                 f"""
                 SELECT id, directory_id, name, type, size, modified_at, data_center, links, deleted_at, username
                 FROM files
-                WHERE directory_id = ? 
-                  AND name = ? 
-                  AND username = ? 
+                WHERE directory_id = %s 
+                  AND name = %s 
+                  AND username = %s 
                   {trash_clause};
                 """,
                 (
@@ -124,16 +123,12 @@ class File(BaseModel):
         else:
             return None
 
-        row: Row | None = cursor.fetchone()
+        row: FileDict | None = cursor.fetchone()
 
         if row is None:
             return None
 
-        data: dict[str, int | str | datetime | None] = dict(row)
-        data["links"] = loads(cast(str, data["links"]))
-        data["modified_at"] = datetime.fromisoformat(cast(str, data["modified_at"]))
-        data["deleted_at"] = datetime.fromisoformat(cast(str, data["deleted_at"])) if data["deleted_at"] else None
-        return cls(**data)
+        return cls(**row)
 
     @classmethod
     def get_all(cls, username: str, *, directory_id: int | None = None, include_trashed: bool = False, trashed_only: bool = False, ) -> list["File"]:
@@ -147,37 +142,34 @@ class File(BaseModel):
             trash_clause: str = ""
 
         if directory_id is not None:
-            cursor = CONNECTION.execute(
+            cursor: Cursor[FileDict] = CONNECTION.execute(
                 f"""
                 SELECT id, directory_id, name, type, size, modified_at, data_center, links, deleted_at, username
                 FROM files
-                WHERE directory_id = ? 
-                  AND username = ? 
+                WHERE directory_id = %s 
+                  AND username = %s 
                   {trash_clause}
                 ORDER BY name;
                 """,
                 (directory_id, username),
             )
         else:
-            cursor = CONNECTION.execute(
+            cursor: Cursor[FileDict] = CONNECTION.execute(
                 f"""
                 SELECT id, directory_id, name, type, size, modified_at, data_center, links, deleted_at, username
                 FROM files
-                WHERE username = ? 
+                WHERE username = %s 
                   {trash_clause}
                 ORDER BY name;
                 """,
                 (username,),
             )
 
+        row: FileDict
         files: list[File] = []
 
         for row in cursor.fetchall():
-            data: dict[str, int | str | datetime | None] = dict(row)
-            data["links"] = loads(cast(str, data["links"]))
-            data["modified_at"] = datetime.fromisoformat(cast(str, data["modified_at"]))
-            data["deleted_at"] = datetime.fromisoformat(cast(str, data["deleted_at"])) if data["deleted_at"] else None
-            files.append(cls(**data))
+            files.append(cls(**row))
 
         return files
 
@@ -189,25 +181,25 @@ class File(BaseModel):
             CONNECTION.execute(
                 """
                 UPDATE files
-                SET directory_id = ?,
-                    name         = ?,
-                    type         = ?,
-                    size         = ?,
-                    modified_at  = ?,
-                    deleted_at   = ?,
-                    data_center  = ?,
-                    links        = ?
-                WHERE id = ?;
+                SET directory_id = %s,
+                    name         = %s,
+                    type         = %s,
+                    size         = %s,
+                    modified_at  = %s,
+                    deleted_at   = %s,
+                    data_center  = %s,
+                    links        = %s
+                WHERE id = %s;
                 """,
                 (
                     self.directory_id,
                     self.name,
                     self.type,
                     self.size,
-                    self.modified_at.isoformat(),
-                    self.deleted_at.isoformat() if self.deleted_at else None,
+                    self.modified_at,
+                    self.deleted_at,
                     self.data_center,
-                    dumps(self.links),
+                    self.links,
                     self.id,
                 ),
             )
@@ -222,8 +214,8 @@ class File(BaseModel):
         if self.id is None:
             raise ValueError("File has no ID")
 
-        self.deleted_at = datetime.now(timezone.utc)
         self.modified_at = datetime.now(timezone.utc)
+        self.deleted_at = self.modified_at
         self.update()
 
     def delete(self) -> None:
@@ -235,7 +227,7 @@ class File(BaseModel):
                 """
                 DELETE
                 FROM files
-                WHERE id = ?;
+                WHERE id = %s;
                 """,
                 (self.id,),
             )
@@ -261,13 +253,13 @@ class File(BaseModel):
                 """
                 DELETE
                 FROM files
-                WHERE username = ?
+                WHERE username = %s
                   AND deleted_at IS NOT NULL
-                  AND deleted_at < ?;
+                  AND deleted_at < %s;
                 """,
                 (
                     username,
-                    (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat(),
+                    datetime.now(timezone.utc) - timedelta(days=older_than_days),
                 ),
             )
             CONNECTION.commit()

@@ -15,114 +15,81 @@ if TYPE_CHECKING:
     from core.data_center import DataCenter
     from backend.database.models.file import File
 
-
 def check_dependencies() -> None:
+    from core.config import FFMPEG_PATH, FROZEN
+
     missing: list[str] = []
 
-    if shutil.which("ffmpeg") is None:
-        missing.append("FFmpeg")
+    if FROZEN:
+        if not FFMPEG_PATH.is_file():
+            missing.append(f"FFmpeg ({FFMPEG_PATH})")
+    else:
+        if shutil.which("ffmpeg") is None:
+            missing.append("FFmpeg")
 
-    if shutil.which("redis-server") is None:
-        missing.append("Redis")
+    if not missing:
+        return
 
-    if missing:
-        system = platform.system()
-        instructions: list[str] = []
+    system = platform.system()
+    instructions: list[str] = []
 
-        if system == "Windows":
-            if "FFmpeg" in missing:
-                instructions.append(
-                    "FFmpeg:\n"
-                    "  1. Open PowerShell or Command Prompt.\n"
-                    "  2. Run: winget install Gyan.FFmpeg\n"
-                    "  3. Close and reopen your terminal so PATH is refreshed."
-                )
-
-            if "Redis" in missing:
-                instructions.append(
-                    "Redis:\n"
-                    "  1. Open PowerShell or Command Prompt as Administrator.\n"
-                    "  2. Run: winget install Memurai.Memurai\n"
-                    "  3. Memurai is installed as a Windows service and should start automatically.\n"
-                    "  4. If it does not start automatically, open the Memurai service from Windows Services and start it."
-                )
-
-        elif system == "Linux":
-            if "FFmpeg" in missing:
-                instructions.append(
-                    "FFmpeg:\n"
-                    "  1. Open a terminal.\n"
-                    "  2. Run: sudo apt update\n"
-                    "  3. Run: sudo apt install ffmpeg"
-                )
-
-            if "Redis" in missing:
-                instructions.append(
-                    "Redis:\n"
-                    "  1. Open a terminal.\n"
-                    "  2. Run: sudo apt update\n"
-                    "  3. Run: sudo apt install redis-server\n"
-                    "  4. Start Redis with: sudo systemctl enable --now redis-server"
-                )
-
-        else:
-            instructions.append(
-                "Your operating system is not supported automatically.\n"
-                "Install FFmpeg and Redis manually, then make sure both "
-                "commands are available in PATH."
-            )
-
-        raise RuntimeError(
-            "\n"
-            "╔══════════════════════════════════════════════════════════╗\n"
-            "║             Missing Required Dependencies                ║\n"
-            "╚══════════════════════════════════════════════════════════╝\n\n"
-            f"The application cannot start because the following dependencies are missing:\n\n"
-            f"  • {', '.join(missing)}\n\n"
-            "Follow the instructions below, then run the application again.\n\n"
-            + "\n\n".join(instructions)
-            + "\n\n"
-              "After installation, simply restart the application.\n"
+    if FROZEN:
+        instructions.append(
+            "The bundled runtime files are missing or corrupted.\n"
+            "Reinstall StoreLimitless or rebuild the application."
+        )
+    elif system == "Windows":
+        instructions.append(
+            "FFmpeg:\n"
+            "  1. Open PowerShell or Command Prompt.\n"
+            "  2. Run: winget install Gyan.FFmpeg\n"
+            "  3. Close and reopen your terminal so PATH is refreshed."
+        )
+    elif system == "Linux":
+        instructions.append(
+            "FFmpeg:\n"
+            "  1. Open a terminal.\n"
+            "  2. Run: sudo apt update\n"
+            "  3. Run: sudo apt install ffmpeg"
+        )
+    else:
+        instructions.append(
+            "Your operating system is not supported automatically.\n"
+            "Install FFmpeg manually and make sure the command is available in PATH."
         )
 
+    raise RuntimeError(
+        "\n"
+        "╔══════════════════════════════════════════════════════════╗\n"
+        "║             Missing Required Dependencies                ║\n"
+        "╚══════════════════════════════════════════════════════════╝\n\n"
+        "The application cannot start because the following dependencies "
+        "are missing:\n\n"
+        f"  • {', '.join(missing)}\n\n"
+        + "\n\n".join(instructions)
+        + "\n\n"
+        "After installation, simply restart the application.\n"
+    )
+
+def check_redis() -> None:
     try:
         with create_connection(("127.0.0.1", 6379), timeout=1):
             pass
-
     except OSError as error:
-        system = platform.system()
-
-        if system == "Windows":
-            instructions = (
-                "Redis is installed, but the Redis server is not running.\n\n"
-                "Try the following:\n"
-                "  1. Open Windows Services.\n"
-                "  2. Find the Memurai service.\n"
-                "  3. Right-click it and select Start.\n\n"
-                "Then run the application again."
-            )
-        elif system == "Linux":
-            instructions = (
-                "Redis is installed, but the Redis server is not running.\n\n"
-                "Run:\n"
-                "  sudo systemctl enable --now redis-server\n\n"
-                "Then run the application again."
-            )
-        else:
-            instructions = (
-                "Redis is installed, but the Redis server is not running on localhost:6379.\n\n"
-                "Start the Redis server and then run the application again."
-            )
-
-        raise RuntimeError(instructions) from error
-
+        raise RuntimeError(
+            "Redis is not running on 127.0.0.1:6379."
+        ) from error
 
 def getenv(key: str) -> str:
     import os
+
     value: str | None = os.getenv(key)
 
     if value is None or not value.strip():
-        raise RuntimeError(f"Environment variable '{key}' is missing or empty. Check your .env file or system environment.")
+        raise RuntimeError(
+            f"Environment variable '{key}' is missing or empty. "
+            "Check your .env file or system environment."
+        )
 
     return value
 

@@ -4,12 +4,11 @@ from typing import cast
 
 import discord
 from aiohttp import ClientSession
-from discord import Intents, Message, TextChannel
-from discord.ext.commands import Bot
-
 from core.data_center import ConfigMeta, DataCenter
 from core.utils import getenv
 from core.utils import write_log, Progress, ProgressStream
+from discord import Intents, Message, TextChannel
+from discord.ext.commands import Bot
 
 
 class Discord(DataCenter, metaclass=ConfigMeta):
@@ -24,12 +23,21 @@ class Discord(DataCenter, metaclass=ConfigMeta):
     INTENTS.message_content = True
 
     app: Bot = Bot(command_prefix="!", intents=INTENTS, help_command=None, heartbeat_timeout=36_000)
+    ready: bool = False
 
     @staticmethod
     async def upload(chunk: bytes, filename: str, progress: Progress) -> str:
-        return str((await wrap_future(
-            run_coroutine_threadsafe(Discord.FILE_DUMP.send(file=discord.File(ProgressStream(chunk, progress), filename=filename)),
-                                     Discord.LOOP))).id)
+        for attempt in range(3):
+            try:
+                return str((await wrap_future(
+                    run_coroutine_threadsafe(Discord.FILE_DUMP.send(file=discord.File(ProgressStream(chunk, progress), filename=filename)),
+                                             Discord.LOOP))).id)
+
+            except discord.DiscordServerError:
+                if attempt == 2:
+                    raise
+
+                await asyncio.sleep(2 ** attempt)
 
     @staticmethod
     async def download(flink: str) -> bytes:
@@ -59,6 +67,7 @@ class Discord(DataCenter, metaclass=ConfigMeta):
                 write_log("ERROR", Discord, "INIT", "", f"Failed to fetch FILE_DUMP channel with ID {Discord.FILE_DUMP_ID}. Check bot permissions.")
 
             write_log("INFO", Discord, "INIT", str(Discord.app.user), f"Bot online and ready (id={Discord.app.user.id}).")
+            Discord.ready = True
 
         except Exception as e:
             write_log("ERROR", Discord, "INIT", "", f"Initialization failure: {e}\n{format_exc()}")

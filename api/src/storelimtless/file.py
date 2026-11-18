@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import subprocess
 from datetime import datetime
 from pathlib import Path
+from subprocess import Popen
 from typing import TYPE_CHECKING, Literal
 
 from requests import Response
@@ -111,7 +111,8 @@ class File:
         except (ValueError, KeyError, TypeError) as e:
             raise StoreLimitlessResponseError("StoreLimitless server returned an invalid public link response") from e
 
-        subprocess.Popen([application, f"{StoreLimitless.API_URL}/public/stream/{token}"])
+        process: Popen = Popen([application, f"{StoreLimitless.API_URL}/public/stream/{token}"])
+        process.wait()
 
     def rm(self) -> File:
         StoreLimitless.request(self.directory.user.token, "DELETE", f"/auth/file/{self.id}")

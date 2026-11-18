@@ -11,6 +11,7 @@ from yt_dlp import YoutubeDL
 
 import core.transfer
 from backend.database.models import File
+from core.config import FFMPEG_PATH, FROZEN
 from core.config import TRANSFER_PATH, GOOGLE_API_KEY
 from core.data_center import DataCenter
 from core.utils import Progress, upload_growing_file, write_log
@@ -46,7 +47,7 @@ async def download_google_drive(file: File, link: str) -> AsyncGenerator[Progres
         file.name = data.get("name") or file_id
         total_size: int = int(data["size"])
         progress.total = total_size
-        download_task: Task[Any] = create_task(to_thread(gdown.download, link, output=str(temp_dir), quiet=False))
+        download_task: Task[Any] = create_task(to_thread(gdown.download, link, output=str(temp_dir), quiet=True))
 
         while True:
             files = [path for path in temp_dir.iterdir() if path.is_file()]
@@ -131,11 +132,14 @@ async def download_youtube(file: File, link: str) -> AsyncGenerator[Progress, No
         with YoutubeDL(cast(Any, {
             "quiet": True,
             "no_warnings": True,
+            "noprogress": True,
             "noplaylist": True,
             "format": "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best",
             "outtmpl": str(temp_dir / "%(title)s.%(ext)s"),
             "merge_output_format": "mkv",
+            "ffmpeg_location": str(FFMPEG_PATH.parent),
             "writesubtitles": True,
+            "writeautomaticsub": True,
             "subtitleslangs": ["en"],
             "embedsubtitles": True,
             "progress_hooks": [hook],

@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlite3 import Row
 from typing import cast
 
-from backend.database.connection import CONNECTION
+from psycopg import Cursor
+from pydantic import BaseModel, ConfigDict, Field
+
+from backend.database.connection import CONNECTION, DirectoryDict
 from core.data_center import Database
 from core.utils import write_log
-from pydantic import BaseModel, ConfigDict, Field
 
 
 class Directory(BaseModel):
@@ -29,8 +30,8 @@ class Directory(BaseModel):
 
     def save(self) -> None:
         if Directory.get(path=self.path, username=self.username) is not None:
-            parent = self.path.parent
-            name = self.path.name
+            parent: Path = self.path.parent
+            name: str = self.path.name
             i = 1
 
             while Directory.get(path=parent / name, username=self.username, ) is not None:
@@ -40,15 +41,15 @@ class Directory(BaseModel):
             self.path = parent / name
 
         try:
-            cursor = CONNECTION.execute(
+            self.id = cast(dict[str, int], CONNECTION.execute(
                 """
                 INSERT INTO directories (path, modified_at, deleted_at, username)
-                VALUES (?, ?, ?, ?);
+                VALUES (%s, %s, %s, %s)
+                RETURNING id;
                 """,
-                (str(self.path), self.modified_at.isoformat(), self.deleted_at.isoformat() if self.deleted_at else None, self.username),
-            )
+                (str(self.path), self.modified_at, self.deleted_at, self.username),
+            ).fetchone())["id"]
             CONNECTION.commit()
-            self.id = cursor.lastrowid
 
         except Exception as e:
             CONNECTION.rollback()
@@ -72,23 +73,23 @@ class Directory(BaseModel):
             trash_clause: str = ""
 
         if did is not None:
-            cursor = CONNECTION.execute(
+            cursor: Cursor[DirectoryDict] = CONNECTION.execute(
                 f"""
                 SELECT id, path, modified_at, deleted_at, username
                 FROM directories
-                WHERE id = ?
+                WHERE id = %s
                   {trash_clause};
                 """,
                 (did,),
             )
 
         elif path is not None and username is not None:
-            cursor = CONNECTION.execute(
+            cursor: Cursor[DirectoryDict] = CONNECTION.execute(
                 f"""
                 SELECT id, path, modified_at, deleted_at, username
                 FROM directories
-                WHERE path = ?
-                  AND username = ?
+                WHERE path = %s
+                  AND username = %s
                   {trash_clause};
                 """,
                 (
@@ -100,16 +101,13 @@ class Directory(BaseModel):
         else:
             return None
 
-        row: Row | None = cursor.fetchone()
+        row: DirectoryDict | None = cursor.fetchone()
 
         if row is None:
             return None
 
-        data: dict[str, int | str | datetime | None] = dict(row)
+        data: dict[str, int | str | Path | datetime | None] = row
         data["path"] = Path(cast(str, data["path"]))
-        data["modified_at"] = datetime.fromisoformat(cast(str, data["modified_at"]))
-        data["deleted_at"] = datetime.fromisoformat(cast(str, data["deleted_at"])) if data["deleted_at"] else None
-
         return cls(**data)
 
     @classmethod
@@ -124,20 +122,19 @@ class Directory(BaseModel):
             trash_clause: str = ""
 
         if directory is not None:
-            directory = Path(directory)
             directory_string: str = str(directory).strip("/")
-            path_clause: str = "AND path LIKE ? AND path NOT LIKE ?"
+            path_clause: str = "AND path LIKE %s AND path NOT LIKE %s"
             parameters: tuple[str, ...] = (f"/{directory_string}/%", f"/{directory_string}/%/%")
 
         else:
             path_clause: str = ""
             parameters: tuple[str, ...] = tuple()
 
-        rows: list[Row] = CONNECTION.execute(
+        rows: list[DirectoryDict] = CONNECTION.execute(
             f"""
             SELECT id, path, modified_at, deleted_at, username
             FROM directories
-            WHERE username = ?
+            WHERE username = %s
               {path_clause}
               {trash_clause}
             ORDER BY path;
@@ -147,10 +144,8 @@ class Directory(BaseModel):
         directories: list[Directory] = []
 
         for row in rows:
-            data: dict[str, int | str | datetime | None] = dict(row)
+            data: dict[str, int | str | Path | datetime | None] = row
             data["path"] = Path(cast(str, data["path"]))
-            data["modified_at"] = datetime.fromisoformat(cast(str, data["modified_at"]))
-            data["deleted_at"] = datetime.fromisoformat(cast(str, data["deleted_at"])) if data["deleted_at"] else None
             directories.append(cls(**data))
 
         return directories
@@ -163,15 +158,15 @@ class Directory(BaseModel):
             CONNECTION.execute(
                 """
                 UPDATE directories
-                SET path        = ?,
-                    modified_at = ?,
-                    deleted_at  = ?
-                WHERE id = ?;
+                SET path        = %s,
+                    modified_at = %s,
+                    deleted_at  = %s
+                WHERE id = %s;
                 """,
                 (
                     str(self.path),
-                    self.modified_at.isoformat(),
-                    self.deleted_at.isoformat() if self.deleted_at else None,
+                    self.modified_at,
+                    self.deleted_at,
                     self.id,
                 ),
             )
@@ -186,8 +181,8 @@ class Directory(BaseModel):
         if self.id is None:
             raise ValueError("Directory has no ID")
 
-        self.deleted_at = datetime.now(timezone.utc)
-        self.modified_at = cast(datetime, self.deleted_at)
+        self.modified_at = datetime.now(timezone.utc)
+        self.deleted_at = self.modified_at
         self.update()
 
     def delete(self) -> None:
@@ -199,8 +194,8 @@ class Directory(BaseModel):
                 """
                 DELETE
                 FROM directories
-                WHERE id = ?
-                  AND username = ?;
+                WHERE id = %s
+                  AND username = %s;
                 """,
                 (self.id, self.username),
             )

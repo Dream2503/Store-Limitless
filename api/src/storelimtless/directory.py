@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from time import sleep
-from typing import Literal, TYPE_CHECKING, NamedTuple, cast
+from typing import Literal, TYPE_CHECKING, cast, Iterator
 
 from requests import Response
 from tqdm import tqdm
@@ -16,9 +16,22 @@ if TYPE_CHECKING:
     from .user import User
 
 
-class DirectoryResult(NamedTuple):
-    directories: list[Directory]
-    files: list[File]
+class DirectoryResult:
+    def __init__(self, directories: list[Directory], files: list[File]):
+        self.directories: list[Directory] = directories
+        self.files: list[File] = files
+
+    def __iter__(self) -> Iterator[list[Directory] | list[File]]:
+        yield self.directories
+        yield self.files
+
+    @property
+    def directory(self) -> Directory | None:
+        return self.directories[0] if len(self.directories) else None
+
+    @property
+    def file(self) -> File | None:
+        return self.files[0] if len(self.files) else None
 
 
 class Directory:
@@ -214,7 +227,7 @@ class Directory:
         if status["file_id"] is None:
             raise StoreLimitlessResponseError("Upload completed but the server did not return a file ID")
 
-        for file in self.ls[1]:
+        for file in self.ls.files:
             if file.id == status["file_id"]:
                 return file
 

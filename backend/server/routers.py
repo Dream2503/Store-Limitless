@@ -17,10 +17,15 @@ from core.config import UPLOAD_JOBS, TRANSFER_PATH
 from core.stream import Stream
 from core.transfer import link_upload, file_upload
 from core.utils import Progress
+from core.utils.discord_ import Discord
 
 auth: APIRouter = APIRouter(prefix="/auth")
 public: APIRouter = APIRouter(prefix="/public")
 
+
+@public.get("/ready")
+async def ready() -> JSONResponse:
+    return JSONResponse({"ready": Discord.ready})
 
 @auth.post("/register")
 def register(user: User) -> JSONResponse:

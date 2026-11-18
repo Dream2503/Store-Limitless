@@ -1,12 +1,12 @@
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlite3 import Row
 from typing import cast
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.database.connection import CONNECTION
+from backend.database.connection import UserDict
 from core.data_center import Database
 from core.utils import write_log
 from .directory import Directory
@@ -34,15 +34,16 @@ class User(BaseModel):
             CONNECTION.execute(
                 """
                 INSERT INTO users (username, password, first_name, last_name, created_at)
-                VALUES (?, ?, ?, ?, ?);
+                VALUES (%s, %s, %s, %s, %s);
                 """,
-                (self.username, self.password, self.first_name, self.last_name, self.created_at.isoformat()),
-            ).execute(
+                (self.username, self.password, self.first_name, self.last_name, self.created_at),
+            )
+            CONNECTION.execute(
                 """
                 INSERT INTO directories (path, modified_at, deleted_at, username)
-                VALUES (?, ?, ?, ?);
+                VALUES (%s, %s, %s, %s);
                 """,
-                ("/home", datetime.now(timezone.utc).isoformat(), None, self.username),
+                ("/home", datetime.now(timezone.utc), None, self.username),
             )
             CONNECTION.commit()
 
@@ -57,11 +58,11 @@ class User(BaseModel):
 
     @classmethod
     def get(cls, username: str) -> "User | None":
-        row: Row | None = CONNECTION.execute(
+        row: UserDict | None = CONNECTION.execute(
             """
             SELECT username, password, first_name, last_name, created_at
             FROM users
-            WHERE username = ?;
+            WHERE username = %s;
             """,
             (username,),
         ).fetchone()
@@ -69,19 +70,17 @@ class User(BaseModel):
         if row is None:
             return None
 
-        data: dict[str, str | datetime] = dict(row)
-        data["created_at"] = datetime.fromisoformat(cast(str, data["created_at"]))
-        return cls(**data)
+        return cls(**row)
 
     def update(self) -> None:
         try:
             CONNECTION.execute(
                 """
                 UPDATE users
-                SET password   = ?,
-                    first_name = ?,
-                    last_name  = ?
-                WHERE username = ?;
+                SET password   = %s,
+                    first_name = %s,
+                    last_name  = %s
+                WHERE username = %s;
                 """,
                 (self.password, self.first_name, self.last_name, self.username),
             )

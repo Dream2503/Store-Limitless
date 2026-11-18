@@ -21,22 +21,20 @@ export default function AuthPage() {
         setMessage("");
         setLoading(true);
         try {
-            const endpoint = isLogin
-                ? `${API_URL}/auth/login?username=${encodeURIComponent(formData.username)}&password=${encodeURIComponent(formData.password)}`
-                : `${API_URL}/auth/register`;
+            const endpoint = isLogin ? `${API_URL}/auth/login?username=${encodeURIComponent(formData.username)}&password=${encodeURIComponent(formData.password)}` : `${API_URL}/auth/register`;
 
             const bodyData = isLogin ? undefined : {...formData};
 
             const response = await fetch(endpoint, {
-                method: "POST", headers: {"Content-Type": "application/json"},
-                ...(bodyData ? {body: JSON.stringify(bodyData)} : {}),
+                method: "POST", headers: {"Content-Type": "application/json"}, ...(bodyData ? {body: JSON.stringify(bodyData)} : {}),
             });
 
             const data = await response.json();
             if (!response.ok) throw new Error(data.detail || "Something went wrong");
 
             if (isLogin) {
-                localStorage.setItem("token", data.access_token);
+                const [loginData, homeDirectory] = data;
+                localStorage.setItem("token", loginData.access_token);
                 navigate("/dashboard");
             } else {
                 setIsLogin(true);

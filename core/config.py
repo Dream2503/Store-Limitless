@@ -1,14 +1,12 @@
-from __future__ import annotations
-
 from logging import INFO, WARNING, basicConfig, getLogger
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO
+from typing import TextIO
 
 from dotenv import load_dotenv
 from filelock import FileLock
+from redis.asyncio import Redis
 
-if TYPE_CHECKING:
-    from core.utils import Progress
+from core.utils import Jobs, getenv
 
 # Paths
 BASE_DIR: Path = Path(__file__).resolve().parent.parent
@@ -20,6 +18,7 @@ TRANSFER_PATH: Path = BASE_DIR / "transfer"
 
 # Environment
 load_dotenv()
+GOOGLE_API_KEY: str = getenv("GOOGLE_API_KEY")
 
 # Application constants
 POSSIBLE_DATACENTERS: frozenset[str] = frozenset({
@@ -35,7 +34,8 @@ SUPPORTED_DOMAINS: frozenset[str] = frozenset({
 })
 
 # Runtime state
-UPLOAD_JOBS: dict[str, Progress] = {}
+redis: Redis = Redis.from_url("redis://localhost:6379", decode_responses=True)
+UPLOAD_JOBS: Jobs = Jobs(redis)
 
 # Files and locks
 TRANSFER_PATH.mkdir(exist_ok=True)

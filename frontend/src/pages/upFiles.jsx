@@ -111,7 +111,7 @@ export default function UploadPage() {
                         "Content-Type": file.type || "application/octet-stream",
                         "X-File-Name": file.name,
                         "X-Data-Center": dataCenter,
-                        "directory": directory,
+                        "X-Directory": directory,
                     }, body: file,
                 });
             } else {

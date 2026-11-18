@@ -1,37 +1,36 @@
-import requests
+from __future__ import annotations
 
-from .client import StoreLimitlessClient
+from typing import TYPE_CHECKING
+
+import requests
+from requests import Response
+
 from .exception import StoreLimitlessHTTPError, StoreLimitlessConnectionError, StoreLimitlessError, StoreLimitlessResponseError
+
+if TYPE_CHECKING:
+    from .user import User
 
 
 class StoreLimitless:
-    BASE_URL: str = "http://localhost:8000"
+    API_URL: str = "http://127.0.0.1:8000"
+
+    def __new__(cls, *args, **kwargs):
+        raise TypeError("MyClass cannot be instantiated")
 
     @staticmethod
-    def http_error(response: requests.Response) -> StoreLimitlessHTTPError:
+    def request(token: str | None, method: str, path: str, **kwargs) -> Response:
         try:
-            message = response.json().get("detail", response.text)
-        except (ValueError, AttributeError):
-            message = response.text
-
-        return StoreLimitlessHTTPError(
-            response.status_code,
-            message or f"HTTP {response.status_code}",
-        )
-
-    @classmethod
-    def login(cls, username: str, password: str) -> StoreLimitlessClient:
-        try:
-            response = requests.post(
-                f"{cls.BASE_URL}/auth/login",
-                json={
-                    "username": username,
-                    "password": password,
+            response: Response = requests.request(
+                method,
+                f"{StoreLimitless.API_URL}{path}",
+                headers={
+                    **({"Authorization": f"Bearer {token}"} if token else {}),
+                    **kwargs.pop("headers", {}),
                 },
-                timeout=10,
+                **kwargs,
             )
         except requests.ConnectionError as e:
-            raise StoreLimitlessConnectionError(f"Could not connect to StoreLimitless server at {cls.BASE_URL}") from e
+            raise StoreLimitlessConnectionError(f"Could not connect to StoreLimitless server at {StoreLimitless.API_URL}") from e
 
         except requests.Timeout as e:
             raise StoreLimitlessConnectionError("Request to StoreLimitless server timed out") from e
@@ -40,37 +39,39 @@ class StoreLimitless:
             raise StoreLimitlessError(f"Request to StoreLimitless server failed: {e}") from e
 
         if not response.ok:
-            raise cls.http_error(response)
+            try:
+                message: str = response.json().get("detail", response.text)
+
+            except (ValueError, AttributeError):
+                message: str = response.text
+
+            raise StoreLimitlessHTTPError(response.status_code, message or f"HTTP {response.status_code}")
+
+        return response
+
+    @classmethod
+    def login(cls, username: str, password: str) -> User:
+        from .user import User
+
+        response: Response = cls.request(None, "POST", "/auth/login", params={"username": username, "password": password})
 
         try:
-            token = response.json()["access_token"]
+            reply, user, home = response.json()
+            return User(reply["access_token"], **user, home=home)
 
         except (ValueError, KeyError, TypeError) as e:
             raise StoreLimitlessResponseError("StoreLimitless server returned an invalid login response") from e
 
-        return StoreLimitlessClient(token)
-
     @classmethod
     def register(cls, first_name: str, last_name: str, username: str, password: str) -> None:
-        try:
-            response = requests.post(
-                f"{cls.BASE_URL}/auth/register",
-                json={
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "username": username,
-                    "password": password,
-                },
-                timeout=10,
-            )
-        except requests.ConnectionError as e:
-            raise StoreLimitlessConnectionError(f"Could not connect to StoreLimitless server at {cls.BASE_URL}") from e
-
-        except requests.Timeout as e:
-            raise StoreLimitlessConnectionError("Request to StoreLimitless server timed out") from e
-
-        except requests.RequestException as e:
-            raise StoreLimitlessError(f"Request to StoreLimitless server failed: {e}") from e
-
-        if not response.ok:
-            raise cls.http_error(response)
+        cls.request(
+            None,
+            "POST",
+            "/auth/register",
+            json={
+                "first_name": first_name,
+                "last_name": last_name,
+                "username": username,
+                "password": password,
+            },
+        )

@@ -11,9 +11,9 @@ from yt_dlp import YoutubeDL
 
 import core.transfer
 from backend.database.models import File
-from core.config import TRANSFER_PATH
+from core.config import TRANSFER_PATH, GOOGLE_API_KEY
 from core.data_center import DataCenter
-from core.utils import Progress, upload_growing_file, write_log, GOOGLE_API_KEY
+from core.utils import Progress, upload_growing_file, write_log
 
 
 async def download_google_drive(file: File, link: str) -> AsyncGenerator[Progress, None]:

@@ -1,5 +1,6 @@
 aiohttp
 bcrypt==4.0.1
+booktype
 discord-py
 fastapi[all]
 filelock
@@ -10,6 +11,7 @@ psycopg2-binary
 pydantic
 python-dotenv
 python-jose
+redis>=8.1.0
 telethon
 requests
 uvicorn

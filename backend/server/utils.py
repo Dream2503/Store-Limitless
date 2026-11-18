@@ -3,13 +3,12 @@ from urllib.parse import ParseResult, urlparse
 
 from fastapi import HTTPException
 
-from core.config import POSSIBLE_DATACENTERS, UPLOAD_JOBS
+from core.config import POSSIBLE_DATACENTERS
 
 ValueType = Literal[
     "datacenter",
     "directory",
     "file_name",
-    "job_id",
     "link",
 ]
 
@@ -32,10 +31,6 @@ def perform_validation(value: str, value_type: ValueType) -> str:
         case "file_name":
             if not value or value in {".", ".."} or "/" in value or "\\" in value:
                 raise HTTPException(status_code=400, detail="Invalid file name")
-
-        case "job_id":
-            if not value or value not in UPLOAD_JOBS:
-                raise HTTPException(status_code=404, detail="Upload job not found")
 
         case "link":
             parsed: ParseResult = urlparse(value)

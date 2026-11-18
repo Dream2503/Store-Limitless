@@ -24,6 +24,8 @@ async def file_upload(file: File, file_path: Path, upload_task: Task[None] | Non
         if not intermediate:
             file.save()
             write_log("INFO", data_center, "UPLOAD", file.username, f"Upload complete `{file_path.name}`")
+            progress.message = f"Upload Complete of id={file.id}"
+            yield progress
 
         file_path.unlink(missing_ok=True)
 
@@ -36,6 +38,7 @@ async def link_upload(file: File, link: str) -> AsyncGenerator[Progress, None]:
 
     user: User = cast(User, User.get(file.username))
     data_center: DataCenter = DataCenter(file.data_center)
+    progress = Progress("Uploading File", 0)
     write_log("INFO", data_center, "DOWNLOAD", user.username, f"Got link: {link}")
 
     try:
@@ -57,6 +60,8 @@ async def link_upload(file: File, link: str) -> AsyncGenerator[Progress, None]:
 
         file.save()
         write_log("INFO", data_center, "DOWNLOAD", user.username, f"Download and upload complete `{file.name}`")
+        progress.message = f"Upload Complete of id={file.id}"
+        yield progress
 
     except Exception as e:
         write_log("ERROR", data_center, "DOWNLOAD", user.username, f"Unhandled exception: {e}\n{format_exc()}")

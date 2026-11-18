@@ -35,39 +35,46 @@ def register(user: User) -> JSONResponse:
 
 
 @auth.post("/login")
-def login(username: str, password: str) -> JSONResponse:
+def login(username: str, password: str) -> tuple[dict[str, str], dict[str, str], Directory]:
     user: User | None = User.get(username)
 
     if not user or not verify_password(password, user.password):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    return JSONResponse({
-        "message": "Login successful",
-        "access_token": create_access_token(data={"sub": user.username}),
-        "token_type": "bearer",
-    })
+    return ({
+                "message": "Login successful",
+                "access_token": create_access_token(data={"sub": user.username}),
+                "token_type": "bearer",
+            }, {
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+            }, user.home
+    )
 
 
 @auth.get("/upload/{job_id}/status")
 async def upload_status(job_id: str) -> JSONResponse:
-    progress: Progress = UPLOAD_JOBS[perform_validation(job_id, "job_id")]
+    progress: Progress = await UPLOAD_JOBS.get(job_id)
+    completed: bool = "complete" in progress.message.lower()
     return JSONResponse({
-        "status": "completed" if "complete" in progress.message.lower() else "uploading",
-        "message": progress.message,
+        "status": "completed" if completed else "uploading",
+        "message": " ".join(progress.message.split()[:2]) if completed else progress.message,
         "transfer": progress.transfer,
         "total": progress.total,
+        "file_id": int(progress.message.split("id=")[-1]) if completed else None,
     })
 
 
 @auth.post("/upload")
 async def upload_file(request: Request,
                       data_center: str = Header(..., alias="X-Data-Center"),
-                      directory: str = Header(""),
+                      directory: str = Header(..., alias="X-Directory"),
                       file_name: str = Header(..., alias="X-File-Name"),
                       user: User = Depends(get_current_user)) -> JSONResponse:
     data_center = perform_validation(data_center, "datacenter")
     file_name = perform_validation(file_name, "file_name")
-    directory_obj: Directory | None = Directory.get(path=directory, username=user.username)
+    directory_obj: Directory | None = Directory.get(path=Path(directory), username=user.username)
 
     if directory_obj is None:
         raise HTTPException(status_code=404, detail="Directory not found")
@@ -94,11 +101,11 @@ async def upload_file(request: Request,
 
     upload_task: Task[None] = create_task(write_file())
     job_id: str = str(uuid4())
-    UPLOAD_JOBS[job_id] = Progress("Starting", 0)
+    await UPLOAD_JOBS.set(job_id, Progress("Starting", 0))
 
     async def run_upload_job() -> None:
         async for progress in file_upload(file, file_path, upload_task):
-            UPLOAD_JOBS[job_id] = progress
+            await UPLOAD_JOBS.set(job_id, progress)
 
     create_task(run_upload_job())
     await upload_task
@@ -106,10 +113,10 @@ async def upload_file(request: Request,
 
 
 @auth.post("/upload-link")
-async def upload_link(link: str, data_center: str, directory: str = "", user: User = Depends(get_current_user)) -> JSONResponse:
+async def upload_link(link: str, data_center: str, directory: str, user: User = Depends(get_current_user)) -> JSONResponse:
     link = perform_validation(link, "link")
     data_center = perform_validation(data_center, "datacenter")
-    directory_obj: Directory | None = Directory.get(path=directory, username=user.username)
+    directory_obj: Directory | None = Directory.get(path=Path(directory), username=user.username)
 
     if directory_obj is None:
         raise HTTPException(status_code=404, detail="Directory not found")
@@ -125,11 +132,11 @@ async def upload_link(link: str, data_center: str, directory: str = "", user: Us
         username=user.username
     )
     job_id: str = str(uuid4())
-    UPLOAD_JOBS[job_id] = Progress("Starting", 0)
+    await UPLOAD_JOBS.set(job_id, Progress("Starting", 0))
 
     async def run_upload_job() -> None:
         async for progress in link_upload(file, link):
-            UPLOAD_JOBS[job_id] = progress
+            await UPLOAD_JOBS.set(job_id, progress)
 
     create_task(run_upload_job())
     return JSONResponse({"job_id": job_id})
@@ -138,34 +145,34 @@ async def upload_link(link: str, data_center: str, directory: str = "", user: Us
 @auth.post("/create-folder")
 def create_folder(directory: str, name: str, user: User = Depends(get_current_user)) -> JSONResponse:
     folder: Directory = Directory(
-        path=f"{perform_validation(directory, "directory")}/{perform_validation(name, "file_name")}",
+        path=Path(perform_validation(directory, "directory")) / perform_validation(name, "file_name"),
         modified_at=datetime.now(timezone.utc),
         username=user.username,
     )
     folder.save()
     return JSONResponse({
         "message": "Folder created successfully",
-        "directory": f"/{folder.path}",
+        "directory": str(folder),
     })
 
 
 @auth.get("/directory")
 def get_directory(directory: str, user: User = Depends(get_current_user)) -> tuple[list[Directory], list[File]]:
-    directory_obj: Directory | None = Directory.get(path=directory, username=user.username)
+    directory_obj: Directory | None = Directory.get(path=Path(directory), username=user.username)
 
     if directory_obj is None:
         raise HTTPException(status_code=404, detail="Directory not found")
 
-    return Directory.get_all(user.username, directory=directory), File.get_all(user.username, directory_id=directory_obj.id)
+    return Directory.get_all(user.username, directory=Path(directory)), File.get_all(user.username, directory_id=directory_obj.id)
 
 
 @auth.get("/trash")
 def get_trash(user: User = Depends(get_current_user)) -> tuple[list[Directory], list[File]]:
     File.purge_expired(user.username)
-    return Directory.get_all(user.username, trashed_only=True), File.get_all(user.username, trashed_only=True),
+    return Directory.get_all(user.username, trashed_only=True), File.get_all(user.username, trashed_only=True)
 
 
-@auth.delete("/files/{fid}")
+@auth.delete("/file/{fid}")
 def file_delete(fid: int, user: User = Depends(get_current_user)) -> JSONResponse:
     file: File | None = File.get(fid=fid)
 
@@ -179,7 +186,7 @@ def file_delete(fid: int, user: User = Depends(get_current_user)) -> JSONRespons
     return JSONResponse({"message": "File moved to trash"})
 
 
-@auth.delete("/directories/{did}")
+@auth.delete("/directory/{did}")
 def directory_delete(did: int, user: User = Depends(get_current_user)) -> JSONResponse:
     directory: Directory | None = Directory.get(did=did)
 
@@ -189,17 +196,11 @@ def directory_delete(did: int, user: User = Depends(get_current_user)) -> JSONRe
     if directory.username != user.username:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    for file in File.get_all(user.username, directory_id=directory.id):
-        file.move_to_trash()
-
-    for child in Directory.get_all(user.username, directory=directory.path):
-        directory_delete(cast(int, child.id), user)
-
     directory.move_to_trash()
     return JSONResponse({"message": "Directory moved to trash"})
 
 
-@auth.delete("/trash/{fid}")
+@auth.delete("/trash/file/{fid}")
 def permanently_delete(fid: int, user: User = Depends(get_current_user)) -> JSONResponse:
     file: File | None = File.get(fid=fid, trashed_only=True)
 
@@ -227,7 +228,7 @@ def permanently_delete_directory(did: int, user: User = Depends(get_current_user
     return JSONResponse({"message": "Permanently deleted"})
 
 
-@auth.post("/trash/{fid}/restore")
+@auth.post("/trash/file/{fid}/restore")
 def restore_file(fid: int, user: User = Depends(get_current_user)) -> JSONResponse:
     file: File | None = File.get(fid=fid, trashed_only=True)
 
@@ -246,11 +247,10 @@ def restore_directory(did: int, user: User = Depends(get_current_user)) -> JSONR
         raise HTTPException(status_code=404, detail="Directory not found")
 
     directory.restore()
-
     return JSONResponse({"message": "Restored"})
 
 
-@auth.post("/files/{fid}/public-link")
+@auth.post("/file/{fid}/public-link")
 def create_public_link(fid: int, user: User = Depends(get_current_user)) -> dict[str, str]:
     file: File | None = File.get(fid=fid)
 
@@ -260,7 +260,7 @@ def create_public_link(fid: int, user: User = Depends(get_current_user)) -> dict
     if file.username != user.username:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    return {"url": f"/auth/stream/{create_public_stream_token(file=file, username=file.username)}"}
+    return {"public_token": create_public_stream_token(file=file, username=file.username)}
 
 
 @public.get("/stream/{token}")

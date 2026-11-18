@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useMemo, useState} from "react";
 import {useNavigate} from "react-router-dom";
+import {createPortal} from "react-dom";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 
@@ -39,6 +40,14 @@ function formatDate(dateStr) {
     return date.toLocaleDateString("en-US", {
         month: "short", day: "numeric", year: "numeric",
     });
+}
+
+function getFileKind(filename) {
+    const ext = filename?.split(".").pop()?.toLowerCase();
+    if (["mp4", "mkv", "webm", "mov"].includes(ext)) return "video";
+    if (["mp3", "wav", "ogg"].includes(ext)) return "audio";
+    if (ext === "pdf") return "pdf";
+    return null;
 }
 
 function formatFileSize(bytes) {
@@ -311,9 +320,54 @@ function CreateFolderModal({targetPath, onClose, onCreate}) {
     </div>);
 }
 
+function FileActionsMenu({file, position, onCopy, onCut, onPreview, onDelete, onClose}) {
+    useEffect(() => {
+        window.addEventListener("click", onClose);
+        window.addEventListener("scroll", onClose, true);
+        return () => {
+            window.removeEventListener("click", onClose);
+            window.removeEventListener("scroll", onClose, true);
+        };
+    }, [onClose]);
+
+    return createPortal(<div
+        className="fixed z-[200] w-40 overflow-hidden rounded-xl border border-outline-variant/20 bg-surface shadow-xl"
+        style={{top: position.top, left: position.left}}
+        onClick={(e) => e.stopPropagation()}
+    >
+        <button type="button" onClick={() => {
+            onCopy(file);
+            onClose();
+        }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-on-surface hover:bg-surface-container-high">
+            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">content_copy</span>Copy
+        </button>
+        <button type="button" onClick={() => {
+            onCut(file);
+            onClose();
+        }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-on-surface hover:bg-surface-container-high">
+            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">content_cut</span>Cut
+        </button>
+        <button type="button" onClick={() => {
+            onPreview(file);
+            onClose();
+        }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-on-surface hover:bg-surface-container-high">
+            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">visibility</span>Preview
+        </button>
+        <button type="button" onClick={() => {
+            onDelete(file);
+            onClose();
+        }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-error hover:bg-error/10">
+            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">delete</span>Delete
+        </button>
+    </div>, document.body);
+}
+
 /* -------------------------------------------------------------------- */
 /* Dashboard Page                                                      */
-
 /* -------------------------------------------------------------------- */
 
 export default function DashboardPage() {
@@ -330,9 +384,11 @@ export default function DashboardPage() {
     const [showFolderModal, setShowFolderModal] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
     const [streamData, setStreamData] = useState(null);
+    const [openMenuFileId, setOpenMenuFileId] = useState(null);
+    const [clipboard, setClipboard] = useState(null);
+    const [menuPosition, setMenuPosition] = useState(null);
 
     /* ---------------------------- fetch files --------------------------- */
-
 
     const fetchFiles = useCallback(async () => {
         const token = getToken();
@@ -394,6 +450,12 @@ export default function DashboardPage() {
     }, [navigate, currentFolder]);
 
 
+    const handleFileClick = (file) => {
+        const kind = getFileKind(file.name);
+        if (!kind) return;
+        navigate(`/view/${file.id}?kind=${kind}&name=${encodeURIComponent(file.name)}`);
+    };
+
     useEffect(() => {
         fetchFiles();
     }, [fetchFiles]);
@@ -417,13 +479,10 @@ export default function DashboardPage() {
         }
 
         try {
-            const linkRes = await fetch(`${API_URL}/auth/files/${file.id}/public-link`, {
+            const {public_token} = await (await fetch(`${API_URL}/auth/file/${file.id}/public-link`, {
                 method: "POST", headers: {Authorization: `Bearer ${token}`},
-            });
-            if (!linkRes.ok) throw new Error("Failed to initialize stream.");
-            const {url} = await linkRes.json();
-            const streamToken = url.split("/").filter(Boolean).pop();
-            setStreamData({file, url: `${API_URL}/public/stream/${streamToken}`});
+            })).json();
+            setStreamData({file, url: `${API_URL}/public/stream/${public_token}`});
         } catch (error) {
             console.error("Stream init error:", error);
             alert(error.message || "Could not stream file.");
@@ -440,18 +499,10 @@ export default function DashboardPage() {
         }
 
         try {
-            const linkRes = await fetch(`${API_URL}/auth/files/${fileId}/public-link`, {
+            const {public_token} = await (await fetch(`${API_URL}/auth/file/${fileId}/public-link`, {
                 method: "POST", headers: {Authorization: `Bearer ${token}`},
-            });
-
-            if (!linkRes.ok) {
-                const errorData = await linkRes.json().catch(() => ({}));
-                throw new Error(errorData.detail || "Failed to generate download link.");
-            }
-
-            const {url} = await linkRes.json();
-            const downloadToken = url.split("/").filter(Boolean).pop();
-            const downloadUrl = `${API_URL}/public/download/${downloadToken}`;
+            })).json();
+            const downloadUrl = `${API_URL}/public/download/${public_token}`;
 
             const anchor = document.createElement("a");
             anchor.href = downloadUrl;
@@ -481,7 +532,7 @@ export default function DashboardPage() {
         setDeletingId(fileId);
 
         try {
-            const endpoint = permanent ? `${API_URL}/auth/trash/${fileId}` : `${API_URL}/auth/files/${fileId}`;
+            const endpoint = permanent ? `${API_URL}/auth/trash/file/${fileId}` : `${API_URL}/auth/file/${fileId}`;
 
             const response = await fetch(endpoint, {
                 method: "DELETE", headers: {Authorization: `Bearer ${token}`},
@@ -514,7 +565,7 @@ export default function DashboardPage() {
         }
 
         try {
-            const response = await fetch(`${API_URL}/auth/trash/${itemId}/restore`, {
+            const response = await fetch(`${API_URL}/auth/trash/file/${itemId}/restore`, {
                 method: "POST", headers: {Authorization: `Bearer ${token}`},
             });
 
@@ -603,7 +654,7 @@ export default function DashboardPage() {
         setDeletingId(`folder-${folderId}`);
 
         try {
-            const endpoint = permanent ? `${API_URL}/auth/trash/directory/${folderId}` : `${API_URL}/auth/directories/${folderId}`;
+            const endpoint = permanent ? `${API_URL}/auth/trash/directory/${folderId}` : `${API_URL}/auth/directory/${folderId}`;
 
             const response = await fetch(endpoint, {
                 method: "DELETE", headers: {Authorization: `Bearer ${token}`},
@@ -961,86 +1012,92 @@ export default function DashboardPage() {
                                                                 {icon}
                                                             </span>
                                         <div className="min-w-0">
-                                            <p className="truncate text-sm text-on-surface transition-colors group-hover:text-primary">
+                                            {getFileKind(file.name) ? (<button
+                                                type="button"
+                                                onClick={() => handleFileClick(file)}
+                                                className="truncate text-left text-sm text-on-surface transition-colors group-hover:text-primary hover:underline"
+                                            >
                                                 {file.name}
-                                            </p>
+                                            </button>) : (<p className="truncate text-sm text-on-surface transition-colors group-hover:text-primary">
+                                                {file.name}
+                                            </p>)}
                                             <p className="mt-0.5 text-xs text-on-surface-variant sm:hidden">
                                                 {formatFileSize(file.size)} • {formatDate(file.modified_at)}
                                             </p>
                                         </div>
-                                    </div>
 
-                                    {/* Desktop File Size */}
-                                    <div className="col-span-2 hidden font-mono text-xs text-on-surface-variant sm:block">
-                                        {formatFileSize(file.size)}
-                                    </div>
+                                        {/* Desktop File Size */}
+                                        <div className="col-span-2 hidden font-mono text-xs text-on-surface-variant sm:block">
+                                            {formatFileSize(file.size)}
+                                        </div>
 
-                                    {/* Location */}
-                                    <div className="col-span-2 hidden truncate text-sm text-on-surface-variant sm:block">
-                                        {file.directory || "Root"}
-                                    </div>
+                                        {/* Location */}
+                                        <div className="col-span-2 hidden truncate text-sm text-on-surface-variant sm:block">
+                                            {file.directory || "Root"}
+                                        </div>
 
-                                    {/* Data Center */}
-                                    <div className="col-span-4 sm:col-span-2">
+                                        {/* Data Center */}
+                                        <div className="col-span-4 sm:col-span-2">
                                                             <span
                                                                 className="inline-block max-w-full truncate rounded-full bg-primary/10 px-2 py-0.5 font-geist text-xs text-primary">
                                                                 {file.data_center || "—"}
                                                             </span>
-                                    </div>
+                                        </div>
 
-                                    {/* Actions */}
-                                    <div
-                                        className="col-span-3 flex justify-end gap-1 opacity-100 transition-opacity sm:col-span-2 sm:opacity-0 sm:group-hover:opacity-100">
-                                        {isTrash ? (<>
-                                            <button
-                                                type="button"
-                                                onClick={() => restoreItem(file.id)}
-                                                title="Restore File"
-                                                className="rounded-lg p-1.5 text-on-surface-variant hover:bg-primary/10 hover:text-primary"
-                                            >
-                                                <span className="material-symbols-outlined text-[18px]">restore</span>
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => deleteFile(file.id, file.name, true)}
-                                                title="Delete Permanently"
-                                                className="rounded-lg p-1.5 text-on-surface-variant hover:bg-error/10 hover:text-error"
-                                            >
-                                                <span className="material-symbols-outlined text-[18px]">delete_forever</span>
-                                            </button>
-                                        </>) : (<>
-                                            <button
-                                                type="button"
-                                                onClick={() => startStreaming(file)}
-                                                title="Stream / View file"
-                                                className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-primary/10 hover:text-primary"
-                                            >
+                                        {/* Actions */}
+                                        <div
+                                            className="col-span-3 flex justify-end gap-1 opacity-100 transition-opacity sm:col-span-2 sm:opacity-0 sm:group-hover:opacity-100">
+                                            {isTrash ? (<>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => restoreItem(file.id)}
+                                                    title="Restore File"
+                                                    className="rounded-lg p-1.5 text-on-surface-variant hover:bg-primary/10 hover:text-primary"
+                                                >
+                                                    <span className="material-symbols-outlined text-[18px]">restore</span>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => deleteFile(file.id, file.name, true)}
+                                                    title="Delete Permanently"
+                                                    className="rounded-lg p-1.5 text-on-surface-variant hover:bg-error/10 hover:text-error"
+                                                >
+                                                    <span className="material-symbols-outlined text-[18px]">delete_forever</span>
+                                                </button>
+                                            </>) : (<>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => startStreaming(file)}
+                                                    title="Stream / View file"
+                                                    className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-primary/10 hover:text-primary"
+                                                >
                                                                         <span className="material-symbols-outlined text-[18px]">
                                                                             play_circle
                                                                         </span>
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => downloadFile(file.id)}
-                                                title="Download"
-                                                className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-primary/10 hover:text-primary"
-                                            >
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => downloadFile(file.id)}
+                                                    title="Download"
+                                                    className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-primary/10 hover:text-primary"
+                                                >
                                                                         <span className="material-symbols-outlined text-[18px]">
                                                                             download
                                                                         </span>
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => deleteFile(file.id, file.name, false)}
-                                                disabled={isDeleting}
-                                                title="Move to Trash"
-                                                className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-error/10 hover:text-error disabled:opacity-50"
-                                            >
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => deleteFile(file.id, file.name, false)}
+                                                    disabled={isDeleting}
+                                                    title="Move to Trash"
+                                                    className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-error/10 hover:text-error disabled:opacity-50"
+                                                >
                                                                         <span className="material-symbols-outlined text-[18px]">
                                                                             {isDeleting ? "progress_activity" : "delete"}
                                                                         </span>
-                                            </button>
-                                        </>)}
+                                                </button>
+                                            </>)}
+                                        </div>
                                     </div>
                                 </div>);
                             })}

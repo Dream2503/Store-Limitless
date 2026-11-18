@@ -3,11 +3,12 @@ from traceback import format_exc
 from typing import cast
 
 import discord
+from aiohttp import ClientSession
 from discord import Intents, Message, TextChannel
 from discord.ext.commands import Bot
 
-from core.utils import getenv
 from core.data_center import ConfigMeta, DataCenter
+from core.utils import getenv
 from core.utils import write_log, Progress, ProgressStream
 
 
@@ -37,7 +38,12 @@ class Discord(DataCenter, metaclass=ConfigMeta):
         if not message.attachments:
             raise OSError(f"No attachment found in Discord message {flink}")
 
-        return await wrap_future(run_coroutine_threadsafe(message.attachments[0].read(), Discord.LOOP))
+        async with ClientSession() as session:
+            async with session.get(message.attachments[0].url) as response:
+                if response.status != 200:
+                    raise OSError(f"Discord CDN returned status {response.status}")
+
+                return await response.read()
 
     @staticmethod
     @app.event

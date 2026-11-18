@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from sqlite3 import Row
 from typing import cast
 
@@ -8,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.database.connection import CONNECTION
 from core.data_center import Database
 from core.utils import write_log
+from .directory import Directory
 
 
 class User(BaseModel):
@@ -48,6 +50,10 @@ class User(BaseModel):
             CONNECTION.rollback()
             write_log("ERROR", Database, "SET USER", self.username, f"Failed to insert user: {e}")
             raise
+
+    @property
+    def home(self) -> Directory:
+        return cast(Directory, Directory.get(path=Path("/home"), username=self.username))
 
     @classmethod
     def get(cls, username: str) -> "User | None":

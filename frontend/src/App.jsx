@@ -4,6 +4,7 @@ import Landing from "./pages/Landing.jsx";
 import DashboardPage from "./pages/Dashboard.jsx";
 import UploadPage from "./pages/dashboard/components/UploadModal.jsx";
 import ViewFile from "./pages/dashboard/components/ViewFile.jsx";
+import UploadTrayPage from "./pages/dashboard/components/UploadTrayPage.jsx";
 
 /**
  * Convert a stored folder path into the dashboard route format.
@@ -37,6 +38,7 @@ function App() {
             <Route path="/signup" element={<Auth initialMode="signup"/>}/>
             <Route path="/home" element={<DashboardPage/>}/>
             <Route path="/home/*" element={<DashboardPage/>}/>
+            <Route path="/upload-tray" element={<UploadTrayPage/>}/>
             <Route path="/dashboard" element={<LegacyDashboardRedirect/>}/>
             <Route path="/upload" element={<UploadPage/>}/>
             <Route path="/view/:fileId" element={<ViewFile/>}/>

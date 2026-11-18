@@ -5,6 +5,7 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from hashlib import sha256
 from hmac import compare_digest
 from json import JSONDecodeError, dumps, loads
+from time import time
 
 from passlib.context import CryptContext
 
@@ -24,6 +25,49 @@ def verify_password(password: str, hashed_password: str) -> bool:
     """Check a plaintext password against its stored hash."""
 
     return pwd_context.verify(password, hashed_password)
+
+
+def create_public_zip_token(file_ids: list[int], username: str, *, expires_in: int = 900) -> str:
+    """Create a short-lived signed token for downloading an authenticated user's ZIP archive."""
+
+    payload = {
+        "file_ids": list(dict.fromkeys(int(file_id) for file_id in file_ids)),
+        "username": username,
+        "exp": int(time()) + max(60, int(expires_in)),
+        "type": "zip",
+    }
+    encoded_payload = urlsafe_b64encode(dumps(payload, separators=(",", ":"), sort_keys=True).encode()).rstrip(b"=")
+    signature = urlsafe_b64encode(hmac.new(SECRET_KEY.encode(), encoded_payload, sha256).digest()).rstrip(b"=")
+    return f"{encoded_payload.decode()}.{signature.decode()}"
+
+
+def verify_public_zip_token(token: str) -> dict[str, object]:
+    """Verify a short-lived ZIP token and validate the user and file ID list."""
+
+    try:
+        encoded_payload, encoded_signature = token.split(".", 1)
+        expected_signature = hmac.new(SECRET_KEY.encode(), encoded_payload.encode(), sha256).digest()
+        signature = urlsafe_b64decode(encoded_signature + "=" * (-len(encoded_signature) % 4))
+        if not compare_digest(signature, expected_signature):
+            raise ValueError("Invalid ZIP token signature")
+
+        data = loads(urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4)))
+        file_ids = data.get("file_ids")
+        username = data.get("username")
+        expires_at = data.get("exp")
+        if data.get("type") != "zip" or not isinstance(username, str) or not username:
+            raise ValueError("Invalid ZIP token payload")
+        if not isinstance(file_ids, list) or len(file_ids) < 2 or len(file_ids) > 500:
+            raise ValueError("Invalid ZIP file list")
+        if any(not isinstance(file_id, int) or isinstance(file_id, bool) or file_id <= 0 for file_id in file_ids):
+            raise ValueError("Invalid ZIP file ID")
+        if len(set(file_ids)) != len(file_ids):
+            raise ValueError("Duplicate ZIP file ID")
+        if not isinstance(expires_at, int) or expires_at < int(time()):
+            raise ValueError("ZIP download token has expired")
+        return {"file_ids": file_ids, "username": username, "exp": expires_at}
+    except (ValueError, KeyError, TypeError, JSONDecodeError) as error:
+        raise ValueError("Invalid or expired ZIP download token") from error
 
 
 def create_public_stream_token(file: File, username: str) -> str:

@@ -22,18 +22,21 @@ export function formatDate(dateStr) {
 /** Return the supported preview category for a filename. */
 export function getFileKind(filename) {
     const ext = filename?.split(".").pop()?.toLowerCase();
-    if (["mp4", "mkv", "webm", "mov"].includes(ext)) return "video";
-    if (["mp3", "wav", "ogg"].includes(ext)) return "audio";
+    if (["mp4", "mkv", "webm", "mov", "m4v"].includes(ext)) return "video";
+    if (["mp3", "wav", "ogg", "m4a", "flac"].includes(ext)) return "audio";
     if (ext === "pdf") return "pdf";
+    if (["md", "markdown", "mdown", "mkd"].includes(ext)) return "markdown";
+    if (["txt", "text", "log", "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "env", "html", "htm", "css", "scss", "sass", "js", "jsx", "mjs", "cjs", "ts", "tsx", "py", "pyw", "ipynb", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx", "rs", "go", "java", "kt", "kts", "swift", "rb", "php", "sh", "bash", "zsh", "fish", "sql", "r", "lua", "pl", "pm", "ex", "exs", "erl", "hrl", "hs", "lhs", "scala", "sc", "dart", "vue", "svelte", "graphql", "gql", "proto", "make", "cmake", "dockerfile", "gitignore", "editorconfig", "diff", "patch", "properties", "gradle",].includes(ext)) return "text";
     return null;
 }
 
-/** Format a byte count using binary units. */
+/** Format byte counts using decimal units to match Linux Files (base 1000). */
 export function formatFileSize(bytes) {
-    if (!bytes || bytes <= 0) return "0 B";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-    return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+    const index = Math.min(Math.floor(Math.log(value) / Math.log(1000)), units.length - 1);
+    return `${(value / (1000 ** index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
 /** Read the current bearer token from browser storage. */

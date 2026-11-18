@@ -1,7 +1,7 @@
 import {NAV_ITEMS} from "../constants.js";
 import {formatFileSize} from "../utils.js";
 
-export default function Sidebar({activeTab, onTabSelect, onLogout, storageUsed}) {
+export default function Sidebar({activeTab, onTabSelect, onLogout, onUploadClick, storageUsed}) {
     return (<nav className="flex h-screen w-60 flex-col border-r border-[#2e2e2e] bg-[#171717]">
         {/* Brand */}
         <div className="flex h-14 items-center gap-2.5 border-b border-[#2e2e2e] px-4">
@@ -21,6 +21,14 @@ export default function Sidebar({activeTab, onTabSelect, onLogout, storageUsed})
         </div>
 
         <div className="flex flex-1 flex-col gap-4 p-3">
+            <button
+                type="button"
+                onClick={onUploadClick}
+                className="flex h-9 items-center justify-center gap-2 rounded-lg border border-[#2e8058]/70 bg-[#17643d] px-3 text-sm font-medium text-white shadow-sm shadow-black/10 transition-colors hover:border-[#3ecf8e] hover:bg-[#1d794a] focus:outline-none focus:ring-2 focus:ring-[#3ecf8e]/35"
+            >
+                <span className="material-symbols-outlined text-[18px]" aria-hidden="true">cloud_upload</span>
+                Upload files
+            </button>
             <div className="flex flex-1 flex-col gap-0.5">
                 {NAV_ITEMS.map(({id, icon, label, enabled}) => {
                     const isActive = activeTab === id;

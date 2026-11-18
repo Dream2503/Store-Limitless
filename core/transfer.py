@@ -5,12 +5,13 @@ from __future__ import annotations
 from asyncio import Task
 from pathlib import Path
 from traceback import format_exc
-from typing import AsyncGenerator, Callable
-from urllib.parse import ParseResult, urlparse
+from typing import AsyncGenerator
+from urllib.parse import ParseResult, parse_qs, urlparse
 
 from backend.database.models import File, User
 from core.data_center import DataCenter
-from core.utils import write_log
+from core.utils import sanitize_sensitive_urls, write_log
+from core.utils.download_ import download_processed_link, download_unprocessed_link
 from core.utils.progress import Progress, upload_growing_file
 
 
@@ -49,10 +50,10 @@ async def file_upload(
         raise
 
 
-async def link_upload(file: File, link: str) -> AsyncGenerator[Progress, None]:
-    """Download a YouTube or direct HTTP(S) link and upload it to the configured provider."""
+async def link_upload(file: File, link: str, selected_torrent_files: set[int] | None = None) -> AsyncGenerator[Progress, None]:
+    """Import a direct URL, YouTube link, or selected torrent files into the provider."""
 
-    from core.utils.download_ import download_processed_link, download_unprocessed_link
+    from core.utils.download_utils import download_torrent
 
     user: User | None = await User.get(file.username)
 
@@ -65,21 +66,39 @@ async def link_upload(file: File, link: str) -> AsyncGenerator[Progress, None]:
         raise ValueError(f"Unsupported data center: {file.data_center}")
 
     progress: Progress = Progress("link", "Uploading File", 0)
-    write_log("INFO", data_center, "DOWNLOAD", user.username, f"Got link: {link}")
+    safe_link: str = sanitize_sensitive_urls(link)
+    parsed: ParseResult = urlparse(link)
+    source_host: str = parsed.hostname or "unknown host"
+    write_log("INFO", data_center, "DOWNLOAD", user.username, f"Got link from host: {source_host} ({safe_link})")
 
     try:
-        write_log("INFO", data_center, "DOWNLOAD", user.username, f"Starting download from `{link}`")
+        write_log("INFO", data_center, "DOWNLOAD", user.username, f"Starting download from `{safe_link}`")
         parsed: ParseResult = urlparse(link)
         host: str = (parsed.hostname or "").lower().removeprefix("www.")
+        is_torrent: bool = parsed.scheme.lower() == "magnet"
 
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError(f"Expected an HTTP(S) download URL: {link}")
+        if is_torrent:
+            exact_topics: list[str | bytes] = parse_qs(parsed.query).get("xt", [])
+            has_info_hash: bool = any(topic.lower().startswith(("urn:btih:", "urn:btmh:")) for topic in exact_topics)
 
-        if host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com"):
-            downloader: Callable[[File, str], AsyncGenerator[Progress, None]] = download_processed_link
+            if not link.lower().startswith("magnet:?") or not has_info_hash:
+                raise ValueError("Expected a valid torrent magnet URI with an xt info-hash topic")
+
+            async for progress_value in download_torrent(file, link, selected_torrent_files):
+                yield progress_value
+
+            write_log("INFO", data_center, "DOWNLOAD", user.username, f"Torrent download and upload complete ({sanitize_sensitive_urls(link)})")
+            return
 
         else:
-            downloader = download_unprocessed_link
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("Expected a valid HTTP(S) download URL or magnet URI")
+
+            if host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com"):
+                downloader = download_processed_link
+
+            else:
+                downloader = download_unprocessed_link
 
         async for progress_value in downloader(file, link):
             yield progress_value
@@ -90,5 +109,6 @@ async def link_upload(file: File, link: str) -> AsyncGenerator[Progress, None]:
         yield progress
 
     except Exception as error:
-        write_log("ERROR", data_center, "DOWNLOAD", user.username, f"Unhandled exception: {error}\n{format_exc()}")
+        details: str = sanitize_sensitive_urls(f"{error}\n{format_exc()}")
+        write_log("ERROR", data_center, "DOWNLOAD", user.username, f"Link upload failed: {details}")
         raise

@@ -8,13 +8,39 @@ from typing import cast
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from backend.database.models import Directory, File, User
 from backend.server.jwt_handler import get_current_user
-from backend.server.security import create_public_stream_token
+from backend.server.security import create_public_stream_token, create_public_zip_token
 from backend.server.utils import perform_validation
 
 router: APIRouter = APIRouter()
+
+
+class ZipDownloadRequest(BaseModel):
+    """List of active file IDs to combine in a streamed ZIP archive."""
+
+    file_ids: list[int] = Field(min_length=2, max_length=500)
+
+
+@router.post("/files/zip-link")
+async def create_zip_download_link(payload: ZipDownloadRequest, user: User = Depends(get_current_user)) -> dict[str, object]:
+    """Validate the selected files and create a short-lived streaming ZIP URL."""
+
+    file_ids = payload.file_ids
+    if any(file_id <= 0 for file_id in file_ids):
+        raise HTTPException(status_code=422, detail="File IDs must be positive integers")
+    if len(set(file_ids)) != len(file_ids):
+        raise HTTPException(status_code=422, detail="Duplicate file IDs are not allowed")
+
+    # Resolve ownership and active/trash state before minting a public download token.
+    for file_id in file_ids:
+        file = await File.get(user.username, fid=file_id)
+        if file is None or file.username != user.username:
+            raise HTTPException(status_code=404, detail=f"Active file {file_id} was not found")
+
+    return {"public_token": create_public_zip_token(file_ids, user.username), "expires_in": 900}
 
 
 @router.post("/create-folder")
@@ -78,6 +104,43 @@ async def get_trash(user: User = Depends(get_current_user)) -> tuple[list[Direct
 
     await File.purge_expired(user.username)
     return await Directory.get_all(user.username, trash=True), await File.get_all(user.username, trash=True)
+
+
+@router.get("/tree")
+async def get_file_tree(user: User = Depends(get_current_user)) -> JSONResponse:
+    """Return the authenticated user's complete file tree and storage total in one request."""
+
+    await File.purge_expired(user.username)
+
+    active_directories: list[Directory] = await Directory.get_all(user.username)
+    trashed_directories: list[Directory] = await Directory.get_all(user.username, trash=True)
+    active_files: list[File] = await File.get_all(user.username)
+    trashed_files: list[File] = await File.get_all(user.username, trash=True)
+
+    all_directories: list[Directory] = [*active_directories, *trashed_directories]
+    all_files: list[File] = [*active_files, *trashed_files]
+    directory_path_by_id: dict[int, str] = {directory.id: str(directory.path) for directory in all_directories if directory.id is not None}
+    directory_records: list[dict[str, object]] = []
+
+    for directory in all_directories:
+        record: dict[str, object] = directory.model_dump(mode="json")
+        record["is_deleted"] = directory.deleted_at is not None
+        directory_records.append(record)
+
+    file_records: list[dict[str, object]] = []
+
+    for file in all_files:
+        record = file.model_dump(mode="json", exclude={"links"})
+        record["directory"] = directory_path_by_id.get(file.directory_id, "")
+        record["is_deleted"] = file.deleted_at is not None
+        file_records.append(record)
+
+    storage_used_bytes: int = sum(max(0, int(file.size or 0)) for file in all_files)
+    return JSONResponse({
+        "directories": directory_records,
+        "files": file_records,
+        "storage_used_bytes": storage_used_bytes,
+    })
 
 
 def _clean_name(name: str, entity: str) -> str:
@@ -411,6 +474,30 @@ async def permanently_delete(fid: int, user: User = Depends(get_current_user)) -
     return JSONResponse({"message": "Permanently deleted"})
 
 
+async def _permanently_delete_directory_tree(user: User, directory: Directory) -> None:
+    """Permanently delete all files and subdirectories regardless of their individual trash state."""
+
+    if directory.id is None:
+        raise ValueError("Directory has no ID")
+
+    files: list[File] = [
+        *await File.get_all(user.username, directory_id=directory.id),
+        *await File.get_all(user.username, directory_id=directory.id, trash=True),
+    ]
+
+    for file in files:
+        await file.delete()
+
+    active_children: list[Directory] = await Directory.get_all(user.username, directory=directory.path)
+    trashed_children: list[Directory] = await Directory.get_all(user.username, directory=directory.path, trash=True)
+    children_by_id: dict[int, Directory] = {child.id: child for child in (*active_children, *trashed_children) if child.id is not None}
+
+    for child in children_by_id.values():
+        await _permanently_delete_directory_tree(user, child)
+
+    await directory.delete()
+
+
 @router.delete("/trash/directory/{did}")
 async def permanently_delete_directory(did: int, user: User = Depends(get_current_user)) -> JSONResponse:
     """Delete a trashed directory and recursively delete its contents."""
@@ -420,13 +507,7 @@ async def permanently_delete_directory(did: int, user: User = Depends(get_curren
     if directory is None or directory.username != user.username:
         raise HTTPException(status_code=404, detail="Directory not found")
 
-    for file in await File.get_all(user.username, directory_id=directory.id, trash=True):
-        await file.delete()
-
-    for child in await Directory.get_all(user.username, directory=directory.path, trash=True):
-        await permanently_delete_directory(cast(int, child.id), user)
-
-    await directory.delete()
+    await _permanently_delete_directory_tree(user, directory)
     return JSONResponse({"message": "Permanently deleted"})
 
 

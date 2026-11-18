@@ -1,7 +1,7 @@
 import {useEffect} from "react";
 import {createPortal} from "react-dom";
 
-export default function DashboardContextMenu({menu, onClose, onAction, multipleSelected = false}) {
+export default function DashboardContextMenu({menu, onClose, onAction, multipleSelected = false, multipleFilesSelected = false}) {
     useEffect(() => {
         const closeOnOutsideClick = () => onClose();
         const closeOnScroll = () => onClose();
@@ -29,7 +29,9 @@ export default function DashboardContextMenu({menu, onClose, onAction, multipleS
     } else {
         items = [{id: "move", label: "Move to folder", icon: "drive_file_move"}, ...(!multipleSelected ? [{
             id: "rename", label: "Rename", icon: "drive_file_rename_outline"
-        }, {id: "details", label: "Details", icon: "info"}, {id: "download", label: "Download", icon: "download"},] : []), {
+        }, {id: "details", label: "Details", icon: "info"}, {
+            id: "download", label: "Download", icon: "download"
+        }] : []), ...(multipleFilesSelected ? [{id: "download-zip", label: "Download as ZIP", icon: "folder_zip"}] : []), {
             id: "delete", label: "Move to Trash", icon: "delete", danger: true
         },];
     }

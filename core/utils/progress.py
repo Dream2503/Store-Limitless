@@ -24,6 +24,7 @@ class Progress:
         self.message: str = message
         self.transfer: int = 0
         self.total: int = total
+        self.torrent_items: list[dict[str, Any]] = []
 
     @property
     def value(self) -> tuple[str, str, int, int]:
@@ -58,28 +59,28 @@ async def upload_growing_file(
         total_size: int = 0,
         start_part: int = 1,
 ) -> AsyncGenerator[Progress, None]:
-    """Upload full chunks as they appear, then upload the final partial chunk.
+    """Upload completed chunks as a file grows, bounded by the selected provider's own parallelism."""
 
-    A maximum of eight provider uploads are active at once. ``producer`` may be used by downloaders that are still writing to ``path``; when it
-    completes, this function waits for it before uploading the remaining bytes.
-    """
+    chunk_size: int = int(data_center.MAX_SIZE)
+
+    if chunk_size <= 0:
+        raise ValueError(f"{data_center.__name__}.MAX_SIZE must be greater than zero")
 
     upload_tasks: set[Task[tuple[int, str]]] = set()
     results: dict[int, str] = {}
     part: int = start_part
-    max_tasks: int = 2
 
     async def upload_part(index: int, size: int) -> tuple[int, str]:
-        """Read one part off the event loop and retry provider I/O errors."""
+        """Read exactly one chunk off the event loop and retry temporary provider I/O errors."""
 
         while True:
             try:
-                offset: int = (index - start_part) * data_center.MAX_SIZE
+                offset: int = (index - start_part) * chunk_size
                 chunk: bytes = await to_thread(read_chunk, path, offset, size)
                 message_id: str = await data_center.upload(chunk, f"{file.name}.part{index:03d}", progress)
 
                 if total_size:
-                    total_parts: int = (total_size + data_center.MAX_SIZE - 1) // data_center.MAX_SIZE
+                    total_parts: int = (total_size + chunk_size - 1) // chunk_size
                     write_log("INFO", data_center, "UPLOAD", file.username, f"Uploaded part {index}/{total_parts}")
 
                 else:
@@ -92,10 +93,9 @@ async def upload_growing_file(
                 await sleep(2)
 
     async def collect_done() -> None:
-        """Move completed upload-task results into the ordered message map."""
+        """Record completed uploads without changing the order of the final chunk links."""
 
         nonlocal upload_tasks
-
         if not upload_tasks:
             return
 
@@ -105,6 +105,11 @@ async def upload_growing_file(
         for task in done:
             index, message_id = task.result()
             results[index] = message_id
+
+    def update_progress(current_size: int) -> None:
+        """Keep the shared progress record aligned with known or discovered file size."""
+
+        progress.total = total_size or current_size
 
     try:
         while producer is not None and not producer.done():
@@ -116,12 +121,12 @@ async def upload_growing_file(
 
             size: int = path.stat().st_size
 
-            while size >= (part - start_part + 1) * data_center.MAX_SIZE and len(upload_tasks) < max_tasks:
-                upload_tasks.add(create_task(upload_part(part, data_center.MAX_SIZE)))
+            while size >= (part - start_part + 1) * chunk_size and len(upload_tasks) < max(1, int(data_center.MAX_PARALLEL_UPLOADS)):
+                upload_tasks.add(create_task(upload_part(part, chunk_size)))
                 part += 1
 
             await collect_done()
-            progress.total = total_size or size
+            update_progress(size)
             yield progress
             await sleep(0.1)
 
@@ -141,26 +146,23 @@ async def upload_growing_file(
             size = path.stat().st_size
 
         total_size = size
-        offset: int = (part - start_part) * data_center.MAX_SIZE
+        offset: int = (part - start_part) * chunk_size
 
-        while size >= offset + data_center.MAX_SIZE:
-            while len(upload_tasks) >= max_tasks:
+        while size >= offset + chunk_size:
+            while len(upload_tasks) >= max(1, int(data_center.MAX_PARALLEL_UPLOADS)):
                 await collect_done()
-                progress.total = total_size or size
+                update_progress(size)
                 yield progress
                 await sleep(0.1)
 
-            upload_tasks.add(create_task(upload_part(part, data_center.MAX_SIZE)))
+            upload_tasks.add(create_task(upload_part(part, chunk_size)))
             part += 1
-            offset += data_center.MAX_SIZE
-            progress.total = total_size or size
-            yield progress
-            await sleep(0.1)
+            offset += chunk_size
 
         if size > offset:
-            while len(upload_tasks) >= max_tasks:
+            while len(upload_tasks) >= max(1, int(data_center.MAX_PARALLEL_UPLOADS)):
                 await collect_done()
-                progress.total = total_size or size
+                update_progress(size)
                 yield progress
                 await sleep(0.1)
 
@@ -169,11 +171,11 @@ async def upload_growing_file(
 
         while upload_tasks:
             await collect_done()
-            progress.total = total_size or size
+            update_progress(size)
             yield progress
             await sleep(0.1)
 
-        progress.total = total_size or size
+        update_progress(size)
         yield progress
         file.size = size
         file.links = [results[index] for index in sorted(results)]

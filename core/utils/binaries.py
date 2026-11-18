@@ -286,7 +286,7 @@ def start_cloudflare_tunnel(service_url: str, label: str) -> tuple[Popen[str], s
 
     output: Queue[str] = Queue(maxsize=1)
     process: Popen[str] = Popen(
-        [cloudflared, "tunnel", "--protocol", "http2", "--no-autoupdate", "--url", service_url],
+        [cloudflared, "tunnel", "--no-autoupdate", "--url", service_url],
         stdout=PIPE,
         stderr=STDOUT,
         text=True,

@@ -90,6 +90,14 @@ class Redis:
 
                 progress: Progress = Progress(data["name"], data["message"], int(data["total"]))
                 progress.transfer = int(data["transfer"])
+                raw_torrent_items: str = data.get("torrent_items", "[]")
+
+                try:
+                    torrent_items: Any = loads(raw_torrent_items)
+                    progress.torrent_items = torrent_items if isinstance(torrent_items, list) else []
+
+                except (TypeError, ValueError):
+                    progress.torrent_items = []
                 return progress
 
             case "Directory" | "File":
@@ -186,7 +194,13 @@ class Redis:
         from backend.database.models import User, Directory, File
 
         if isinstance(value, Progress):
-            await cls.redis.hset(key, mapping={"name": value.name, "message": value.message, "transfer": value.transfer, "total": value.total})
+            await cls.redis.hset(key, mapping={
+                "name": value.name,
+                "message": value.message,
+                "transfer": value.transfer,
+                "total": value.total,
+                "torrent_items": dumps(getattr(value, "torrent_items", [])),
+            })
 
         elif isinstance(value, User):
             with POOL.connection() as connection:

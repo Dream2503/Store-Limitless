@@ -32,23 +32,17 @@ export default function ItemDetailsModal({item, onClose}) {
     const created = formatTimestamp(object.created_at ?? object.createdAt);
 
     const rows = [{label: "Type", value: type}, ...(isFolder ? [{
-        label: "Total size",
-        value: formatFileSize(Number(object.total_size_bytes ?? 0))
+        label: "Total size", value: formatFileSize(Number(object.total_size_bytes ?? 0))
     }] : Number.isFinite(Number(size)) && size !== undefined && size !== null ? [{
-        label: "Size",
-        value: formatFileSize(Number(size))
+        label: "Size", value: formatFileSize(Number(size))
     }] : []), {label: "Location", value: displayPath(locationPath)}, ...(isFolder && fullFolderPath ? [{
-        label: "Folder path",
-        value: displayPath(fullFolderPath)
+        label: "Folder path", value: displayPath(fullFolderPath)
     }] : []), ...(!isFolder && detailValue(object.data_center) ? [{
-        label: "Data center",
-        value: detailValue(object.data_center)
+        label: "Data center", value: detailValue(object.data_center)
     }] : []), ...(created ? [{label: "Created", value: created}] : []), ...(modified ? [{
-        label: "Last modified",
-        value: modified
+        label: "Last modified", value: modified
     }] : []), {
-        label: "Status",
-        value: item?.is_deleted || object.is_deleted ? "In Trash" : "Available"
+        label: "Status", value: item?.is_deleted || object.is_deleted ? "In Trash" : "Available"
     }, ...(detailValue(item?.id ?? object.id) ? [{label: "ID", value: detailValue(item?.id ?? object.id)}] : []),];
 
     useEffect(() => {

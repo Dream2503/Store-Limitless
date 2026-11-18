@@ -22,6 +22,7 @@ class DataCenter:
     TOKEN: str
     FILE_DUMP_ID: int
     MAX_SIZE: int = 10 * 1024 * 1024
+    MAX_PARALLEL_UPLOADS: int
     CACHE_DIR: Path = TRANSFER_PATH / "cached"
     CACHE_LIMIT: int = 256 * 1024 * 1024
 
@@ -64,7 +65,14 @@ class DataCenter:
 
         path: Path = part_path(DataCenter.CACHE_DIR, fid, part)
 
-        if not path.is_file() or path.stat().st_size <= 0:
+        try:
+            stat_result = await to_thread(path.stat)
+
+        except FileNotFoundError:
+            await DataCenter.touch_cache(str(path))
+            return None
+
+        if stat_result.st_size <= 0:
             await DataCenter.touch_cache(str(path))
             return None
 
@@ -76,7 +84,7 @@ class DataCenter:
             return None
 
         await update_cache_entry(str(path), len(data), DataCenter.CACHE_LIMIT)
-        return data if path.is_file() else None
+        return data
 
     @staticmethod
     async def has_cached_part(fid: str, part: int) -> bool:

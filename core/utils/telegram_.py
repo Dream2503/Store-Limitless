@@ -20,6 +20,7 @@ class Telegram(DataCenter, metaclass=ConfigMeta):
     """Store file chunks as Telegram documents in the configured dump chat."""
 
     NAME: str = "Telegram"
+    MAX_PARALLEL_UPLOADS: int = 8
     API_ID: int = TELEGRAM_API_ID
     API_HASH: str = TELEGRAM_API_HASH
     TOKEN: str = TELEGRAM_TOKEN

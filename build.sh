@@ -46,7 +46,7 @@ REQUIREMENTS="$ROOT/requirements.txt"
 CONFIG="$ROOT/core/config.py"
 FRONTEND="$ROOT/frontend"
 FRONTEND_DIST="$FRONTEND/dist"
-SDK_BIN_ROOT="$ROOT/api/src/storelimitless/bin"
+SDK_BIN_ROOT="$ROOT/Store-Limitless-api/src/storelimitless/bin"
 RELEASE_ROOT="$ROOT/releases"
 LINUX_RELEASE_DIR="$RELEASE_ROOT/linux"
 WINDOWS_RELEASE_DIR="$RELEASE_ROOT/windows"
@@ -81,13 +81,13 @@ PY
 # The source config must be restored even if any of the builds fail or are interrupted.
 CONFIG_BACKUP="$(mktemp "${TMPDIR:-/tmp}/storelimitless-config.XXXXXX")"
 cp "$CONFIG" "$CONFIG_BACKUP"
-restore_config() {
+restore_build_state() {
     if [[ -n "${CONFIG_BACKUP:-}" && -f "$CONFIG_BACKUP" ]]; then
         cp "$CONFIG_BACKUP" "$CONFIG" || echo "WARNING: Could not restore $CONFIG from backup." >&2
         rm -f -- "$CONFIG_BACKUP"
     fi
 }
-trap restore_config EXIT
+trap restore_build_state EXIT
 
 set_host() {
     local host="$1"
@@ -227,7 +227,13 @@ if [[ "$BUILD_LINUX" == "1" ]]; then
         rm -rf -- "$LINUX_WORKPATH" "$LINUX_DISTPATH"
         mkdir -p "$LINUX_DISTPATH"
 
-        "$LINUX_VENV/bin/python" -m PyInstaller \
+        if [[ "$host" == "LOCAL" ]]; then
+            INCLUDE_FRONTEND=1
+        else
+            INCLUDE_FRONTEND=0
+        fi
+
+        INCLUDE_FRONTEND="$INCLUDE_FRONTEND" "$LINUX_VENV/bin/python" -m PyInstaller \
             --clean \
             --noconfirm \
             --workpath "$LINUX_WORKPATH" \
@@ -356,7 +362,13 @@ if [[ "$BUILD_WINDOWS" == "1" ]]; then
         WINDOWS_WORKPATH="$(winepath -w "$WINDOWS_WORKPATH_UNIX")"
         WINDOWS_DISTPATH="$(winepath -w "$WINDOWS_DISTPATH_UNIX")"
 
-        "$WINE_BIN" "$WINDOWS_PYTHON" -m PyInstaller \
+        if [[ "$host" == "LOCAL" ]]; then
+            INCLUDE_FRONTEND=1
+        else
+            INCLUDE_FRONTEND=0
+        fi
+
+        INCLUDE_FRONTEND="$INCLUDE_FRONTEND" "$WINE_BIN" "$WINDOWS_PYTHON" -m PyInstaller \
             --clean \
             --noconfirm \
             --workpath "$WINDOWS_WORKPATH" \
@@ -405,15 +417,26 @@ echo
 echo "==> Removing temporary build artifacts"
 rm -rf -- "$ROOT/build" "$FRONTEND/node_modules" "$FRONTEND_DIST"
 
+# Next.js output and installed packages can be recreated from the lockfile.
+BACKEND_STORELIMITLESSBACKEND="$ROOT/backend/storelimitlessbackend"
+if [[ -d "$BACKEND_STORELIMITLESSBACKEND" ]]; then
+    echo "==> Removing regeneratable backend/storelimitlessbackend artifacts"
+    rm -rf -- \
+        "$BACKEND_STORELIMITLESSBACKEND/.next" \
+        "$BACKEND_STORELIMITLESSBACKEND/node_modules" \
+        "$BACKEND_STORELIMITLESSBACKEND/.turbo" \
+        "$BACKEND_STORELIMITLESSBACKEND/coverage"
+fi
+
 echo "==> Removing Python bytecode caches"
 find "$ROOT" \
-    -type d \( -name .git -o -name .venv -o -name venv -o -name node_modules \) -prune -o \
+    -type d \( -name .git -o -name .venv -o -name venv -o -name node_modules -o -name .next \) -prune -o \
     -type d -name '__pycache__' -prune -exec rm -rf -- {} +
 find "$ROOT" \
-    -type d \( -name .git -o -name .venv -o -name venv -o -name node_modules \) -prune -o \
+    -type d \( -name .git -o -name .venv -o -name venv -o -name node_modules -o -name .next \) -prune -o \
     -type f \( -name '*.pyc' -o -name '*.pyo' \) -exec rm -f -- {} +
 
-echo "==> Removed build/, frontend/node_modules, frontend/dist, and project bytecode caches"
+echo "==> Removed build/, frontend build/dependencies, backend Next.js build/dependencies, and project bytecode caches"
 echo "==> Release executables are in releases/linux/ and releases/windows/"
 echo "==> Kept the selected release variants and LOCAL SDK binary copies"
 echo "==> Build cleanup complete"

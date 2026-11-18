@@ -6,6 +6,7 @@ discord-py
 fastapi[all]
 filelock
 gdown
+libtorrent
 passlib[bcrypt]==1.7.4
 psycopg-pool
 psycopg[binary]

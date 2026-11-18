@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from asyncio import AbstractEventLoop, get_running_loop, run_coroutine_threadsafe, sleep, wrap_future
+from asyncio import AbstractEventLoop, TimeoutError as AsyncTimeoutError, get_running_loop, run_coroutine_threadsafe, sleep, wrap_future
 from traceback import format_exc
 
 import discord
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientSession, ClientTimeout
 from discord import Intents, Message, TextChannel
 from discord.ext.commands import Bot
 
@@ -20,6 +20,7 @@ class Discord(DataCenter, metaclass=ConfigMeta):
     """Send and retrieve storage chunks through a configured Discord text channel."""
 
     NAME: str = "Discord"
+    MAX_PARALLEL_UPLOADS: int = 2
     TOKEN: str = DISCORD_TOKEN
     FILE_DUMP_ID: int = DISCORD_FILE_DUMP_ID
     FILE_DUMP: TextChannel
@@ -33,11 +34,11 @@ class Discord(DataCenter, metaclass=ConfigMeta):
 
     @staticmethod
     async def upload(chunk: bytes, filename: str, progress: Progress) -> str:
-        """Upload one chunk as a Discord attachment and retry transient 503 errors."""
+        """Upload one chunk and retry transient Discord/API connection failures."""
 
-        attempt: int = 0
+        max_attempts: int = 5
 
-        while True:
+        for attempt in range(1, max_attempts + 1):
             try:
                 send_future = run_coroutine_threadsafe(
                     Discord.FILE_DUMP.send(file=discord.File(ProgressStream(chunk, progress), filename=filename)),
@@ -46,29 +47,80 @@ class Discord(DataCenter, metaclass=ConfigMeta):
                 message: Message = await wrap_future(send_future)
                 return str(message.id)
 
-            except discord.DiscordServerError as error:
-                if error.status != 503:
+            except (ClientPayloadError, ClientConnectionError, AsyncTimeoutError, TimeoutError) as error:
+                if attempt >= max_attempts:
                     raise
 
-                attempt += 1
-                await sleep(min(2 ** min(attempt - 1, 5), 30))
+                write_log(
+                    "WARNING",
+                    Discord,
+                    "UPLOAD",
+                    "",
+                    f"Transient Discord connection error uploading {filename} "
+                    f"(attempt {attempt}/{max_attempts}): {error}",
+                )
+
+            except discord.HTTPException as error:
+                if not 500 <= error.status < 600 or attempt >= max_attempts:
+                    raise
+
+                write_log(
+                    "WARNING",
+                    Discord,
+                    "UPLOAD",
+                    "",
+                    f"Transient Discord HTTP {error.status} uploading {filename} (attempt {attempt}/{max_attempts})",
+                )
+            await sleep(min(2 ** (attempt - 1), 8))
+
+        exit(0)  # do something i dont want the return type to be ``str | None`` i want ``str``
 
     @staticmethod
     async def download(flink: str) -> bytes:
-        """Retrieve a Discord attachment by its stored message ID."""
+        """Retrieve a Discord attachment, retrying incomplete CDN reads without a short total timeout."""
 
-        fetch_future = run_coroutine_threadsafe(Discord.FILE_DUMP.fetch_message(int(flink)), Discord.LOOP)
-        message: Message = await wrap_future(fetch_future)
+        while not Discord.ready:
+            await sleep(0.1)
 
-        if not message.attachments:
-            raise OSError(f"No attachment found in Discord message {flink}")
+        last_error: Exception | None = None
+        timeout: ClientTimeout = ClientTimeout(total=None, sock_connect=30, sock_read=120)
 
-        async with ClientSession(timeout=ClientTimeout(total=300)) as session:
-            async with session.get(message.attachments[0].url) as response:
-                if response.status != 200:
-                    raise OSError(f"Discord CDN returned status {response.status}")
+        for attempt in range(1, 6):
+            try:
+                fetch_future = run_coroutine_threadsafe(Discord.FILE_DUMP.fetch_message(int(flink)), Discord.LOOP)
+                message: Message = await wrap_future(fetch_future)
 
-                return await response.read()
+                if not message.attachments:
+                    raise OSError(f"No attachment found in Discord message {flink}")
+
+                async with ClientSession(timeout=timeout) as session:
+                    async with session.get(message.attachments[0].url) as response:
+                        if response.status != 200:
+                            raise OSError(f"Discord CDN returned status {response.status}")
+
+                        chunks: list[bytes] = []
+
+                        async for chunk in response.content.iter_chunked(1024 * 1024):
+                            if chunk:
+                                chunks.append(chunk)
+
+                        data: bytes = b"".join(chunks)
+
+                        if not data:
+                            raise OSError(f"Discord CDN returned an empty attachment for message {flink}")
+
+                        return data
+
+            except (ClientPayloadError, ClientConnectionError, AsyncTimeoutError, TimeoutError, OSError) as error:
+                last_error = error
+
+                if attempt == 5:
+                    break
+
+                write_log("WARNING", Discord, "STREAM", "", f"CDN read for message {flink} failed (attempt {attempt}/5): {error}")
+                await sleep(min(2 ** (attempt - 1), 8))
+
+        raise OSError(f"Could not retrieve Discord attachment {flink} after 5 attempts") from last_error
 
     @staticmethod
     @app.event

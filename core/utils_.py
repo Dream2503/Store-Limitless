@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from asyncio import Lock, to_thread
 from collections import OrderedDict
 from pathlib import Path
@@ -11,6 +12,11 @@ from subprocess import Popen, TimeoutExpired, run as subprocess_run
 from time import monotonic
 from typing import Any
 from typing import cast
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as URLRequest, urlopen
+
+from core.utils import write_log
+from core.utils.env import STORELIMITLESS_PROXY_TOKEN
 
 CACHE: OrderedDict[str, tuple[int, float]] = OrderedDict()
 CACHE_SIZE: int = 0
@@ -152,3 +158,62 @@ def ensure_frontend_dependencies(frontend_dir: Path) -> None:
         raise RuntimeError("Frontend dependency installation finished, but Vite was not found in node_modules.")
 
     print("Frontend dependencies are ready.")
+
+
+def register_vercel_backend_tunnel(api_url: str) -> None:
+    """Register the current Cloudflare API tunnel with the stable Vercel proxy.
+
+    Registration failures are logged instead of aborting startup, allowing the local API, FTP server, and storage clients to remain available when the
+    proxy or its registry is offline.
+    """
+
+    from core.data_center import BackEnd
+
+    payload: bytes = json.dumps({"url": api_url.rstrip("/")}).encode("utf-8")
+    request: URLRequest = URLRequest(
+        "https://storelimitlessbackend.vercel.app/api/register",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {STORELIMITLESS_PROXY_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=15) as response:
+            response_body: str = response.read().decode("utf-8", errors="replace")
+            response_status: int | None = response.status
+
+            if response_status is None or not 200 <= response_status < 300:
+                raise RuntimeError(f"Registration returned HTTP {response_status}: {response_body[:300]}")
+
+        write_log(
+            "INFO",
+            BackEnd,
+            "REGISTER VERCEL BACKEND TUNNEL",
+            "",
+            "Vercel backend proxy registered the current Cloudflare API tunnel. Stable API URL: https://storelimitlessbackend.vercel.app",
+        )
+
+    except HTTPError as exc:
+        try:
+            detail: str = exc.read().decode("utf-8", errors="replace")[:300]
+
+        except Exception:
+            detail = ""
+
+        write_log("WARNING", BackEnd, "REGISTER VERCEL BACKEND TUNNEL", "", f"Vercel backend tunnel registration failed (HTTP {exc.code}). {detail}")
+
+    except (URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+        write_log("WARNING", BackEnd, "REGISTER VERCEL BACKEND TUNNEL", "", f"Could not register the Vercel backend tunnel: {exc}")
+
+    except Exception as exc:
+        write_log(
+            "ERROR",
+            BackEnd,
+            "REGISTER VERCEL BACKEND TUNNEL",
+            "",
+            f"Unexpected error while registering the Vercel backend tunnel: {type(exc).__name__}: {exc}",
+        )

@@ -5,7 +5,7 @@ cached in Redis.
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -169,13 +169,38 @@ class Directory(BaseModel):
         await self.update()
 
     async def delete(self) -> None:
-        """Permanently delete the directory record from PostgreSQL and remove its individual Redis cache entry."""
+        """Delete the directory and any remaining file rows that reference it, then clear associated Redis entries."""
 
         if self.id is None:
             raise ValueError("Directory has no ID")
 
         with POOL.connection() as connection:
             try:
+                owned_directory: dict[str, int] | None = connection.execute(
+                    """
+                    SELECT id
+                    FROM directories
+                    WHERE id = %s
+                      AND username = %s
+                        FOR UPDATE;
+                    """,
+                    (self.id, self.username),
+                ).fetchone()
+
+                if owned_directory is None:
+                    connection.commit()
+                    await Redis.delete(f"user:{self.username}:directories {self.id}", "Directory")
+                    return
+
+                removed_files: list[dict[str, Any]] = connection.execute(
+                    """
+                    DELETE
+                    FROM files
+                    WHERE directory_id = %s
+                    RETURNING id, username;
+                    """,
+                    (self.id,),
+                ).fetchall()
                 connection.execute(
                     """
                     DELETE
@@ -186,6 +211,10 @@ class Directory(BaseModel):
                     (self.id, self.username),
                 )
                 connection.commit()
+
+                for removed_file in removed_files:
+                    await Redis.delete(f"user:{removed_file['username']}:files {removed_file['id']}", "File")
+
                 await Redis.delete(f"user:{self.username}:directories {self.id}", "Directory")
 
             except Exception as e:

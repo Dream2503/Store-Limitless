@@ -1,15 +1,18 @@
 # StoreLimitless
 
-StoreLimitless is a self-hosted personal cloud-storage application. It combines a React web interface, a Python service layer, PostgreSQL metadata,
-Redis-backed coordination, and Discord/Telegram as remote storage providers. It supports multi-file uploads, importing one or many HTTP (S) links,
-folder management, trash/restore, HTTP streaming with byte-range requests, and an FTP-compatible virtual filesystem.
+StoreLimitless is a self-hosted personal cloud-storage application. It combines a React/Vite web interface, a Python/FastAPI service layer, PostgreSQL
+metadata, Redis-backed coordination, and Discord/Telegram as remote storage providers. It supports multi-file and nested-folder uploads, batch and
+remote-link imports, torrent file selection, resumable browser downloads, seekable HTTP streaming, file previews, folder/trash management, and an
+FTP-compatible virtual filesystem. A separate Next.js service under `backend/storelimitlessbackend/` supplies the stable Vercel API proxy used by
+`CLOUD` mode.
 
 The web UI is branded **DriveBot** in places, while the overall application and server are called **StoreLimitless**.
 
 > **Scope:** This document covers the StoreLimitless application, including its internal backend, frontend, storage/transfer code, FTP interface,
 > runtime data, and packaging workflow. The separate Python SDK source package is not part of the tracked application tree. The build script generates
-> versioned Linux and Windows `LOCAL`/`CLOUD` executables in the repository-root `releases/linux` and `releases/windows` directories. It also copies only the `LOCAL`
-> executable for each selected platform into `api/src/storelimitless/bin/` under the SDK's standard `StoreLimitlessServer_<VERSION>` filename. Those
+> versioned Linux and Windows `LOCAL`/`CLOUD` executables in the repository-root `releases/linux` and `releases/windows` directories. It also copies
+> only the `LOCAL`
+> executable for each selected platform into `Store-Limitless-api` under the SDK's standard `StoreLimitlessServer_<VERSION>` filename. Those
 > binaries are generated artifacts, not application source. The internal service under `backend/server/` is documented because the frontend, uploads,
 > streaming, and FTP integration depend on it.
 
@@ -63,16 +66,36 @@ The application provides these user-facing capabilities:
 - Refresh the complete file/folder tree explicitly from the dashboard; a full browser reload also clears the JavaScript memory cache and triggers a
   fresh load.
 - Calculate recursive folder sizes and show total size in the item-details dialog.
-- Upload multiple local files from the browser.
+- Upload multiple local files from the browser, including folders with nested directories. Dropped/selected folder paths are recreated under the
+  chosen destination.
+- Submit multiple local files, complete folder trees, or multiple remote links as one upload task. Every item appears in the tray as queued
+  immediately, then runs sequentially; chunks within the current browser file may transfer concurrently.
+- After the server registers the task, the upload dialog closes automatically. The task and its per-item statuses remain in the dashboard tray after
+  completion, failure, or cancellation until the user removes that task.
+- Cancel an active batch from the tray to abort active browser chunk requests, stop the current backend worker where possible, skip queued items, and
+  clean up the uncommitted browser-upload temporary state. The backend locks database finalization against cancellation so an interrupted browser file
+  is not saved as a partial database record.
+- Remove one terminal task with its row's **X** control or use **Clear all** to cancel active tasks and clear the tray history.
+- Apply optimistic UI updates for single and bulk deletes and item moves, then reconcile with the backend in the background. If a mutation fails, the
+  tree is refreshed and an error is shown.
 - Import one or many remote links by pasting one HTTP (S) URL per line.
-- Download direct HTTP (S) file URLs, import Google Drive files, and process YouTube URLs.
-- Track each upload/import job through dashboard progress and status updates.
+- Download direct HTTP (S) file URLs, import Google Drive files, process YouTube URLs, and select individual files from magnet torrents.
+- Show YouTube processing stages in the upload tray: downloading video, downloading audio, merging audio/video, and uploading to the selected storage
+  provider.
+- Track upload batches and individual torrent-file states in a persistent, Redis-backed dashboard tray, including queued, downloading, uploading,
+  completed, failed, skipped, and cancelled states where applicable.
+- Download stored files through a pause/resume tray in browsers that support the File System Access API. Byte-range requests and an IndexedDB job
+  record allow supported downloads to resume after a page reload.
+- View media in a custom video player with seeking, volume, speed control, fullscreen, picture-in-picture (when supported), and keyboard shortcuts;
+  preview PDFs, audio, Markdown, and common text/source formats.
 - Use keyboard shortcuts on the upload page to return to the dashboard or trigger the upload/import action.
 - Rename and move files and folders, including bulk move operations. The move dialog supports browsing destinations and toggling an already-selected
   destination off.
 - Inspect file/folder details such as location, path, type, size, storage provider, timestamps, status, and record ID when those values are available.
 - Move files/folders to trash, restore them, or permanently delete trash items.
 - Create signed links for streaming or downloading a file.
+- Preview supported video formats in the existing custom player, audio in the browser's audio player, PDFs in the built-in PDF viewer, Markdown with a
+  safe rendered subset, and common source/config/text extensions as plain text.
 - Stream media and other files over HTTP, including single byte-range requests for seeking.
 - Connect through FTP using the same account and virtual directory tree.
 - Cache recently used remote file parts locally to reduce repeat downloads.
@@ -120,6 +143,11 @@ The application provides these user-facing capabilities:
 FTP client ── FTP port ──► FTP virtual filesystem ──► same models/transfer flow
 ```
 
+The optional deployment proxy is a separate service rather than part of the Python process: `backend/storelimitlessbackend/` is a Next.js app that
+stores the active Cloudflare Quick Tunnel URL and its update timestamp in Upstash Redis. In `CLOUD` mode, the Python process registers its temporary
+HTTPS API tunnel with this service; the stable proxy forwards browser requests to that current upstream. The proxy does not provide file storage and
+does not expose the FTP listener.
+
 ### Responsibility boundaries
 
 - **`frontend/`** renders the user interface and makes HTTP requests. The browser does not communicate directly with Discord or Telegram.
@@ -130,7 +158,8 @@ FTP client ── FTP port ──► FTP virtual filesystem ──► same model
   reads.
 - **`backend/ftp/`** exposes the same metadata and transfer functionality through a virtual FTP filesystem instead of a real host directory.
 - **Discord and Telegram** hold file bytes. PostgreSQL stores the metadata needed to find, order, and reconstruct those bytes.
-- **Redis** is used for cached models and short-lived coordination/state, including upload progress and active upload-session information.
+- **Redis** is used for cached models, upload progress/session state, and the account-scoped upload-job registry. The registry indexes jobs by the
+  authenticated username so the tray can be reconstructed on another device connected to the same backend and Redis instance.
 
 ---
 
@@ -166,19 +195,27 @@ generated caches, virtual environments, and dependency folders are deliberately 
 │   │       ├── filesystem.py         # Virtual filesystem operations
 │   │       ├── upload.py             # Staged FTP upload adapter
 │   │       └── utils.py              # FTP path/model helpers
-│   └── server/
-│       ├── app.py                    # FastAPI application and CORS
-│       ├── frontend.py               # Packaged SPA and runtime config
-│       ├── jwt_handler.py            # Bearer-token creation/validation
-│       ├── security.py               # Password hashes and signed public tokens
-│       ├── utils.py                  # Input validation helpers
-│       └── routers/
-│           ├── __init__.py            # Router composition
-│           ├── accounts.py           # Registration, login, metadata
-│           ├── directories.py        # Directory/file operations, search, trash
-│           ├── public_routes.py      # Readiness, upload status, stream/download
-│           ├── uploads.py            # Browser uploads and URL-import jobs
-│           └── upload_state.py       # Redis upload-session and chunk coordination
+│   ├── server/
+│   │   ├── app.py                    # FastAPI application and CORS
+│   │   ├── frontend.py               # Packaged SPA and runtime config
+│   │   ├── jwt_handler.py            # Bearer-token creation/validation
+│   │   ├── security.py               # Password hashes and signed public tokens
+│   │   ├── utils.py                  # Input validation helpers
+│   │   └── routers/
+│   │       ├── __init__.py            # Router composition
+│   │       ├── accounts.py           # Registration, login, metadata
+│   │       ├── directories.py        # Directory/file operations, search, trash
+│   │       ├── public_routes.py      # Readiness, upload status, stream/download
+│   │       ├── uploads.py            # Browser uploads and URL-import jobs
+│   │       └── upload_state.py       # Redis upload-session and chunk coordination
+│   └── storelimitlessbackend/         # Next.js stable API proxy for CLOUD deployments
+│       ├── app/
+│       │   ├── api/register/route.ts  # Authenticated tunnel registration
+│       │   ├── health/route.ts       # Proxy registry health
+│       │   └── page.tsx              # Proxy project's minimal root page
+│       ├── proxy.ts                  # Routes API traffic to registered tunnel
+│       ├── package.json
+│       └── next.config.ts
 ├── core/
 │   ├── config.py                     # Hosting mode, paths, logging, runtime settings
 │   ├── data_center.py                # Provider factory and bounded local cache
@@ -190,7 +227,8 @@ generated caches, virtual environments, and dependency folders are deliberately 
 │       ├── __init__.py
 │       ├── binaries.py               # Redis, FFmpeg, and Cloudflare helpers
 │       ├── discord_.py               # Discord storage provider
-│       ├── download_.py              # Direct URL, Google Drive, and YouTube downloaders
+│       ├── download_.py              # Public remote-link download dispatcher
+│       ├── download_utils.py         # Direct HTTP, Google Drive, YouTube, and libtorrent helpers
 │       ├── env.py                    # Credentials/configuration constants
 │       ├── progress.py               # Progress tracking and part uploader
 │       └── telegram_.py              # Telegram storage provider
@@ -223,9 +261,15 @@ generated caches, virtual environments, and dependency folders are deliberately 
 │   │           │   ├── ItemDetailsModal.jsx
 │   │           │   ├── BulkActionConfirmModal.jsx
 │   │           │   ├── UploadJobsTray.jsx
+│   │           │   ├── DownloadJobsTray.jsx
+│   │           │   ├── BackgroundOperationsTray.jsx # Component exists; not currently wired into Dashboard.jsx
 │   │           │   ├── MoveModal.jsx
 │   │           │   ├── UploadModal.jsx
+│   │           │   ├── FileContentPreview.jsx
 │   │           │   └── ViewFile.jsx
+│   │           ├── uploadFiles.js            # Directory/drop path extraction
+│   │           ├── utils/
+│   │           │   └── resumableDownloads.js # IndexedDB persistence for download tasks
 │   │           └── hooks/
 │   │               ├── useDashboardData.js
 │   │               ├── useGlobalFileSearch.js
@@ -237,8 +281,9 @@ generated caches, virtual environments, and dependency folders are deliberately 
 │   ├── postcss.config.js
 │   ├── tailwind.config.js
 │   └── vite.config.js
-├── linux/                            # Generated Linux LOCAL/CLOUD executables
-├── windows/                          # Generated Windows LOCAL/CLOUD executables
+├── releases/
+│   ├── linux/                        # Generated Linux LOCAL/CLOUD executables
+│   └── windows/                      # Generated Windows LOCAL/CLOUD executables
 ├── build.sh                          # Builds selected OS targets in LOCAL and CLOUD modes
 ├── requirements.txt                  # Python runtime dependencies
 ├── storelimitless-backend.spec       # PyInstaller specification
@@ -248,8 +293,9 @@ generated caches, virtual environments, and dependency folders are deliberately 
 
 `data/` is runtime storage in source/development mode. In frozen mode, runtime data is instead placed in the operating system's StoreLimitless
 application-data directory. Treat logs, CSV exports, Telegram session data, and configuration files as potentially sensitive. The `releases/linux` and
-`releases/windows` directories contain generated release variants after a build. The build also creates `api/src/storelimitless/bin/linux/` and
-`api/src/storelimitless/bin/windows/` as needed, with the standard-named `LOCAL` executable copied for each selected platform. Temporary paths such as
+`releases/windows` directories contain generated release variants after a build. The build can also create the separately maintained SDK's
+`Store-Limitless-api` binary directory, with the standard-named `LOCAL` executable copied
+for each selected platform. Temporary paths such as
 `build/`, `frontend/node_modules/`, `frontend/dist/`, `__pycache__/`, and `.pyc`/`.pyo` files can be recreated by the build or runtime workflow and
 are
 cleaned after a successful build.
@@ -289,8 +335,11 @@ authenticated user's `Directory` and `File` records.
 `core.data_center.DataCenter` maps a provider name to its implementation. The configured providers in this source are `Discord` and `Telegram`. A
 file's `data_center` field chooses which implementation is used for upload and download.
 
-The current source defines a maximum part size of **10 MiB** (`10 * 1024 * 1024`). The `links` array should contain one link for each stored part. The
-streaming code verifies the part count against the recorded file size.
+The current source defines a maximum part size of **10 MiB** (`10 * 1024 * 1024`) for the configured providers. Each provider also exposes its own
+`MAX_PARALLEL_UPLOADS` limit, which bounds simultaneous part uploads independently: the current classes set Discord to **2** and Telegram to **8**.
+The `links` array should contain one link for each stored part. The streaming code verifies the part count against the recorded file size. If you
+intend a different concurrency policy, change the provider class value in `core/utils/discord_.py` or `core/utils/telegram_.py` and update this
+reference accordingly.
 
 ### 4. Cache and transfer files are disposable
 
@@ -355,31 +404,45 @@ The browser upload implementation is split between `frontend/src/pages/dashboard
 helpers, and the core
 transfer layer.
 
-1. The frontend requests an upload job using `POST /auth/upload`, passing the selected data center, directory, and file name in headers.
-2. The backend validates the requested provider, file name, and target directory.
-3. A job ID is created. The pending job metadata and its temporary file path are stored in Redis with a time-to-live.
-4. The frontend divides each local file into **1 MiB chunks**, sends up to **8 chunks concurrently**, and retries transient chunk failures up to the
-   configured attempt limit.
+1. The frontend first registers the complete selection as a single batch through `POST /auth/upload-batches`. The batch stores every selected relative
+   path/link and its initial `queued` status in Redis before any transfer starts.
+2. The frontend processes the batch sequentially. For each local file it requests a child job using `POST /auth/upload`, passing the batch ID in
+   `X-Upload-Batch-Id` along with the selected data center, destination directory, file name, and size.
+3. The backend validates the requested provider, file name, target directory, batch ownership, and batch status. A child job ID is created. The
+   backend stores the child's owner, display name, destination directory, provider, type, batch ID, and progress metadata in Redis, adds the job to
+   the per-user index, and associates it with the parent batch. Pending file/session data also uses a time-to-live.
+4. The frontend divides each local file into **1 MiB chunks**, sends up to **8 chunks concurrently**, and allows up to **3 total attempts** for each
+   chunk before failing the item.
 5. The frontend sends byte chunks to `PUT /public/upload/{job_id}/chunk`, with `offset` and `total` query parameters.
 6. The backend writes each chunk at its declared byte offset and records received ranges in Redis. The range helper merges overlapping/adjacent ranges
    and tracks the contiguous byte count from offset zero.
 7. A producer task waits for incoming bytes while the upload worker passes the growing temporary file through the core upload pipeline. The transfer
    can therefore begin before the complete browser file has finished arriving.
-8. The transfer layer splits the file into provider-sized parts, uploads those parts, collects their remote links, and persists final file metadata.
-9. The frontend polls `GET /public/upload/{job_id}/status` for progress and the resulting file ID.
+8. The transfer layer splits the file into provider-sized parts, uploads those parts, and collects their remote links. Browser-file metadata is saved
+   only after the complete transfer succeeds and the worker acquires the same finalization lock used by cancellation.
+9. The frontend polls `GET /auth/upload-jobs/{job_id}/status` until the child job reaches a terminal state. Only then does the queue mark that batch
+   item completed and start the next file.
+10. The batch status is updated with per-item state and aggregate progress. The frontend polls `GET /auth/upload-batches` to keep the
+    account-synchronized tray current, and refreshes the affected directory after the whole batch reaches a terminal state.
 
-The active/pending upload metadata has an approximately one-hour Redis TTL in the current implementation. The chunk receiver also detects
-interrupted/missing temporary files and reports a restart-required failure rather than silently treating the incomplete file as complete.
+The pending upload/session data has an approximately one-hour Redis TTL in the current implementation. Job metadata and the per-user job index are
+maintained separately so that the dashboard tray can discover jobs from another browser/device. The chunk receiver also detects interrupted/missing
+temporary files and reports a restart-required failure rather than silently treating the incomplete file as complete.
 
 Temporary browser upload files are stored beneath `TRANSFER_PATH` in a per-user/job layout. In source mode this is under `data/transfer/`, the runtime
 scratch space cleaned up when the application shuts down.
 
 ### Import one or many remote links
 
-`POST /auth/upload-link` starts a background import job for a single URL. The upload page supports multiple links by accepting **one HTTP (S) URL per
-line**. It trims empty lines, validates every non-empty line before submitting jobs, and creates a separate import job for each URL. The dashboard
-tracks
-each job separately, so progress and failures are associated with the relevant link.
+`POST /auth/upload-link` starts a background import job for one URL. `GET /auth/torrent-preview` resolves magnet metadata and returns its file list
+without downloading payload data. Torrent metadata inspection is tracked as a persistent upload-tray task and runs after the upload dialog closes, so
+the user can continue using the website while inspection proceeds. When metadata is ready, the tray exposes **Select files and start**. The selection
+dialog shows files from inside the current torrent root (without repeating the root directory name); when multiple magnet links are queued, the modal
+advances one torrent at a time. Selected file records appear individually in the tray; libtorrent can download selected files concurrently, while
+storage uploads remain sequential. Completed files stay visible in the task until the user clears or dismisses it. The upload page accepts **one
+HTTP (S) URL or supported magnet URI per line** and
+validates the complete selection before creating a single batch with `POST /auth/upload-batches`. Each link is then imported sequentially as a child
+job. The one tray task shows every link up front and records its own status, while child jobs provide backend progress.
 
 The server chooses the downloader from the URL host:
 
@@ -388,22 +451,74 @@ The server chooses the downloader from the URL host:
   response filename metadata when available and rejects likely HTML pages that do not look like file downloads.
 - **Google Drive links** (`drive.google.com`) use the Google Drive downloader. The current implementation requests file name/size metadata through the
   Google Drive API, so the configured Google API key and access to the file are required.
-- **YouTube links** (`youtube.com`, subdomains of `youtube.com`, and `youtu.be`) use `yt-dlp` and FFmpeg to download/process media.
+- **YouTube links** (`youtube.com`, subdomains of `youtube.com`, and `youtu.be`) use `yt-dlp` and FFmpeg to download/process media. The downloader
+  resolves a stable media filename from yt-dlp's metadata/output path, updates the task name when available, and publishes distinct progress phases
+  for
+  video download, audio download, audio/video merging, and storage upload. Stage percentages are available when yt-dlp or the uploader reports byte
+  totals; merging does not necessarily have a meaningful percentage.
+- **Magnet links** (`magnet:?xt=urn:btih:...` or `magnet:?xt=urn:btmh:...`) use the `libtorrent` engine. The downloader reports peer discovery,
+  metadata retrieval, downloading, and the completed/seeding transition through the shared `Progress` object.
 
 For multiple imports, enter one URL per line, for example:
 
 ```text
 https://downloads.example.org/archive.zip
 https://downloads.example.org/video.mp4
+magnet:?xt=urn:btih:TORRENT_INFO_HASH&dn=example
 ```
 
-Each line creates its own import job. Blank lines are ignored, but every non-empty URL must use HTTP or HTTPS.
+Blank lines are ignored. The batch contains one item per non-empty line. HTTP (S) links must be valid URLs, and magnet links must include a supported
+`xt` info-hash topic.
 
-Downloaded content is written to a temporary file and sent through the same storage-provider upload pipeline used for other files. Direct links to
-ordinary HTML pages, authenticated downloads that the server cannot access, expired links, and unsupported provider-specific pages may fail even if
-the
-URL itself is syntactically valid. YouTube processing requires `yt-dlp`; FFmpeg is discovered or installed by the binary helper on supported
-platforms.
+### Torrent download and upload flow
+
+Torrent imports are implemented in `core/utils/download_utils.py`; `core/utils/download_.py` retains the public downloader interface used by
+`link_upload()`. The shared download utility contains the torrent engine integration, progress/name updates, safe path handling, temporary file
+staging,
+and the helpers used for direct HTTP (S), Google Drive, and YouTube downloads.
+
+1. Before importing a magnet, the frontend calls `GET /auth/torrent-preview`. The backend resolves metadata and returns the file paths and sizes
+   without intentionally downloading payload data.
+2. The frontend opens a selection modal for each magnet link in queue order. Every file is selected by default; users can deselect unwanted files. For
+   multiple magnets, the modal advances one torrent at a time.
+3. The selected original file indexes are passed to `POST /auth/upload-link`. Libtorrent assigns normal priority to selected files and priority zero
+   to unselected files, focusing payload transfer on the requested files.
+4. Progress reports the selected payload's byte total, connected peers, and seed count. The resolved torrent name is propagated into the active job
+   state.
+5. Selected files are downloaded completely to a temporary directory under `TRANSFER_PATH` before being uploaded sequentially. Unselected files are
+   not added to the StoreLimitless directory.
+6. After completion, the torrent session is stopped and the downloader validates each selected torrent-relative path before accessing local files.
+7. The torrent's root folder and nested directories are recreated beneath the selected StoreLimitless destination. Existing trashed directories with
+   matching paths are restored when needed.
+8. Files are uploaded sequentially through `core.transfer.file_upload()`. The first uploaded file uses the import's initial database record; remaining
+   files receive their own records.
+9. The temporary torrent directory is removed after success or failure.
+
+The torrent module excludes libtorrent padding files, rejects unsafe paths, and checks that resolved files stay inside the temporary download
+directory. A magnet may remain in peer search when no peers are reachable, and a torrent cannot complete when its required pieces are unavailable. The
+server needs outbound network access for trackers/DHT and peer connections; router/NAT restrictions can limit peer discovery.
+
+Downloaded HTTP (S)/YouTube content is written to a temporary file and sent through the storage-provider upload pipeline. Direct links to ordinary
+HTML pages, authenticated downloads the server cannot access, expired links, and unsupported provider-specific pages may fail even when the URL is
+syntactically valid. YouTube processing requires `yt-dlp`; FFmpeg is discovered or installed by the binary helper on supported platforms. Magnet
+imports require the Python `libtorrent` module to be installed in the runtime environment.
+
+#### Torrent selection dialog keyboard behavior
+
+The persistent upload tray opens the torrent picker after a metadata-preview task is ready. Every file is checked by default; checked files are the
+ones that will be imported. The keyboard focus highlight is deliberately separate from the checkbox selection so navigating does not change the upload
+set by itself.
+
+| Key       | Action                                                                                        |
+|-----------|-----------------------------------------------------------------------------------------------|
+| `↑` / `↓` | Move focus between file rows; the handler stops the event from reaching dashboard navigation. |
+| `Space`   | Toggle the checkbox for the focused file.                                                     |
+| `Enter`   | Start processing the checked files.                                                           |
+| `Esc`     | Cancel/close the selection dialog before processing begins.                                   |
+
+After the selected set is persisted to the upload batch, the dialog closes and downloading/uploading proceeds in the background. Selected file names
+are displayed as basenames rather than full torrent root paths; progress is tracked separately per selected file. Libtorrent can download selected
+files as part of a torrent session, while the StoreLimitless file records are uploaded sequentially to avoid overlapping provider-level jobs.
 
 ### How `file_upload()` works
 
@@ -421,6 +536,34 @@ serializes progress so the HTTP status route can return updates to the frontend 
 `backend/server/routers/upload_state.py` contains the concurrency and session-state logic for browser chunk uploads. It tracks background tasks
 strongly, coordinates range updates with a Redis lock, waits for contiguous input bytes, and cleans up session keys and temporary files when the job
 ends.
+
+### Optimistic mutations and background work
+
+The dashboard applies local state changes before waiting for the database response for common delete and move actions:
+
+- Single-file delete immediately removes the file from the visible list (permanent delete) or marks it as trashed.
+- Folder delete immediately hides/removes the folder and its descendants from the current in-memory tree.
+- Bulk delete applies the same optimistic changes and sends independent item operations concurrently. A two-step Shift+Delete sequence remains ordered
+  for each individual item.
+- File/folder moves update cached paths immediately and submit the move request in the background.
+- If a background mutation fails, the dashboard fetches the authoritative tree and displays an error rather than leaving optimistic state permanently
+  in place.
+- The complete selection is registered as one Redis-backed batch before the modal closes automatically. All of its files/links are visible in the tray
+  as queued items before transfers start.
+- Batch tasks remain visible after they complete, fail, or are cancelled. Use the row's **X** to remove one terminal task, or **Clear all** to cancel
+  active tasks and clear all tray history.
+- Cancelling a batch aborts local chunk `XMLHttpRequest`s, prevents subsequent queue items from starting, asks the backend to cancel its active child
+  worker, and cleans temporary chunk/session state. The browser-file worker and cancellation route share a Redis finalization lock: if cancellation
+  wins, the file metadata is not committed; if the worker already entered the protected final database-save section, the endpoint reports that the
+  file is already finishing rather than pretending a completed database write can be undone.
+
+The browser upload queue remains sequential across files and links to avoid overlapping storage-provider jobs. Within one file, chunk uploads can
+still run concurrently (up to the configured chunk-lane limit). Nested folder uploads create missing directories before the file queue starts, then
+send each file to its relative destination. If a multi-file batch is cancelled after earlier files have completed, those already completed files
+remain saved; cancellation prevents the active incomplete browser file from being registered and skips the remaining queued items.
+
+Optimistic UI means the interface reacts immediately; it does not make PostgreSQL operations themselves faster. A failed request is reconciled against
+backend state, and the error remains visible after the refresh.
 
 ---
 
@@ -444,8 +587,11 @@ The stream generator:
 4. Validates the downloaded part length.
 5. Yields only the requested region, in output blocks of at most 1 MiB.
 
-This arrangement lets the browser video player seek without downloading the entire file from the start, provided the client sends byte-range requests
-and the remote part metadata is valid.
+This arrangement lets the browser video player or an external player seek without downloading the entire file from the start, provided the client
+sends byte-range requests and the remote part metadata is valid. The stream generator prefetches the next provider part in the background while it
+serves the current one, yields output buffers of at most 1 MiB, and cancels any outstanding prefetch task when the response closes. Provider part
+reads
+use bounded retries; the Discord adapter reads CDN attachments without a fixed total-response timeout and retries incomplete/failed responses.
 
 ### Public stream versus public download
 
@@ -453,9 +599,31 @@ The code has separate endpoints for inline streaming and download-as-attachment.
 action, then uses it to request the corresponding public stream or download endpoint. The public token is signed using HMAC and binds the token to a
 file ID and username.
 
-In the current implementation, the public token payload does not include an expiration timestamp. Treat links as bearer capabilities: anyone who
-obtains a valid link may be able to use it until the signing secret changes or the referenced file ceases to resolve. Add expiry/revocation behavior
-before relying on links for sensitive files.
+The download endpoint also supports `HEAD`, byte ranges, `ETag`, and `If-Range` validators, which are used by the resumable-download manager to
+verify the source and resume safely. In the current implementation, the public token payload does not include an expiration timestamp. Treat links as
+bearer capabilities: anyone who obtains a valid link may be able to use it until the signing secret changes or the referenced file ceases to resolve.
+Add expiry/revocation behavior before relying on links for sensitive files.
+
+### Browser download manager and resumable downloads
+
+The dashboard has a separate **Downloads** tray for local downloads (distinct from the Redis-backed upload tray). In browsers supporting the File
+System Access API, choosing a file download opens the browser's save-file picker and writes verified byte ranges directly to that file rather than
+buffering a multi-gigabyte download entirely in JavaScript memory.
+
+- The frontend requests a signed download token, then checks the file with `HEAD` for total size and an `ETag`.
+- The download is split into **8 MiB byte-range requests**. Each range must return `206 Partial Content`, the exact expected `Content-Range`, and the
+  expected number of bytes before the frontend writes it to disk. Transient range failures are retried up to five attempts.
+- `If-Range` and the recorded `ETag` guard against continuing a partial file when the stored representation has changed.
+- Download task metadata and the browser file handle are stored in IndexedDB. A page reload restores in-progress jobs as **paused**, and the user can
+  resume them from the tray if browser permission for the chosen file is still available. Completed tasks can be cleared from the tray.
+- The UI exposes progress, pause, resume, remove-task, and clear-completed actions. If the File System Access API is unavailable, the app falls back
+  to
+  a normal browser download; resumable tray controls are not available on that fallback path.
+
+The File System Access APIs are browser- and security-context-dependent. They are generally available on HTTPS origins and localhost, but not on an
+ordinary HTTP LAN URL such as `http://192.168.x.x:5173`. In that case, folder selection can fall back to the legacy directory-input path, and Chromium
+may show its native “Upload N files to this site?” confirmation. A web page cannot reliably suppress browser-owned security confirmations from
+JavaScript. To use the modern folder picker and disk-backed resumable downloads on a LAN, serve the web app in a secure context (for example, HTTPS).
 
 ---
 
@@ -540,8 +708,9 @@ recorded file size.
 
 ### PostgreSQL and Redis roles
 
-PostgreSQL is the durable source of account, directory, and file metadata. Redis is used for frequently accessed model data and short-lived
-operational state such as upload sessions and progress. Do not treat Redis cache/state as a substitute for database backups.
+PostgreSQL is the durable source of account, directory, and file metadata. Redis stores frequently accessed model data and operational upload state,
+including progress, chunk sessions, per-job ownership metadata, and the username-indexed upload-job registry used by the cross-device tray. Do not
+treat Redis cache/state as a substitute for database backups; if the Redis deployment is ephemeral, tray metadata can be lost on reset.
 
 ---
 
@@ -571,13 +740,13 @@ dashboard UI and data lifecycle logic are organized under `frontend/src/pages/da
 - `src/App.jsx` declares the landing, authentication, dashboard, upload, and file-view routes. The root route is the public landing page, not the
   login form.
 - `src/main.jsx` mounts React into the HTML root element.
-- `src/index.css` contains global styling, the slim green-accent scrollbar theme for page and nested scroll regions, and reduced-motion
-  accommodations.
+- `src/index.css` contains global styling, the slim green-accent scrollbar theme for page and nested scroll regions, reduced-motion
+  accommodations, mobile touch-selection rules, and the dashboard scroller's top-edge overscroll behavior for pull-to-refresh.
 - `src/pages/Landing.jsx` renders the public-facing product page, including the responsive navigation, product-preview illustration, feature section,
   “how it works” steps, and sign-up/login calls to action. The product preview is illustrative rather than live account data.
 - `src/pages/Auth.jsx` handles both login and signup modes and stores the bearer token in `localStorage` under `token`.
-- `src/pages/Dashboard.jsx` coordinates dashboard state and interactions: folder navigation, selection, search, context menus, drag/marquee selection,
-  drag-and-drop moves, bulk actions, trash/restore, dialogs, and file actions.
+- `src/pages/Dashboard.jsx` coordinates dashboard state and interactions: folder navigation, selection, search, context menus, mouse-based
+  drag/marquee selection, touch long-press gestures, drag-and-drop moves, bulk actions, trash/restore, dialogs, and file actions.
 
 #### Dashboard components and helpers
 
@@ -594,55 +763,127 @@ All dashboard-specific modules are under `src/pages/dashboard/`:
 - `components/MoveModal.jsx` browses destination folders, lets the user choose or deselect a destination, and validates moves before submission.
   Selecting a different directory changes the destination; selecting the current choice again toggles it off and returns the destination to the folder
   currently being browsed.
-- `components/UploadModal.jsx` handles local-file uploads and HTTP (S) link imports. It is used as both the standalone `/upload` page and a dashboard
-  dialog.
-- `components/UploadJobsTray.jsx` displays active and failed upload/import jobs, transfer progress, byte counts, and job actions.
-- `components/ViewFile.jsx` obtains a public stream URL and provides the media player, including seeking, playback rate, volume, fullscreen, and
-  picture-in-picture controls.
+- `components/UploadModal.jsx` handles local-file uploads, nested folder uploads, and HTTP (S)/magnet link imports. It registers one batch containing
+  the entire selection, closes the modal automatically, then processes items sequentially.
+- `components/UploadJobsTray.jsx` displays persistent upload/import batches with aggregate progress, cancellation, per-task dismissal, and Clear all.
+  A single-file batch uses the compact single-file row layout; folder and multi-file batches retain the nested per-item status list. Torrent items
+  show
+  distinct queued/downloading/downloaded/uploading/completed/failed/cancelled states and per-file progress. YouTube task headings use the resolved
+  media
+  filename when available instead of the source URL; the status line shows the processing stage and percentage without repeating that filename.
+  YouTube
+  links can surface video/audio download, merge, and storage-upload phases. Completed task history stays visible until dismissed. The
+  torrent-selection
+  modal uses checked boxes to determine the upload set; arrow-key focus movement is not itself selection.
+- `components/DownloadJobsTray.jsx` displays browser-local resumable download tasks, with pause/resume, progress, removal, and clearing completed
+  jobs.
+- `utils/resumableDownloads.js` stores resumable download metadata and browser file handles in IndexedDB.
+- `uploadFiles.js` extracts files and relative paths from file drops, including supported dropped directory trees.
+- `components/ViewFile.jsx` routes to the correct preview by file extension and preserves the custom video player, including seeking, playback rate,
+  volume, fullscreen, and picture-in-picture controls.
+- `components/FileContentPreview.jsx` fetches text content through an authenticated signed stream and renders source/config files as plain text,
+  Markdown with a small safe subset, PDFs through the browser's PDF viewer, and audio through the native audio player. Common extensions include
+  `.txt`, `.log`, `.json`, `.yaml`, `.html`, `.css`, `.js`, `.jsx`, `.ts`, `.tsx`, `.py`, `.c`, `.h`, `.cpp`, `.hpp`, `.rs`, `.go`, `.java`, `.sql`,
+  `.sh`, and `.md`.
+
+Text/source previews intentionally use escaped plain text rather than a syntax-highlighting library, so uploaded content is not interpreted as
+executable HTML. The viewer's dark background/pane owns vertical and horizontal scrolling, including long lines, rather than trapping scrolling in the
+text element. Text preview is limited to 5 MB to avoid freezing the browser tab. Markdown supports common headings, paragraphs, inline emphasis/code,
+fenced code blocks, lists, blockquotes, horizontal rules, and HTTP (S) links; it is not a full CommonMark implementation.
+
+#### Video player controls and keyboard shortcuts
+
+The custom video player exposes timeline seeking, volume, playback speed, fullscreen, picture-in-picture (when supported by the browser), and a
+copy-stream-link action. Its keyboard shortcuts are active while the video viewer is open and the event target is not a text-editing control:
+
+| Key            | Action                                                                                |
+|----------------|---------------------------------------------------------------------------------------|
+| `Space` or `K` | Play/pause                                                                            |
+| `←` / `→`      | Seek backward/forward 5 seconds; hold `Shift` to seek 10 seconds                      |
+| `J` / `L`      | Seek backward/forward 10 seconds                                                      |
+| `↑` / `↓`      | Raise/lower volume by 5%                                                              |
+| `M`            | Toggle mute                                                                           |
+| `F`            | Toggle fullscreen                                                                     |
+| `Esc`          | Close the playback-speed menu when open; otherwise return to the previous page/folder |
+| `Backspace`    | Return to the previous page/folder unless focus is in a text-editing control          |
+
+Playback speeds are available from **0.25× through 2×** (including 0.75×, 1.25×, 1.5×, and 1.75×). Picture-in-picture and fullscreen behavior depends
+on browser support and permissions. The stream-link action copies the signed playback URL; treat that URL as a bearer link, because the current
+signed-token format has no expiry timestamp.
+
 - `constants.js` centralizes the API URL, navigation entries, and shared keys/styles.
-- `utils.js` contains shared path, token, file-kind, route, and selection helpers.
+- `utils.js` contains shared path, token, file-kind, route, and selection helpers. `getFileKind()` maps common code, configuration, text, Markdown,
+  PDF, audio, and video extensions to their viewer types.
 
 #### Dashboard hooks
 
 - `hooks/useDashboardData.js` loads the account's file/folder tree, storage metadata, and trash; refreshes a targeted directory after mutations; and
   calculates recursive folder sizes.
 - `hooks/useGlobalFileSearch.js` manages search results across the loaded file tree.
-- `hooks/useUploadJobs.js` restores active jobs from browser storage, polls server-side status, updates transfer progress, handles
-  cancellation/dismissal, and syncs completed uploads into the relevant directory.
+- `hooks/useUploadJobs.js` polls the account-shared batch endpoint, maps child progress into a batch row, sends cancellation and dismissal actions,
+  and refreshes affected directories when a batch finishes.
 
 The separation keeps `Dashboard.jsx` focused on coordinating interactions. When adding dashboard behavior, put reusable UI in `components/`, data
 lifecycle logic in the appropriate hook, and shared helpers/constants in `constants.js` or `utils.js`.
 
 ### Directory-tree cache and refresh behavior
 
-`useDashboardData.js` performs a complete initial scan of the user's active directory tree. It requests directories in batches, queues newly
-discovered child folders, collects files from each directory, then loads trash and account storage metadata. The tree is held in a module-level
-in-memory cache scoped to the current account token.
+`useDashboardData.js` loads the full account tree through one authenticated `GET /auth/tree` request instead of repeatedly walking the tree with one
+`GET /auth/directory` call per folder and separate requests for Trash and storage metadata. The endpoint returns active and trashed directories,
+active
+and trashed file metadata, and the total storage usage in one response. To keep the payload smaller, the full-tree response omits the remote provider
+`links` for each file; those links are not needed to display or select files in the dashboard. The tree is held in a module-level in-memory cache
+scoped
+to the current account token.
 
-- **Folder navigation:** changing the `/home/...` route switches the visible directory slice from the cached tree instead of issuing another directory
-  request for every navigation step.
-- **Explicit Refresh:** the dashboard's Refresh control calls the full tree loader, so it re-reads directory and file data from the server rather than
-  trusting the existing cache.
+- **Initial dashboard load:** when there is no matching in-memory cache for the signed-in account, the hook fetches `/auth/tree` once for the complete
+  file/folder tree and storage total. The endpoint scopes its data to the authenticated username.
+- **Folder navigation:** changing the `/home/...` route switches the visible directory slice from the cached tree instead of issuing another full-tree
+  request.
+- **Explicit Refresh:** the dashboard's Refresh control fetches `/auth/tree` again, replacing the cached tree with current server data.
 - **Browser reload:** the cache exists only in JavaScript memory, not in `localStorage`; a hard reload such as F5 recreates the module state and
-  triggers a fresh tree load.
-- **Local changes and uploads:** operations that affect a single folder can refresh that directory and update the in-memory tree without rescanning
-  every folder. Completed uploads are synchronized to their target directories by the upload-job hook.
+  triggers
+  a fresh full-tree request.
+- **Local changes and uploads:** operations that affect a single folder can still use `GET /auth/directory?directory=...` to refresh just that
+  directory
+  rather than reloading the entire account tree. Completed uploads are synchronized to their target directories by the upload-job hook.
 - **Recursive folder size:** the hook sums file sizes in a folder and all descendants, using the cached file/folder records. Missing or invalid size
   values contribute zero. The value is exposed as `total_size_bytes` for the details dialog.
 
+The single-tree endpoint reduces request count during initial/full loading, but does not eliminate other application requests such as upload-job
+polling.
 The cache is a performance optimization, not durable storage. PostgreSQL remains the source of truth for metadata. If a change bypasses the normal
 refresh path, use the dashboard Refresh control to reconcile the client tree with server data.
 
 ### Upload progress and job behavior
 
-The dashboard upload tray persists jobs in browser `localStorage` under `storelimitless_upload_jobs`. `useUploadJobs.js` polls active jobs about every
-1.2 seconds, updates byte counts and percentages, and removes completed/cancelled jobs from the saved tray state. When one or more jobs complete, it
-refreshes each affected destination directory so the uploaded files appear without a manual full-tree refresh. Failed jobs remain visible until
-dismissed.
+The upload tray is account-synchronized rather than being backed by a browser-local job list. `useUploadJobs.js` polls `GET /auth/upload-batches`
+about once per second. Redis stores each batch, every queued item, per-item state, and its child-job IDs under the authenticated username, so the same
+account sees the same task tray across browsers/devices using the same backend and Redis instance. The browser's `localStorage` holds the
+authentication
+token, but it is not the source of truth for upload tasks.
 
-Local file uploads can be cancelled from the tray; cancellation aborts the tracked browser chunk requests and removes the job from the tray.
-Link-import jobs are tracked separately and can be dismissed when no longer active. Treat the browser storage key and backend upload-status response
-contract as a single interface when changing this flow.
+The batch API supports these shared actions:
+
+- **Create/list/update:** `POST /auth/upload-batches`, `GET /auth/upload-batches`, and `PATCH /auth/upload-batches/{batch_id}` register the whole
+  selection, list batch history, and publish current item/progress updates.
+- **Cancel:** `POST /auth/upload-batches/{batch_id}/cancel` marks the batch cancelled, attempts to stop the active child worker, and marks queued
+  items as cancelled. The initiating browser also aborts active chunk `XMLHttpRequest`s immediately. A Redis finalization lock prevents an incomplete
+  browser file from being saved in the database after cancellation wins the race.
+- **Dismiss one task:** `DELETE /auth/upload-batches/{batch_id}` removes a batch's history and child-job records. Active batches must be cancelled
+  first.
+- **Clear all:** `DELETE /auth/upload-batches` cancels active batch children and removes all batch history for the account.
+- **Report browser transfer failure:** `POST /auth/upload-jobs/{job_id}/fail` publishes local chunk-transfer failures to the child job's shared
+  status.
+
+Terminal batches are intentionally **not** automatically pruned. Successful, failed, and cancelled tasks remain in the tray until the user removes one
+with its row-level **X** or selects **Clear all**. The tray refreshes the destination directory after a batch becomes terminal. All routes verify
+ownership against the authenticated username.
+
+**Deployment requirement:** every device must use the same API backend and the same Redis data store. A per-process `localhost` Redis instance does
+not synchronize separate deployments. Redis is operational state rather than the durable file metadata database; if Redis is ephemeral or reset, the
+shared job tray can be lost. In addition, background task handles are process-local, so a Redis job record alone cannot resume an interrupted transfer
+after the backend process/runtime has stopped.
 
 ### Upload page keyboard shortcuts and multiple links
 
@@ -652,6 +893,9 @@ On the standalone upload page:
 - **Backspace** returns to the dashboard when focus is not in an editable field; normal text editing is preserved.
 - **Enter** triggers the upload/import action when it is enabled, except inside the multi-link text area, where Enter inserts a new line. Key repeat
   is ignored when triggering the action.
+- **Folder picker:** the Choose folder control uses `window.showDirectoryPicker()` when the browser supports it, recursively gathers files and records
+  relative paths, then recreates those nested paths at upload time. Browsers/security contexts that do not expose that API use a hidden
+  `webkitdirectory` input as a fallback; browser-owned multi-file confirmation prompts may therefore still appear on ordinary HTTP LAN origins.
 - In **Link** mode, paste or type one HTTP (S) URL per line. Blank lines are ignored. The page validates all non-empty URLs before creating separate
   import jobs, then returns to the dashboard so their progress can be followed in the tray.
 - In **File** mode, users can select multiple local files or drop files into the upload area. Transfers use the chunked upload workflow documented
@@ -660,19 +904,66 @@ On the standalone upload page:
 ### Selection and move behavior
 
 Dashboard selection is tracked separately for each view (folder route, active/trash tab, and search query) so selections can be restored when
-navigating back through the app. The workspace supports multi-selection, a pointer-drag selection rectangle, context-menu actions, and drag-and-drop
-move gestures.
+navigating back through the app. On desktop, the workspace supports modifier-key multi-selection, a mouse-drag selection rectangle, context-menu
+actions, and drag-and-drop move gestures.
+
+On touch screens, the workspace uses explicit gestures because desktop drag and modifier-key behavior does not translate reliably to a phone:
+
+- **Tap an item:** opens the file or folder in the normal browsing flow.
+- **Long-press an item:** after approximately 430 ms, selects the item and enters touch multi-selection mode. While this mode is active, tapping other
+  items adds them to the selection; tapping an already-selected item removes it. Clearing the selection exits the mode.
+- **Long-press and drag an item:** after the long press selects the item, moving the finger starts a move preview. Drop the selected items on a valid
+  folder or breadcrumb target to move them. Invalid destinations, including moving a folder into itself or a descendant, are rejected.
+- **Long-press empty workspace and drag:** starts a selection rectangle for selecting multiple visible items.
+- **Pull to refresh from the background:** when the dashboard's main scroll area is already at its top edge, pulling down on empty
+  workspace/background
+  allows the browser's native pull-to-refresh gesture. This is not limited to the header. The `.dashboard-main-scroll` class sets vertical overscroll
+  to
+  `auto`, overriding the general `overscroll-behavior: contain` rule used for other nested scroll areas.
+- **Scroll normally:** finger movement greater than about 9 px before the long-press activates cancels the pending item/background gesture, leaving
+  the
+  browser's native scrolling behavior in control. When the dashboard is not at the top, pulling up continues normal content scrolling. A touch gesture
+  is
+  cancelled if it leaves the dashboard workspace or the browser emits `touchcancel`.
+
+The touch behavior uses the workspace's touch events and global document listeners rather than relying on native HTML5 drag-and-drop. Pull-to-refresh
+itself
+is browser/OS-managed and may vary by browser, installed-app mode, and platform; test it in the actual iOS/Android browsers you intend to support. The
+visible **Refresh** button is separate: it reloads the dashboard's file/folder data without requiring a full browser page reload.
 
 The move dialog fetches immediate children as the user browses and caches each visited directory for the lifetime of that dialog. A destination must
 pass the dashboard's move validation: moving a directory into itself or one of its descendants is rejected, as is a move with no effective destination
 change. A selected directory's action toggles between **Choose** and **Deselect**; **Use this folder** selects the folder currently open in the
 dialog. Partial failures are reported instead of being treated as a complete success.
 
+#### Dashboard keyboard shortcuts
+
+These shortcuts are handled by the dashboard when a text-editing control or an owning modal does not have keyboard input:
+
+| Key / combination     | Action                                                                                                                    |
+|-----------------------|---------------------------------------------------------------------------------------------------------------------------|
+| `↑` / `↓` / `←` / `→` | Move the active dashboard selection spatially through visible items; in the dashboard this also selects the focused item. |
+| `Enter`               | Open the single selected file or folder.                                                                                  |
+| `Ctrl+A` / `Cmd+A`    | Select all selectable items in the current view.                                                                          |
+| `Delete`              | Open the Move to Trash confirmation for selected items.                                                                   |
+| `Shift+Delete`        | Open the permanent-delete confirmation for selected items outside Trash.                                                  |
+| `F2`                  | Rename the single selected item when not in Trash.                                                                        |
+| `Alt+Enter`           | Open details for the single selected item.                                                                                |
+| `Backspace`           | Navigate to the parent folder (or dashboard root) when not editing text.                                                  |
+| `Esc`                 | Close/cancel the active confirmation where applicable; otherwise clear dashboard selection.                               |
+
+The torrent picker is intentionally an exception: its `↑` / `↓` keys move only the dialog's focus highlight, `Space` toggles the checked state,
+`Enter` begins the selected import, and `Esc` closes the picker. The dialog stops those key events from also moving dashboard selection. Destructive
+confirmation dialogs initially focus the destructive action; arrow keys can switch focus to Cancel before the user activates it.
+
 ### Global visual behavior
 
 `src/index.css` applies a narrow scrollbar style to the page and nested scrollable elements. The thumb is dark green at rest and brightens on
-hover/active state, with transparent tracks and scrollbar corners. It also limits scroll chaining for common overflow utility classes and respects
-reduced-motion preferences. Component-specific styling remains in Tailwind utility classes.
+hover/active state, with transparent tracks and scrollbar corners. It limits scroll chaining for common overflow utility classes, except that the
+`.dashboard-main-scroll` element explicitly uses `overscroll-behavior-y: auto` so a top-edge pull on the dashboard background can reach the browser's
+native
+pull-to-refresh behavior. The dashboard main scroller keeps horizontal overscroll contained. Global styles also respect reduced-motion preferences.
+Component-specific styling remains in Tailwind utility classes.
 
 ### API URL resolution
 
@@ -695,7 +986,7 @@ The browser-facing URL must be reachable from the browser itself. `127.0.0.1` al
 ## Internal HTTP interface
 
 This section documents the HTTP service that is part of the StoreLimitless application. It does **not** describe the separately packaged SDK under
-`api/`.
+`Store-Limitless-api`.
 
 Most `/auth/...` routes require an `Authorization: Bearer <access_token>` header. Public upload-status and file-stream routes use the `/public/...`
 namespace, although the chunk receiver itself also validates the user's bearer token in the current code.
@@ -705,55 +996,96 @@ supplied frontend and server modules.
 
 ### Accounts
 
-| Method and path                              | Purpose                                                                      |
-|----------------------------------------------|------------------------------------------------------------------------------|
-| `POST /auth/register`                        | Validate details, hash the password, create the account, and create `/home`. |
-| `POST /auth/login?username=...&password=...` | Verify credentials and return the bearer token, profile, and home directory. |
-| `GET /auth/metadata`                         | Return account metadata including the calculated storage usage.              |
+| Method and path                              | Purpose                                                                                                                                                                                    |
+|----------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST /auth/register`                        | Validate details, hash the password, create the account, and create `/home`.                                                                                                               |
+| `POST /auth/login?username=...&password=...` | Verify credentials and return the bearer token, profile, and home directory.                                                                                                               |
+| `GET /auth/metadata`                         | Return account metadata including the calculated storage usage.                                                                                                                            |
+| `GET /auth/tree`                             | Return the authenticated user's active/trashed directories and file metadata, plus total storage usage, in one response. Remote file-part `links` are omitted from this full-tree payload. |
 
 Access tokens use HS256 and have a 24-hour lifetime in the current code. The login endpoint currently accepts credentials in query parameters;
 see [Security notes](#security-notes).
 
 ### Directory and file management
 
-| Method and path                                   | Purpose                                           |
-|---------------------------------------------------|---------------------------------------------------|
-| `POST /auth/create-folder?directory=...&name=...` | Create a directory under the requested parent.    |
-| `GET /auth/directory?directory=...`               | Return folder and file entries for a directory.   |
-| `GET /auth/search`                                | Search the user's file/directory metadata.        |
-| `GET /auth/trash`                                 | Return trashed files and directories.             |
-| `PATCH /auth/file/{fid}/rename?name=...`          | Rename a file.                                    |
-| `PATCH /auth/directory/{did}/rename?name=...`     | Rename a directory and rewrite descendant paths.  |
-| `PATCH /auth/file/{fid}/move?directory=...`       | Move a file to another directory.                 |
-| `PATCH /auth/directory/{did}/move?directory=...`  | Move a directory and its descendants.             |
-| `PATCH /auth/move`                                | Bulk move the specified file/folder IDs.          |
-| `DELETE /auth/file/{fid}`                         | Move a file to trash.                             |
-| `DELETE /auth/directory/{did}`                    | Move a directory to trash.                        |
-| `POST /auth/trash/file/{fid}/restore`             | Restore a trashed file.                           |
-| `POST /auth/trash/directory/{did}/restore`        | Restore a trashed directory.                      |
-| `DELETE /auth/trash/file/{fid}`                   | Permanently delete a file record from trash.      |
-| `DELETE /auth/trash/directory/{did}`              | Permanently delete a directory from trash.        |
-| `POST /auth/file/{fid}/public-link`               | Create a signed stream/download token for a file. |
+| Method and path                                   | Purpose                                                                                                            |
+|---------------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
+| `POST /auth/create-folder?directory=...&name=...` | Create a directory under the requested parent.                                                                     |
+| `GET /auth/directory?directory=...`               | Return the immediate folder and file entries for a directory; retained for targeted refreshes after local changes. |
+| `GET /auth/search`                                | Search the user's file/directory metadata.                                                                         |
+| `GET /auth/trash`                                 | Return trashed files and directories.                                                                              |
+| `PATCH /auth/file/{fid}/rename?name=...`          | Rename a file.                                                                                                     |
+| `PATCH /auth/directory/{did}/rename?name=...`     | Rename a directory and rewrite descendant paths.                                                                   |
+| `PATCH /auth/file/{fid}/move?directory=...`       | Move a file to another directory.                                                                                  |
+| `PATCH /auth/directory/{did}/move?directory=...`  | Move a directory and its descendants.                                                                              |
+| `PATCH /auth/move`                                | Bulk move the specified file/folder IDs.                                                                           |
+| `DELETE /auth/file/{fid}`                         | Move a file to trash.                                                                                              |
+| `DELETE /auth/directory/{did}`                    | Move a directory to trash.                                                                                         |
+| `POST /auth/trash/file/{fid}/restore`             | Restore a trashed file.                                                                                            |
+| `POST /auth/trash/directory/{did}/restore`        | Restore a trashed directory.                                                                                       |
+| `DELETE /auth/trash/file/{fid}`                   | Permanently delete a file record from trash.                                                                       |
+| `DELETE /auth/trash/directory/{did}`              | Permanently delete a directory from trash.                                                                         |
+| `POST /auth/file/{fid}/public-link`               | Create a signed stream/download token for a file.                                                                  |
 
 The `/home` root is protected from being moved/renamed/deleted by the directory-management code. File and directory names are validated before path
 changes.
 
 ### Upload and public-file routes
 
-| Method and path                                                 | Purpose                                                                                         |
-|-----------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
-| `POST /auth/upload`                                             | Create a browser-upload job. Headers include `X-Data-Center`, `X-Directory`, and `X-File-Name`. |
-| `PUT /public/upload/{job_id}/chunk?offset=...&total=...`        | Send bytes for a declared file range. The current route requires the user's bearer token.       |
-| `POST /auth/upload-link?link=...&data_center=...&directory=...` | Import a supported remote link in a background task.                                            |
-| `GET /public/upload/{job_id}/status`                            | Read the current upload status and progress.                                                    |
-| `GET /public/ready`                                             | Report whether the Discord storage client is ready.                                             |
-| `GET /public/stream/{token}`                                    | Stream a file and honor the HTTP `Range` header.                                                |
-| `GET /public/download/{token}`                                  | Stream a file as an attachment.                                                                 |
+| Method and path                                                                                 | Purpose                                                                                                                                            |
+|-------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST /auth/upload-batches`                                                                     | Register one account-shared task with the full list of queued files/links.                                                                         |
+| `GET /auth/upload-batches`                                                                      | List batch tasks and every per-item status for the authenticated account.                                                                          |
+| `PATCH /auth/upload-batches/{batch_id}`                                                         | Update a batch's state, current child job, progress counters, or item status.                                                                      |
+| `POST /auth/upload-batches/{batch_id}/cancel`                                                   | Cancel the active child and stop subsequent queued items.                                                                                          |
+| `DELETE /auth/upload-batches/{batch_id}`                                                        | Remove one terminal batch and its child job records.                                                                                               |
+| `DELETE /auth/upload-batches`                                                                   | Cancel active batches and clear all account tray history.                                                                                          |
+| `POST /auth/upload`                                                                             | Create a browser-upload child job. Headers include `X-Data-Center`, `X-Directory`, `X-File-Name`, optional `X-File-Size`, and `X-Upload-Batch-Id`. |
+| `PUT /public/upload/{job_id}/chunk?offset=...&total=...`                                        | Send bytes for a declared file range. Requires the owning user's bearer token.                                                                     |
+| `GET /auth/torrent-preview?link=...`                                                            | Resolve a magnet link and return torrent file indexes, paths, and sizes before payload download. Requires authentication.                          |
+| `POST /auth/upload-link?link=...&data_center=...&directory=...&batch_id=...&selected_files=...` | Create a child job to import a remote link; `selected_files` carries the selected torrent indexes when applicable.                                 |
+| `GET /auth/upload-jobs`                                                                         | List child jobs for authenticated-account diagnostics/legacy consumers.                                                                            |
+| `POST /auth/upload-jobs/{job_id}/cancel`                                                        | Cancel an owned child job and publish shared cancelled status.                                                                                     |
+| `POST /auth/upload-jobs/{job_id}/fail`                                                          | Record a browser-side file-transfer failure on an owned child job.                                                                                 |
+| `DELETE /auth/upload-jobs/{job_id}`                                                             | Dismiss a legacy standalone terminal child job.                                                                                                    |
+| `GET /auth/upload-jobs/{job_id}/status`                                                         | Read status for a child job; requires the user's bearer token.                                                                                     |
+| `GET /public/ready`                                                                             | Report whether the Discord storage client is ready.                                                                                                |
+| `GET /public/upload/{job_id}/status`                                                            | Read an owned upload child's status/progress through the public-router namespace; a bearer token is still required.                                |
+| `GET /public/stream/{token}`                                                                    | Stream a file and honor the HTTP `Range` header.                                                                                                   |
+| `GET /public/download/{token}`                                                                  | Download a file as an attachment with byte ranges and validators.                                                                                  |
+| `HEAD /public/download/{token}`                                                                 | Return download metadata such as content length and ETag without the response body.                                                                |
 
 These tables describe the routes relevant to the supplied source; they are not intended to replace generated OpenAPI documentation from a running
 instance.
 
 ---
+
+## Vercel frontend and stable API proxy
+
+The current deployment separates the static React frontend from the Python API:
+
+| Component             | URL / location                                          | Role                                                                                              |
+|-----------------------|---------------------------------------------------------|---------------------------------------------------------------------------------------------------|
+| Frontend              | `https://storelimitless.vercel.app`                     | Public landing page, authentication UI, and dashboard                                             |
+| Stable API proxy      | `https://storelimitlessbackend.vercel.app`              | Stable browser-facing API origin; forwards requests to the currently registered Cloudflare tunnel |
+| Cloud-mode API tunnel | Generated at runtime                                    | Temporary HTTPS upstream to the Python API on port `8000`                                         |
+| Tunnel registry       | Upstash Redis, configured in the Next.js Vercel project | Stores the active tunnel URL and last registration timestamp                                      |
+
+When the Python application starts in `HOST="CLOUD"`, it creates a Cloudflare Quick Tunnel for `http://127.0.0.1:8000`, then attempts to register
+the generated HTTPS URL with `POST /api/register` on the stable API proxy. The registration endpoint expects a bearer token matching
+`STORELIMITLESS_PROXY_TOKEN`; it accepts only HTTPS `*.trycloudflare.com` URLs and stores the current upstream in Upstash Redis. Registration
+failures are logged and do not necessarily stop the local services, so a running Colab/server does not by itself prove that the stable proxy is
+registered.
+
+The proxy's `/health` endpoint reports whether an upstream is registered and the last update timestamp. It reports registry state, not whether every
+API route is healthy. If browser API requests return `503`, check the health endpoint, confirm the cloud runtime is still running, inspect the
+registration logs, and verify that the Vercel and Python runtime use the same `STORELIMITLESS_PROXY_TOKEN` and valid Upstash Redis environment
+variables. If a request fails with a browser CORS error, inspect the actual response and `OPTIONS` preflight; a proxy-generated `503` is not the same
+as a response from FastAPI with its CORS headers.
+
+The Next.js proxy project lives in `backend/storelimitlessbackend/`. Its `.next/`, `node_modules/`, `.turbo/`, and `coverage/` directories are
+generated artifacts and are removed by the successful root build cleanup when present. Keep `package.json`, `package-lock.json`, `app/`, `proxy.ts`,
+and configuration files; these are required to rebuild and deploy the proxy.
 
 ## Configuration
 
@@ -774,12 +1106,15 @@ instance.
 `HOST` is declared in `core/config.py` as either `LOCAL` or `CLOUD`.
 
 - **`LOCAL`**: use the detected LAN address for the API and website URLs. The API listens on `0.0.0.0:8000`, Vite or the packaged frontend on
-  `0.0.0.0:5173`, and FTP on port `2121`.
-- **`CLOUD`**: start Cloudflare HTTP tunnels for the service on port `8000` and the website on port `5173`, then pass the resulting API URL to the
-  frontend. The implementation uses the tunnel helper in `core/utils/binaries.py`.
+  `0.0.0.0:5173`, and FTP on port `2121`. Source-mode startup installs frontend dependencies if Vite is missing, then launches the Vite dev server.
+- **`CLOUD`**: start a Cloudflare Quick Tunnel for the local API on port `8000`. The public frontend is hosted separately at
+  `https://storelimitless.vercel.app`; Cloud mode does not start Vite or bundle frontend assets into its executable. The current tunnel URL is
+  registered with the stable Vercel API proxy at `https://storelimitlessbackend.vercel.app`, which stores the active upstream URL in Upstash Redis.
+  The proxy forwards API requests to that registered tunnel.
 
-The current Cloud-mode code does not create a public FTP tunnel. It still starts FTP locally on port `2121`. Redis is intended to remain private on
-loopback.
+The current Cloud-mode code does not create a public FTP tunnel. FTP still listens locally on port `2121`, and Redis is intended to remain private.
+The Vercel proxy depends on its Upstash Redis environment configuration and the `STORELIMITLESS_PROXY_TOKEN` secret being configured consistently
+with the StoreLimitless runtime.
 
 ### Runtime paths
 
@@ -821,7 +1156,9 @@ silently running with an invalid value.
 - Discord bot credentials and access to the configured storage/dump channel.
 - Telegram API credentials and a configured destination for stored documents.
 - FFmpeg for YouTube media downloads. The binary helper attempts installation on supported systems if it is missing.
-- Network access to the configured database, Discord, Telegram, Google Drive, YouTube, and any configured tunnel provider.
+- The Python `libtorrent` module for magnet-link imports. Install a `python-libtorrent` build compatible with the operating system and Python version
+  used to run StoreLimitless.
+- Network access to the configured database, Discord, Telegram, Google Drive, YouTube, torrent trackers/DHT/peers, and any configured tunnel provider.
 
 ### Create a Python environment
 
@@ -833,6 +1170,9 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
+
+`requirements.txt` includes `libtorrent`, which is used for magnet-link imports. Choose a compatible wheel/build for
+the Python version and operating system used by StoreLimitless; the available builds differ across platforms.
 
 On Windows PowerShell:
 
@@ -959,7 +1299,8 @@ official
 
 ### Build variants and output layout
 
-The script writes the platform variants directly to the repository-root `releases/linux` and `releases/windows` directories. With the default `VERSION=0.1.0`, the
+The script writes the platform variants directly to the repository-root `releases/linux` and `releases/windows` directories. With the default
+`VERSION=0.1.0`, the
 four possible outputs are:
 
 ```text
@@ -987,58 +1328,70 @@ Before each PyInstaller run, it updates this assignment to the variant being bui
 system. A backup of `core/config.py` is restored when the script exits, including on a failed build, so the working source configuration is not left
 set to `CLOUD` by the packaging process.
 
-The frontend is built once and shared by the four variants; each executable embeds that frontend build. The server-side `HOST` value controls the
-runtime hosting mode. `LOCAL` uses the local/LAN address setup, while `CLOUD` uses the Cloudflare HTTP-tunnel startup behavior described in
-[Hosting mode](#hosting-mode). The cloud variant does not automatically add a public FTP tunnel.
+The frontend is built once before packaging, but **it is bundled only into `LOCAL` executables**. The PyInstaller spec reads the
+`INCLUDE_FRONTEND` environment variable:
+
+```bash
+# LOCAL executable: include frontend assets
+INCLUDE_FRONTEND=1 python -m PyInstaller storelimitless-backend.spec
+
+# CLOUD executable: exclude frontend assets
+INCLUDE_FRONTEND=0 python -m PyInstaller storelimitless-backend.spec
+```
+
+`build.sh` sets this variable automatically for every Linux and Windows build. `storelimitless-backend.spec` defaults to including the frontend when
+`INCLUDE_FRONTEND` is unset, preserving the expected behavior for direct/manual builds. This is separate from `HOST`: `HOST` determines startup
+behavior, while `INCLUDE_FRONTEND` determines which static frontend files PyInstaller packages.
+
+`LOCAL` serves the bundled frontend in a frozen executable. `CLOUD` uses the Vercel-hosted website and only tunnels the API. Neither variant creates
+a public FTP tunnel.
 
 ### SDK binary copies
 
-For each operating system selected in the build command, the script copies the `LOCAL` executable into the separate SDK's generated binary directory.
-The SDK copies deliberately use the standard name without the `LOCAL`/`CLOUD` suffix:
+For each selected operating system, the script copies the `LOCAL` executable into the SDK's generated binary directory under
+`Store-Limitless-api/src/storelimitless/bin/`. The standard SDK filename omits the `LOCAL`/`CLOUD` suffix:
 
 ```text
-api/src/storelimitless/bin/
+Store-Limitless-api/src/storelimitless/bin/
 ├── linux/
 │   └── StoreLimitlessServer_0.1.0
 └── windows/
     └── StoreLimitlessServer_0.1.0.exe
 ```
 
-These SDK copies are generated artifacts, not the versioned root-level release files. The script does not copy the `CLOUD` executable into the SDK
-`bin` directory. When updating one platform's SDK binary, it removes stale `StoreLimitlessServer*` files in that platform's `bin` directory before
-copying the current `LOCAL` executable. An OS that was not selected is not rebuilt.
+These SDK copies are generated artifacts, not the versioned root-level release files. The script never copies the `CLOUD` executable into the SDK
+`bin` directory. Before copying, it removes stale `StoreLimitlessServer*` files in the selected platform's `bin` directory. An OS that was not
+selected is not rebuilt.
 
 ### Build cleanup
 
-Only after every selected build succeeds, the script removes regeneratable artifacts:
+Only after every selected build succeeds, `build.sh` removes regeneratable artifacts:
 
-- `build/`, including temporary virtual environments, Wine prefix data, downloaded Windows Python installers, and PyInstaller work directories.
+- `build/`, including temporary virtual environments, the Wine prefix, downloaded Windows Python installers, and PyInstaller work directories.
 - `frontend/node_modules/` and `frontend/dist/`.
-- Project `__pycache__/` directories and `.pyc`/`.pyo` files, while pruning `.git`, `.venv`, `venv`, and `node_modules` directories.
+- `backend/storelimitlessbackend/.next/`, `node_modules/`, `.turbo/`, and `coverage/`, when that Next.js project directory exists.
+- Project `__pycache__/` directories and `.pyc`/`.pyo` files, while pruning `.git`, `.venv`, `venv`, `node_modules`, and `.next` directories.
 - `build.log`, removed last after the successful build output has been printed.
 
-If a build fails, the cleanup phase is skipped so intermediate artifacts and `build.log` remain available for diagnosing the failure. The script
-preserves
-the root `releases/linux` and `releases/windows` executable directories and the generated SDK `api/src/storelimitless/bin/` copies. It does not use the older
-`releases/` or `dist/linux` / `dist/windows` output layout.
+If a build fails, the final cleanup phase is skipped so intermediate artifacts and `build.log` remain available for diagnosing the failure. The script
+preserves release executables and generated SDK binaries. It clears the contents of the release root and SDK binary root at the beginning of a build,
+then recreates the expected platform directories; therefore, existing release outputs are replaced by the results of the selected build run.
 
-Since `frontend/node_modules/` and `frontend/dist/` are removed after a successful build, source-mode startup or the next build reinstalls frontend
-dependencies and regenerates the frontend assets as needed.
+Since the generated frontend assets and dependency directories are removed after a successful build, source-mode startup or the next build reinstalls
+frontend dependencies and regenerates `frontend/dist`. The Next.js dependencies/build output can likewise be recreated from `package-lock.json`.
 
-### Frozen frontend runtime
+### Frontend runtime by build mode
 
-The packaged startup mode differs from development:
-
-- The frontend is served from the bundled `frontend/dist` assets instead of starting Vite.
-- `backend/server/frontend.py` serves the SPA entry point and static assets.
-- `/config.js` emits a runtime script assigning `window.STORELIMITLESS_CONFIG.API_URL`.
-- Runtime data moves to the operating system's StoreLimitless application-data directory.
-- The bundle must include the intended frontend build and required binary/runtime assets.
+- **LOCAL frozen executable:** PyInstaller includes `frontend/dist`; `backend/server/frontend.py` serves the SPA entry point and static assets, and
+  `/config.js` exposes `window.STORELIMITLESS_CONFIG.API_URL` at runtime.
+- **LOCAL source mode:** FastAPI runs alongside the Vite development server on port `5173`. Missing frontend dependencies are installed on startup.
+- **CLOUD executable:** frontend assets are excluded by setting `INCLUDE_FRONTEND=0`. The application points users to the Vercel-hosted website and
+  starts a Cloudflare tunnel only for the API. It must not attempt to serve a missing local `frontend/dist`. The separate Next.js proxy in
+  `backend/storelimitlessbackend/` uses Upstash Redis to route requests to the latest registered tunnel.
 
 Do not hand-edit generated JavaScript/CSS in `frontend/dist`; make changes under `frontend/src/` and rebuild. Packaging is platform-specific, so build
-and
-smoke-test each target on its intended operating system where possible. A successful PyInstaller build alone does not prove that credentials, writable
-directories, Redis, media tools, tunnels, or provider authentication work at runtime.
+and smoke-test each target on its intended operating system where possible. A successful PyInstaller build alone does not prove that credentials,
+writable directories, Redis, media tools, tunnel registration, or provider authentication work at runtime.
 ---
 
 ## Backups and runtime data
@@ -1116,7 +1469,7 @@ This project should be treated as a self-hosted application that requires securi
 
 ### Dashboard folder contents appear stale
 
-- Use the dashboard's **Refresh** control to reload the complete directory tree from the server.
+- Use the dashboard's **Refresh** control to reload the complete directory tree through `GET /auth/tree`.
 - A hard browser reload (F5) also clears the module-level in-memory tree cache and triggers an initial reload.
 - If a completed upload is missing, check its tray/status and server logs; successful jobs normally refresh their destination directory automatically.
 
@@ -1139,6 +1492,10 @@ This project should be treated as a self-hosted application that requires securi
 - When importing several links, use one URL per line. Check each job's separate status in the dashboard tray if one import fails while others
   continue.
 - Inspect the returned upload status and server logs for the background transfer error.
+- If Chrome displays **“Upload N files to this site?”** after choosing a folder, check the address first. The modern `showDirectoryPicker()` API is
+  restricted to secure contexts; an HTTP LAN URL such as `http://192.168.x.x:5173` typically falls back to the legacy `webkitdirectory` input, whose
+  confirmation is browser-controlled. Use HTTPS for the LAN website (or use a browser-supported secure context); JavaScript cannot reliably dismiss
+  the browser's security prompt.
 
 ### Streaming or seeking fails
 
@@ -1175,12 +1532,15 @@ This project should be treated as a self-hosted application that requires securi
 - **New folder/file operation:** the corresponding router in `backend/server/routers/directories.py`, plus model methods as required.
 - **New account behavior:** `backend/server/routers/accounts.py`, `backend/server/jwt_handler.py`, `backend/server/security.py`, and
   `backend/database/models/user.py`.
-- **Browser upload behavior:** `frontend/src/pages/dashboard/components/UploadModal.jsx`, `frontend/src/pages/dashboard/hooks/useUploadJobs.js`,
-  `backend/server/routers/uploads.py`, `backend/server/routers/upload_state.py`, and `core/utils/progress.py`.
+- **Browser upload behavior and cross-device tray synchronization:** `frontend/src/pages/dashboard/components/UploadModal.jsx`,
+  `frontend/src/pages/dashboard/hooks/useUploadJobs.js`, `backend/server/routers/uploads.py`, `backend/server/routers/upload_state.py`,
+  `backend/server/routers/public_routes.py`, and `core/utils/progress.py`. Keep the username-to-job Redis index and ownership checks aligned with the
+  API contract.
 - **New storage provider:** implement the provider interface in a module under `core/utils/`, register it in the `DataCenter` provider factory, add
   its name/configuration, and test upload and download paths.
-- **Dashboard directory data, refresh, and recursive sizes:** `frontend/src/pages/dashboard/hooks/useDashboardData.js`, with corresponding metadata
-  contracts in the directory and account routes.
+- **Dashboard directory data, refresh, and recursive sizes:** `frontend/src/pages/dashboard/hooks/useDashboardData.js` and the authenticated
+  `GET /auth/tree` endpoint in `backend/server/routers/directories.py`. Keep the full-tree response fields (`directories`, `files`, and
+  `storage_used_bytes`) aligned with the hook. Preserve `GET /auth/directory` for targeted updates after local mutations.
 - **Chunk layout or streaming behavior:** `core/data_center.py`, `core/transfer.py`, `core/utils/progress.py`, and `core/stream.py`. Keep upload chunk
   sizing and stream part calculations consistent.
 - **FTP semantics:** `backend/ftp/filesystem/filesystem.py` and its upload/download adapters.
@@ -1196,7 +1556,8 @@ This project should be treated as a self-hosted application that requires securi
 - The `/home` directory is the logical root and must not become an ordinary movable/deletable folder.
 - `File.links` order must match the order of chunks used by the transfer/stream logic.
 - `file.size`, `DataCenter.MAX_SIZE`, and the number of remote links must stay consistent.
-- Upload job status and active session state use different Redis keys; don't remove one without understanding the producer/consumer lifecycle.
+- Upload job metadata, the username-indexed job set, progress state, and active chunk-session state use different Redis keys; keep them consistent and
+  ownership-scoped. Do not assume Redis job records alone can resume process-local background tasks after a runtime restart.
 - Folder move/rename operations must update descendant paths.
 - Public stream tokens and bearer tokens have distinct purposes: bearer tokens authorize account actions; public tokens authorize access to a specific
   file stream/download.
@@ -1212,15 +1573,33 @@ At minimum, test the affected workflow through the same path a user uses:
 3. Create a nested directory and upload a small file.
 4. Check the file metadata and download the file back.
 5. Upload a larger file and seek within streamed media to exercise multiple stored parts and range handling.
-6. Try rename/move/trash/restore using the web UI and verify that the virtual FTP view sees the same state.
-7. Test FTP list/download/upload with a client, including passive mode where remote access is required.
-8. Restart the server and repeat a read to confirm that storage reconstruction does not depend on the disposable cache.
-9. Verify `/` opens the public landing page, `/login` and `/signup` open the corresponding auth modes, and nested `/home/...` routes still work.
-10. Navigate across several nested folders, check a folder's recursive total size, use Refresh, and confirm a hard reload fetches fresh tree data.
-11. Test move destination selection and deselection, including attempts to move a folder into itself or a descendant.
-12. Exercise upload progress, cancellation, failed-job dismissal, and automatic directory synchronization after completion.
-13. Run the frontend lint/build scripts that are actually declared in `frontend/package.json`.
-14. Test the packaged executable separately from development mode.
+6. Submit a test magnet link with reachable peers. Verify peer-search progress, download progress, sequential uploads, and the final file records.
+7. Test a multi-file torrent and confirm its root folder and nested paths are recreated under the selected destination.
+8. Try rename/move/trash/restore using the web UI and verify that the virtual FTP view sees the same state.
+9. Test FTP list/download/upload with a client, including passive mode where remote access is required.
+10. Restart the server and repeat a read to confirm that storage reconstruction does not depend on the disposable cache.
+11. Verify `/` opens the public landing page, `/login` and `/signup` open the corresponding auth modes, and nested `/home/...` routes still work.
+12. Navigate across several nested folders and confirm navigation uses the in-memory tree. Verify an uncached dashboard load, explicit Refresh,
+    and hard reload each fetch the complete account tree through one `GET /auth/tree` request. Confirm the response includes active/trashed
+    directories
+    and files plus `storage_used_bytes`, is scoped to the authenticated account, and omits provider `links` from the full-tree payload. Also verify
+    that
+    local mutations can still refresh only the affected directory through `GET /auth/directory`.
+13. Test move destination selection and deselection, including attempts to move a folder into itself or a descendant.
+14. On a touch device, verify that a quick tap opens an item, a long-press enters selection mode, subsequent taps add/remove selected items,
+    long-pressing
+    empty workspace starts marquee selection, and long-press-and-drag moves items to valid folders/breadcrumbs. Confirm that ordinary finger movement
+    still
+    scrolls the workspace and that cancelled/out-of-bounds gestures do not trigger a move.
+15. On a mobile browser, pull down on the dashboard background while the main scroller is at the very top and confirm the browser's native
+    pull-to-refresh
+    can trigger from the background as well as the header. Repeat after scrolling down and confirm upward finger movement scrolls content normally.
+    Also
+    verify that the dashboard's explicit Refresh button still reloads file/folder data.
+16. Exercise upload progress, cancellation, failure reporting, dismissal, and automatic directory synchronization after completion. Open the same
+    account on a second browser/device and verify that jobs and terminal actions are synchronized through the shared API and Redis instance.
+17. Run the frontend lint/build scripts that are actually declared in `frontend/package.json`.
+18. Test the packaged executable separately from development mode.
 
 Automated tests should be added for range parsing, chunk-count validation, upload-range merging, folder path rewriting, ownership/authorization,
 public-token expiry, and FTP seek behavior.
@@ -1230,17 +1609,38 @@ public-token expiry, and FTP seek behavior.
 ## Known boundaries and verification notes
 
 - The separate SDK source package is not part of the tracked application tree documented here. `build.sh` generates versioned `LOCAL` and `CLOUD`
-  executables under the repository-root `releases/linux` and `releases/windows` directories, and copies only the selected platform's `LOCAL` executable to the SDK's
-  generated `api/src/storelimitless/bin/` directory using the standard `StoreLimitlessServer_<VERSION>` name.
+  executables under the repository-root `releases/linux` and `releases/windows` directories, and copies only the selected platform's `LOCAL`
+  executable to the SDK's
+  generated `Store-Limitless-api` directory using the standard `StoreLimitlessServer_<VERSION>` name.
 - URL imports support YouTube processing, Google Drive links, and direct HTTP (S) download URLs. A syntactically valid HTTP (S) URL is not guaranteed
   to
   be a downloadable file; ordinary HTML pages and sources requiring unavailable authentication can fail.
 - The configured storage backends in the current source are Discord and Telegram; this is not a generic plug-and-play cloud-provider system yet.
 - The FTP server is a virtual filesystem adapter, not a full local filesystem shell. Symbolic links and chmod are unsupported.
-- Cloud mode in the current startup code opens HTTP tunnels for the API and website only. It does not provide public FTP tunneling or passive-port
-  configuration.
+- Cloud mode tunnels the API and uses the separately hosted Vercel frontend; it does not start a public FTP tunnel or configure FTP passive-port
+  ranges. Cross-device upload-tray synchronization also requires all clients to share the same API backend and Redis data store.
 - The database backup helper exports data; a matching tested restore/migration process is not established by the supplied code.
-- The README describes the supplied source and repository tree, including the current landing/authentication routes and dashboard cache, refresh,
-  details, and move-dialog behavior. It is not a claim that every deployment mode or workflow has been integration-tested.
+- The README describes the supplied source and repository tree, including the single-request full-tree endpoint (`GET /auth/tree`), targeted directory
+  refreshes, current landing/authentication routes, dashboard cache/refresh behavior, move dialog, and mobile touch gestures. Gesture descriptions
+  document
+  the current implementation; they do not imply physical-device testing or guarantee identical behavior across all mobile browsers. Not every
+  deployment
+  mode or workflow has been integration-tested.
 
 For licensing terms, see the repository's `LICENSE` file.
+
+### Recent reliability updates
+
+- Torrent selection tasks now expose per-file download progress and per-file sequential upload progress in the upload tray. The selection dialog
+  closes as soon as the first selected torrent job is accepted, while the task continues in the background.
+- Upload concurrency is configured per storage provider through `DataCenter.MAX_PARALLEL_UPLOADS`: the source currently sets Discord to two concurrent
+  part uploads and Telegram to eight. The README value must be kept in sync with the provider class constants.
+- Torrent file-level progress is persisted with the child upload status so the tray can show individual status, byte counts, and progress bars rather
+  than only a batch-level percentage.
+- Streaming storage-chunk reads use a bounded long timeout and retry policy, Discord CDN reads retry incomplete responses without a fixed total-read
+  timeout, and the stream iterator prefetches the next storage part in the background. The stream endpoint continues to support HTTP byte ranges,
+  seeking, HEAD/ETag-assisted downloads, and resumable range transfer.
+- YouTube imports publish separate video download, audio download, merge, and storage-upload stages; the UI normalizes transient URL/ID placeholders
+  so a resolved title can replace the source URL as the display name.
+- Torrent selection uses checkboxes as the source of truth for which files to import. All files start checked by default; keyboard focus highlighting
+  is separate, and the picker isolates arrow-key navigation from the dashboard.

@@ -23,7 +23,7 @@ from core.data_center import DataCenter
 from core.utils.binaries import start_cloudflare_tunnel, start_redis_server
 from core.utils.discord_ import Discord
 from core.utils.telegram_ import Telegram
-from core.utils_ import get_local_ip, stop_process, ensure_frontend_dependencies
+from core.utils_ import get_local_ip, stop_process, ensure_frontend_dependencies, register_vercel_backend_tunnel
 
 
 async def main() -> None:
@@ -33,7 +33,7 @@ async def main() -> None:
     frozen: bool = bool(getattr(sys, "frozen", False))
     frontend_dir: Path | None = None
 
-    if not frozen:
+    if not frozen and HOST != "CLOUD":
         frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
         await to_thread(ensure_frontend_dependencies, cast(Path, frontend_dir))
 
@@ -63,17 +63,31 @@ async def main() -> None:
         if HOST == "CLOUD":
             api_tunnel, api_url = await to_thread(start_cloudflare_tunnel, "http://127.0.0.1:8000", "API")
             cloudflare_processes.append(api_tunnel)
-            website_tunnel, website_url = await to_thread(start_cloudflare_tunnel, "http://127.0.0.1:5173", "Website")
-            cloudflare_processes.append(website_tunnel)
+            website_url = "https://storelimitless.vercel.app"
             environ["STORELIMITLESS_API_URL"] = api_url
             environ["VITE_API_URL"] = api_url
-            app.add_middleware(CORSMiddleware, allow_origins=[website_url], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=[website_url],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+                expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "Content-Disposition", "ETag"],
+            )
 
         elif HOST == "LOCAL":
             api_url = f"http://{ip}:8000"
             website_url = f"http://{ip}:5173"
             environ["STORELIMITLESS_API_URL"] = api_url
             environ["VITE_API_URL"] = api_url
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=[website_url],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+                expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "Content-Disposition", "ETag"],
+            )
 
         else:
             raise ValueError(f"Unsupported HOST configuration: {HOST!r}")
@@ -81,23 +95,27 @@ async def main() -> None:
         server = Server(Config(app, host="0.0.0.0", port=8000, log_level="warning"))
         server_task = create_task(server.serve(), name="storelimitless-api")
 
-        if frozen:
-            frontend_server = Server(Config(frontend_app, host="0.0.0.0", port=5173, log_level="warning"))
-            frontend_task = create_task(frontend_server.serve(), name="storelimitless-frontend")
+        if HOST == "CLOUD":
+            await to_thread(register_vercel_backend_tunnel, api_url)
 
-        else:
-            if frontend_dir is None:
-                raise RuntimeError("Frontend source directory was not initialized.")
+        if HOST == "LOCAL":
+            if frozen:
+                frontend_server = Server(Config(frontend_app, host="0.0.0.0", port=5173, log_level="warning"))
+                frontend_task = create_task(frontend_server.serve(), name="storelimitless-frontend")
 
-            frontend_env: dict[str, str] = environ.copy()
-            frontend_env["VITE_API_URL"] = api_url
-            frontend_process = Popen(
-                ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"],
-                cwd=str(frontend_dir),
-                env=frontend_env,
-                stdout=DEVNULL,
-                stderr=DEVNULL,
-            )
+            else:
+                if frontend_dir is None:
+                    raise RuntimeError("Frontend source directory was not initialized.")
+
+                frontend_env: dict[str, str] = environ.copy()
+                frontend_env["VITE_API_URL"] = api_url
+                frontend_process = Popen(
+                    ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"],
+                    cwd=str(frontend_dir),
+                    env=frontend_env,
+                    stdout=DEVNULL,
+                    stderr=DEVNULL,
+                )
 
         discord_thread.start()
         discord_started = True
@@ -120,10 +138,14 @@ async def main() -> None:
             print("\n" + "=" * 50)
             print("Servers started")
             print("=" * 50)
-            print(f"FastAPI : {api_url}")
-            print(f"Website : {website_url}")
-            print(f"FTP     : ftp://{ip}:2121")
-            print("Redis   : redis://127.0.0.1:6379")
+            print(f"FastAPI   : {api_url}")
+
+            if HOST == "CLOUD":
+                print("Stable API: https://storelimitlessbackend.vercel.app")
+
+            print(f"Website   : {website_url}")
+            print(f"FTP       : ftp://{ip}:2121")
+            print("Redis     : redis://127.0.0.1:6379")
             print("=" * 50 + "\n")
             server_mode: bool = False
 
@@ -141,7 +163,7 @@ async def main() -> None:
                         else:
                             print("Interactive prompt restored.")
 
-                    elif command == "exit":
+                    elif command in {"exit", "stop"}:
                         print("Shutting down StoreLimitless...")
                         break
 

@@ -14,6 +14,8 @@ export default function DashboardWorkspace(props) {
         isTrash,
         selectionSurfaceRef,
         handleSelectionMouseDown,
+        handleTouchBackgroundStart,
+        handleTouchItemStart,
         handleBackgroundContextMenu,
         suppressClickRef,
         clearSelection,
@@ -75,26 +77,14 @@ export default function DashboardWorkspace(props) {
                     />
                 </div>
             </div>
-            <button
-                type="button"
-                onClick={fetchFiles}
-                disabled={loadingFiles}
-                title="Reload all files and folders from the server"
-                aria-label="Refresh files and folders"
-                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[#363636] bg-[#242424] px-2.5 text-xs text-[#b4b4b4] transition-colors hover:border-[#4d4d4d] hover:bg-[#2a2a2a] hover:text-[#fafafa] disabled:cursor-not-allowed disabled:opacity-50 sm:px-3"
-            >
-                <span className={`material-symbols-outlined text-[17px] ${loadingFiles ? "animate-spin" : ""}`} aria-hidden="true">
-                    {loadingFiles ? "progress_activity" : "refresh"}
-                </span>
-                <span className="hidden sm:inline">Refresh</span>
-            </button>
         </header>
 
         {/* Main View Area */}
-        <main className="flex-1 overflow-y-auto bg-[#1c1c1c] px-4 pb-8 pt-20 md:px-8">
+        <main className="dashboard-main-scroll flex-1 overflow-y-auto bg-[#1c1c1c] px-4 pb-8 pt-20 md:px-8">
             <div
                 ref={selectionSurfaceRef}
                 onMouseDown={handleSelectionMouseDown}
+                onTouchStart={handleTouchBackgroundStart}
                 onContextMenu={handleBackgroundContextMenu}
                 onClick={(event) => {
                     // Clicking empty space clears the selection, like the desktop.
@@ -103,7 +93,7 @@ export default function DashboardWorkspace(props) {
                     if (event.target.closest("[data-selection-id], [data-selection-ignore], button, input, textarea, select, a")) return;
                     clearSelection();
                 }}
-                className="relative min-h-full select-none"
+                className="dashboard-selection-surface relative min-h-full select-none"
             >
                 {!isTrash ? (<div
                     className="mb-6 w-full rounded-xl border border-[#343434] bg-gradient-to-r from-[#202020] via-[#1d1d1d] to-[#191919] px-4 py-3.5 shadow-[0_8px_28px_rgba(0,0,0,0.12)] sm:px-5">
@@ -201,6 +191,7 @@ export default function DashboardWorkspace(props) {
                                     key={path}
                                     data-selection-id={itemKey}
                                     onMouseDown={(event) => beginMoveDrag(event, selectionItem)}
+                                    onTouchStart={(event) => handleTouchItemStart(event, selectionItem)}
                                     onDragStart={(event) => event.preventDefault()}
                                     data-drop-path={path}
                                     data-drop-key={folderDropKey}
@@ -307,6 +298,7 @@ export default function DashboardWorkspace(props) {
                                     data-selection-id={itemKey}
                                     draggable={false}
                                     onMouseDown={(event) => beginMoveDrag(event, selectionItem)}
+                                    onTouchStart={(event) => handleTouchItemStart(event, selectionItem)}
                                     onDragStart={(event) => {
                                         event.preventDefault();
                                         event.stopPropagation();

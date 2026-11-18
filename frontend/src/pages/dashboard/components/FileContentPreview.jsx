@@ -609,8 +609,10 @@ function ImageFilePreview({src, fileName, onError}) {
     const viewportRef = useRef(null);
     const pointersRef = useRef(new Map());
     const pinchRef = useRef(null);
+    const dragRef = useRef(null);
     const [loaded, setLoaded] = useState(false);
     const [zoom, setZoom] = useState(1);
+    const [isPanning, setIsPanning] = useState(false);
     const [naturalSize, setNaturalSize] = useState(null);
     const [viewportSize, setViewportSize] = useState({width: 0, height: 0});
 
@@ -620,6 +622,8 @@ function ImageFilePreview({src, fileName, onError}) {
         setNaturalSize(null);
         pointersRef.current.clear();
         pinchRef.current = null;
+        dragRef.current = null;
+        setIsPanning(false);
     }, [src]);
 
     useEffect(() => {
@@ -646,8 +650,34 @@ function ImageFilePreview({src, fileName, onError}) {
         setZoom((current) => clampPreviewZoom(current * factor));
     }, []);
 
+    const beginPan = useCallback((event) => {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        dragRef.current = {
+            pointerId: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+            scrollLeft: viewport.scrollLeft,
+            scrollTop: viewport.scrollTop,
+        };
+        setIsPanning(true);
+    }, []);
+
     const handlePointerDown = useCallback((event) => {
+        if (event.target instanceof Element && event.target.closest("button")) return;
+        if (event.pointerType === "mouse") {
+            if (event.button !== 0 || zoom <= 1) return;
+            event.preventDefault();
+            beginPan(event);
+            try {
+                event.currentTarget.setPointerCapture(event.pointerId);
+            } catch {
+                // Pointer capture is not available in every embedded browser.
+            }
+            return;
+        }
         if (event.pointerType !== "touch") return;
+
         const pointers = pointersRef.current;
         pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
         try {
@@ -655,33 +685,75 @@ function ImageFilePreview({src, fileName, onError}) {
         } catch {
             // Pointer capture is not available in every embedded browser.
         }
-        if (pointers.size === 2) {
+
+        if (pointers.size === 1) {
+            // A one-finger touch drags the image viewport; two fingers switch to pinch zoom.
+            beginPan(event);
+        } else if (pointers.size === 2) {
+            dragRef.current = null;
+            setIsPanning(false);
             const [{x: x1, y: y1}, {x: x2, y: y2}] = Array.from(pointers.values());
             pinchRef.current = {
                 distance: Math.max(1, Math.hypot(x2 - x1, y2 - y1)),
                 zoom,
             };
         }
-    }, [zoom]);
+    }, [beginPan, zoom]);
 
     const handlePointerMove = useCallback((event) => {
-        if (event.pointerType !== "touch") return;
-        const pointers = pointersRef.current;
-        if (!pointers.has(event.pointerId)) return;
-        pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
-        if (pointers.size < 2 || !pinchRef.current) return;
+        const viewport = viewportRef.current;
+        if (!viewport) return;
 
-        const [{x: x1, y: y1}, {x: x2, y: y2}] = Array.from(pointers.values());
-        const distance = Math.max(1, Math.hypot(x2 - x1, y2 - y1));
-        const nextZoom = pinchRef.current.zoom * (distance / pinchRef.current.distance);
-        setZoom(clampPreviewZoom(nextZoom));
+        if (event.pointerType === "touch") {
+            const pointers = pointersRef.current;
+            if (!pointers.has(event.pointerId)) return;
+            pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+
+            if (pointers.size >= 2 && pinchRef.current) {
+                const [{x: x1, y: y1}, {x: x2, y: y2}] = Array.from(pointers.values());
+                const distance = Math.max(1, Math.hypot(x2 - x1, y2 - y1));
+                const nextZoom = pinchRef.current.zoom * (distance / pinchRef.current.distance);
+                setZoom(clampPreviewZoom(nextZoom));
+                return;
+            }
+        }
+
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        if (event.pointerType === "mouse") event.preventDefault();
+        viewport.scrollLeft = drag.scrollLeft - (event.clientX - drag.x);
+        viewport.scrollTop = drag.scrollTop - (event.clientY - drag.y);
     }, []);
 
     const finishPointer = useCallback((event) => {
+        if (event.pointerType === "mouse") {
+            if (dragRef.current?.pointerId === event.pointerId) {
+                dragRef.current = null;
+                setIsPanning(false);
+            }
+            return;
+        }
         if (event.pointerType !== "touch") return;
+
         const pointers = pointersRef.current;
         pointers.delete(event.pointerId);
-        if (pointers.size < 2) pinchRef.current = null;
+        pinchRef.current = null;
+
+        if (pointers.size === 1) {
+            const [pointerId, point] = Array.from(pointers.entries())[0];
+            const viewport = viewportRef.current;
+            dragRef.current = viewport ? {
+                pointerId,
+                x: point.x,
+                y: point.y,
+                scrollLeft: viewport.scrollLeft,
+                scrollTop: viewport.scrollTop,
+            } : null;
+            setIsPanning(Boolean(dragRef.current));
+        } else {
+            dragRef.current = null;
+            setIsPanning(false);
+        }
     }, []);
 
     const fitScale = naturalSize && viewportSize.width > 0 && viewportSize.height > 0
@@ -696,13 +768,13 @@ function ImageFilePreview({src, fileName, onError}) {
 
     return <div
         ref={viewportRef}
-        className="relative flex h-full min-h-0 w-full overflow-auto bg-[#0d100e]"
+        className={`relative flex h-full min-h-0 w-full overflow-auto bg-[#0d100e] ${isPanning ? "cursor-grabbing" : zoom > 1 ? "cursor-grab" : "cursor-default"}`}
         onWheel={handleWheel}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={finishPointer}
         onPointerCancel={finishPointer}
-        style={{touchAction: "pan-x pan-y", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch"}}
+        style={{touchAction: "none", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch"}}
         aria-label="Image viewer. Scroll to zoom, or pinch on a touch screen."
     >
         <div className="flex h-max min-h-full w-max min-w-full items-center justify-center p-3 sm:p-6">

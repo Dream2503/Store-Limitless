@@ -580,11 +580,12 @@ export default function DashboardPage() {
          * @returns {void}
          */
         const onKeyDown = (event) => {
+            if (detailsSelection || detailsTarget) return;
             if (event.key === "Escape") setSidebarOpen(false);
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
-    }, [sidebarOpen]);
+    }, [detailsSelection, detailsTarget, sidebarOpen]);
 
     /* ----------------------------- download ------------------------------ */
 
@@ -2476,7 +2477,7 @@ export default function DashboardPage() {
          * @returns {void}
          */
         const onKeyDown = (event) => {
-            if (showUploadModal || moveDialogItems) return;
+            if (showUploadModal || moveDialogItems || detailsSelection || detailsTarget) return;
             if (contextMenu && event.key === "Escape") {
                 event.preventDefault();
                 setContextMenu(null);
@@ -2673,7 +2674,7 @@ export default function DashboardPage() {
 
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
-    }, [activeTab, bulkActionLoading, cancelBulkConfirmation, confirmAction, confirmFocus, contextMenu, currentFolder, moveDialogItems, navigate, renameTarget, searchQuery, selectableItems, selectedItems, showUploadModal]);
+    }, [activeTab, bulkActionLoading, cancelBulkConfirmation, confirmAction, confirmFocus, contextMenu, currentFolder, detailsSelection, detailsTarget, moveDialogItems, navigate, renameTarget, searchQuery, selectableItems, selectedItems, showUploadModal]);
 
     const breadcrumbSegments = useMemo(() => {
         // Keep the internal folder paths for navigation, but show `home` as the top-level location label.
@@ -3023,7 +3024,29 @@ function MultiSelectionDetailsModal({items, onClose}) {
     const selected = Array.isArray(items) ? items : [];
     const files = selected.filter((item) => item.type === "file");
     const folders = selected.filter((item) => item.type === "folder");
-    const knownBytes = files.reduce((sum, item) => sum + Math.max(0, Number(item.size ?? item.object?.size) || 0), 0);
+    const getFolderPath = (item) => String(item.path ?? item.object?.path ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+    const selectedFolderPaths = folders.map(getFolderPath).filter(Boolean);
+    const topLevelFolders = folders.filter((item) => {
+        const path = getFolderPath(item);
+        return path && !selectedFolderPaths.some((parentPath) => parentPath !== path && path.startsWith(`${parentPath}/`));
+    });
+    const getFolderBytes = (item) => {
+        const rawSize = item.size ?? item.object?.total_size_bytes ?? item.object?.totalSizeBytes ?? item.object?.size_bytes;
+        const bytes = Number(rawSize);
+        return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+    };
+    const getFileBytes = (item) => {
+        const bytes = Number(item.size ?? item.object?.size_bytes ?? item.object?.file_size_bytes ?? item.object?.size ?? item.object?.file_size ?? 0);
+        return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+    };
+    const fileIsInsideSelectedFolder = (item) => {
+        const directory = String(item.directory ?? item.object?.directory ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+        return selectedFolderPaths.some((folderPath) => directory === folderPath || directory.startsWith(`${folderPath}/`));
+    };
+    // Folder sizes are already calculated from the complete dashboard tree. Only add
+    // top-level selected folders, and do not add explicitly selected files inside them.
+    const knownBytes = topLevelFolders.reduce((sum, item) => sum + (getFolderBytes(item) ?? 0), 0)
+        + files.filter((item) => !fileIsInsideSelectedFolder(item)).reduce((sum, item) => sum + getFileBytes(item), 0);
     const formatBytes = (bytes) => {
         if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
         const units = ["B", "KB", "MB", "GB", "TB", "PB"];
@@ -3031,6 +3054,20 @@ function MultiSelectionDetailsModal({items, onClose}) {
         return `${(bytes / (1024 ** unit)).toLocaleString(undefined, {maximumFractionDigits: 2})} ${units[unit]}`;
     };
     const uniqueTypes = [...new Set(files.map((item) => String(item.name || "").split(".").pop().toLowerCase()).filter(Boolean))];
+
+    // Focus does not always enter a newly opened modal. Listen at window level so
+    // Escape closes this dialog regardless of focus, without clearing dashboard selection.
+    useEffect(() => {
+        const handleModalKeyDown = (event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            onClose();
+        };
+        window.addEventListener("keydown", handleModalKeyDown);
+        return () => window.removeEventListener("keydown", handleModalKeyDown);
+    }, [onClose]);
+
     return <div className="fixed inset-0 z-[310] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
     }}>
@@ -3050,7 +3087,7 @@ function MultiSelectionDetailsModal({items, onClose}) {
                     <p className="mt-1 text-xs text-[#8ca296]">Shared information for the selected items</p>
                 </div>
                 <button type="button" onClick={onClose} aria-label="Close details"
-                        className="flex h-8 w-8 items-center justify-center rounded-lg text-[#9bbba7] transition-colors hover:bg-white/5 hover:text-white">
+                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#7a3038] bg-[#3a171b] text-[#ff8b91] transition-colors hover:bg-[#70232b] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#ff6369]">
                     <span className="material-symbols-outlined text-[18px]">close</span></button>
             </header>
             <div className="space-y-3 p-5">
@@ -3062,8 +3099,7 @@ function MultiSelectionDetailsModal({items, onClose}) {
                     <div className="col-span-2 rounded-lg border border-[#293b30] bg-[#0c110e] p-3"><p className="text-xs text-[#8ca296]">Known total
                         file size</p><p
                         className="mt-1 text-xl font-semibold tabular-nums text-[#3ecf8e]">{formatBytes(knownBytes)}</p>{folders.length > 0 &&
-                        <p className="mt-1 text-[11px] leading-relaxed text-[#718477]">Folder contents are not included in this total unless their
-                            sizes are provided by the current listing.</p>}</div>
+                        <p className="mt-1 text-[11px] leading-relaxed text-[#718477]">Includes known sizes throughout selected folders. Nested selections and files inside selected folders are counted only once.</p>}</div>
                     <div className="rounded-lg border border-[#293b30] bg-[#0c110e] p-3"><p className="text-xs text-[#8ca296]">File types</p><p
                         className="mt-1 break-words text-sm text-[#dce9e0]">{uniqueTypes.length ? uniqueTypes.map((type) => `.${type}`).join(", ") : "None"}</p>
                     </div>
@@ -3076,13 +3112,15 @@ function MultiSelectionDetailsModal({items, onClose}) {
                         <span className="material-symbols-outlined text-[16px] text-[#3ecf8e]">{item.type === "folder" ? "folder" : "draft"}</span>
                         <span className="min-w-0 flex-1 truncate text-xs text-[#c6d2ca]" title={item.name}>{item.name}</span>
                         {item.type === "file" && <span
-                            className="shrink-0 text-[11px] tabular-nums text-[#8ca296]">{formatBytes(Math.max(0, Number(item.size ?? item.object?.size) || 0))}</span>}
+                            className="shrink-0 text-[11px] tabular-nums text-[#8ca296]">{formatBytes(getFileBytes(item))}</span>}
+                        {item.type === "folder" && <span
+                            className="shrink-0 text-[11px] tabular-nums text-[#8ca296]">{getFolderBytes(item) === null ? "Unknown" : formatBytes(getFolderBytes(item))}</span>}
                     </div>)}
                 </div>
             </div>
             <footer className="flex justify-end border-t border-[#29362e] px-5 py-3">
                 <button type="button" onClick={onClose}
-                        className="rounded-lg border border-[#35443a] bg-[#18211b] px-4 py-2 text-sm font-medium text-[#dce9e0] transition-colors hover:bg-[#232f27]">Close
+                        className="rounded-lg border border-[#7a3038] bg-[#5b1e24] px-4 py-2 text-sm font-medium text-[#ffecef] transition-colors hover:bg-[#7b252d] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#ff6369]">Close
                 </button>
             </footer>
         </section>

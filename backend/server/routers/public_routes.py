@@ -81,21 +81,17 @@ def _file_etag(file: File) -> str:
 
 
 def _public_cors_headers(request: Request) -> dict[str, str]:
-    """Attach browser CORS headers directly to public media responses.
+    """Attach CORS headers to public token-authorized media responses.
 
-    Media URLs are redirected by the stable Vercel proxy to the active Cloudflare
-    tunnel. The final response must carry CORS headers too; headers on the redirect
-    response alone do not authorize the browser to read the redirected byte ranges.
+    Fetch requests can become redirect-tainted when the stable Vercel API host
+    redirects to the active Cloudflare tunnel. Browsers may then send Origin: null
+    to the final host, so matching only the frontend origin omits the CORS header.
+    These routes are authorized by their signed token rather than browser cookies,
+    so wildcard CORS is safe and keeps direct byte-range streaming available.
     """
 
-    origin: str | None = request.headers.get("origin")
-
-    if origin != "https://storelimitless.vercel.app":
-        return {}
-
     return {
-        "Access-Control-Allow-Origin": origin,
-        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
         "Access-Control-Allow-Headers": "Authorization, Content-Type, Range, If-Range, If-None-Match, If-Modified-Since, Accept, Origin, X-Requested-With",
         "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length, Content-Disposition, ETag",
@@ -144,7 +140,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
         return Response(status_code=416, headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes", "ETag": etag, **cors_headers})
 
     except OSError as error:
-        raise HTTPException(status_code=502, detail=f"File storage metadata failure: {error}") from error
+        raise HTTPException(status_code=502, detail=f"File storage metadata failure: {error}", headers=cors_headers) from error
 
     size = max(0, int(file.size))
     etag = _file_etag(file)
@@ -181,28 +177,28 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
     return StreamingResponse(stream.stream(), status_code=206 if partial else 200, headers=headers, media_type=content_type)
 
 
-async def _owned_public_file(token: str) -> File:
+async def _owned_public_file(token: str, request: Request) -> File:
     """Resolve a signed token to its original owner's file record."""
 
     try:
         payload: dict[str, str | int] = verify_public_stream_token(token)
 
     except ValueError as error:
-        raise HTTPException(status_code=404, detail="Invalid public download link") from error
+        raise HTTPException(status_code=404, detail="Invalid public download link", headers=_public_cors_headers(request)) from error
 
     file = await File.get(cast(str, payload["username"]), fid=int(payload["file_id"]))
 
     if file is None or file.username != payload["username"]:
-        raise HTTPException(status_code=404, detail="File not found")
+        raise HTTPException(status_code=404, detail="File not found", headers=_public_cors_headers(request))
 
     return file
 
 
 @router.get("/metadata/{token}")
-async def public_file_metadata(token: str) -> JSONResponse:
+async def public_file_metadata(token: str, request: Request) -> JSONResponse:
     """Return only the metadata needed to render a public file view page."""
 
-    file = await _owned_public_file(token)
+    file = await _owned_public_file(token, request)
     return JSONResponse({
         "id": file.id,
         "name": file.name,
@@ -215,7 +211,7 @@ async def public_file_metadata(token: str) -> JSONResponse:
 async def public_stream(token: str, request: Request) -> Response:
     """Stream a file with single-range and validator support for seeking/resuming."""
 
-    file = await _owned_public_file(token)
+    file = await _owned_public_file(token, request)
     return await _file_response(file, request, attachment=False)
 
 
@@ -223,7 +219,7 @@ async def public_stream(token: str, request: Request) -> Response:
 async def public_download(token: str, request: Request) -> Response:
     """Download an attachment with byte ranges, validators, and resumable transfers."""
 
-    file = await _owned_public_file(token)
+    file = await _owned_public_file(token, request)
     return await _file_response(file, request, attachment=True)
 
 
@@ -231,7 +227,7 @@ async def public_download(token: str, request: Request) -> Response:
 async def public_download_head(token: str, request: Request) -> Response:
     """Expose file length and range validators for download managers before transfer."""
 
-    file = await _owned_public_file(token)
+    file = await _owned_public_file(token, request)
     return await _file_response(file, request, attachment=True, head_only=True)
 
 
@@ -265,7 +261,7 @@ async def public_zip_download(
     try:
         payload = verify_public_zip_token(token)
     except ValueError as error:
-        raise HTTPException(status_code=404, detail="Invalid or expired ZIP download link") from error
+        raise HTTPException(status_code=404, detail="Invalid or expired ZIP download link", headers=_public_cors_headers(request)) from error
 
     username = cast(str, payload["username"])
     file_ids = cast(list[int], payload["file_ids"])
@@ -273,7 +269,7 @@ async def public_zip_download(
     for file_id in file_ids:
         file = await File.get(username, fid=file_id)
         if file is None or file.username != username:
-            raise HTTPException(status_code=404, detail="One or more selected files are no longer available")
+            raise HTTPException(status_code=404, detail="One or more selected files are no longer available", headers=_public_cors_headers(request))
         files.append(file)
 
     # Start the HTTP response before contacting remote storage. Stream.prepare() verifies

@@ -192,10 +192,10 @@ function TransferDetails({transfer, total, status, compact = false, inline = fal
     const transferLabel = status === "downloading" ? "Downloaded" : "Transferred";
     const done = status === "completed" || num(transfer) >= num(total);
     const layoutClass = inline
-        ? "min-w-0 flex-nowrap gap-x-1.5 whitespace-nowrap text-[9px] leading-tight"
+        ? "min-w-0 flex-nowrap gap-x-1.5 whitespace-nowrap text-[11px] leading-snug"
         : compact
-            ? "ml-[23px] mt-1 flex-wrap gap-x-2 gap-y-0.5 text-[9px]"
-            : "mt-1 flex-wrap gap-x-2 gap-y-0.5 text-[10px]";
+            ? "ml-[23px] mt-1 flex-wrap gap-x-2 gap-y-1 text-[11px]"
+            : "mt-1 flex-wrap gap-x-2 gap-y-1 text-[12px]";
 
     return <div className={`flex min-w-0 items-center font-mono tabular-nums text-[#789083] ${layoutClass}`}>
         <span>{transferLabel} {formatFileSize(Math.min(num(transfer), num(total)))} / {formatFileSize(total)}</span>
@@ -217,18 +217,18 @@ function ItemRow({item, status, metricKey}) {
     const {speed, eta} = useTransferMetrics(transfer, size, metricKey || `item:${normalizePath(item?.path || name)}`);
     const showPercent = meta.transferring && size > 0;
 
-    return <div className="min-w-0 rounded-md px-2 py-1.5 transition-colors hover:bg-white/[0.03]">
+    return <div className="min-w-0 rounded-md px-2 py-2 transition-colors hover:bg-white/[0.03]">
         <div className="flex min-w-0 items-center gap-2">
             <Icon name={meta.icon}
-                  className={`text-[15px] ${meta.tone === "muted" ? "text-[#5f7567]" : meta.tone === "danger" ? TEXT.danger : TEXT.success}`}/>
-            <span className="min-w-0 flex-1 truncate text-[11px] text-[#c6d2ca]" title={name}>{name}</span>
-            <span className={`shrink-0 text-[10px] tabular-nums ${TEXT[meta.tone]}`}>{meta.label}</span>
+                  className={`text-[17px] ${meta.tone === "muted" ? "text-[#5f7567]" : meta.tone === "danger" ? TEXT.danger : TEXT.success}`}/>
+            <span className="min-w-0 flex-1 truncate text-[13px] text-[#d5e0d9]" title={name}>{name}</span>
+            <span className={`shrink-0 text-[12px] tabular-nums ${TEXT[meta.tone]}`}>{meta.label}</span>
         </div>
         {showPercent && <div className="ml-[23px] mt-1.5 min-w-0 space-y-1">
             <ProgressBar percent={percent}/>
             <div className="flex min-w-0 items-center justify-between gap-2">
                 <TransferDetails transfer={transfer} total={size} status={status} inline speed={speed} eta={eta}/>
-                <span className="shrink-0 text-[9px] font-mono tabular-nums text-[#789083]">{percent.toFixed(0)}%</span>
+                <span className="shrink-0 text-[11px] font-mono tabular-nums text-[#8ca296]">{percent.toFixed(0)}%</span>
             </div>
         </div>}
     </div>;
@@ -261,14 +261,14 @@ function TorrentLinkPanel({torrent, items, parentStatus, index}) {
 
     return <section className="min-w-0 overflow-hidden rounded-lg border border-[#293b30] bg-black/10">
         <header className="flex min-w-0 items-start gap-2.5 bg-[#151d18]/70 px-3 py-2.5">
-            <Icon name="folder_zip" className="mt-0.5 text-[16px] text-[#3ecf8e]"/>
+            <Icon name="folder_zip" className="mt-0.5 text-[18px] text-[#3ecf8e]"/>
             <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-medium text-[#dce9e0]" title={title}>{title}</p>
-                <p className={`mt-0.5 text-[11px] ${statusTone}`} title={String(torrent?.link || "")}>
+                <p className="truncate text-sm font-medium text-[#e8f0eb]" title={title}>{title}</p>
+                <p className={`mt-0.5 text-[13px] ${statusTone}`} title={String(torrent?.link || "")}>
                     {status}{selectedCount ? `, ${downloadedCount} of ${selectedCount} files downloaded` : ""}
                 </p>
             </div>
-            {selectedCount > 0 && <span className="shrink-0 font-mono text-[11px] tabular-nums text-[#718477]">{percent.toFixed(0)}%</span>}
+            {selectedCount > 0 && <span className="shrink-0 font-mono text-[13px] tabular-nums text-[#8ca296]">{percent.toFixed(0)}%</span>}
         </header>
         {selectedCount > 0 && <ProgressBar percent={percent} className="rounded-none"/>}
         <div className="space-y-0.5 p-1.5">
@@ -276,7 +276,7 @@ function TorrentLinkPanel({torrent, items, parentStatus, index}) {
                                                             item={file}
                                                             metricKey={`torrent:${torrent?.link || title}:${file.file_index ?? file.index ?? i}`}
                                                             status={String(file.status || (selectedCount ? "queued" : "available"))}/>) :
-                <p className="px-2 py-2 text-[11px] text-[#718477]">Waiting for torrent file selection.</p>}
+                <p className="px-2 py-2 text-[12px] text-[#8ca296]">Waiting for torrent file selection.</p>}
         </div>
     </section>;
 }
@@ -693,12 +693,12 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
             <Icon name={icon} className={`mt-0.5 text-[19px] ${iconTone}`}/>
 
             <div className="min-w-0 flex-1">
-                <p className="truncate text-[13px] font-medium text-[#e8f0eb]" title={title}>{title}</p>
-                <p className={`mt-0.5 text-[11px] ${statusTone}`}
+                <p className="truncate text-[15px] font-medium text-[#f3f7f4]" title={title}>{title}</p>
+                <p className={`mt-0.5 text-[13px] ${statusTone}`}
                    title={job.message}>{torrents.length > 1 && job.status === "queued" ? "Multiple-link imports are disabled. Submit one link per task." : statusText}</p>
 
                 {hasPicker && <button type="button" onClick={() => onSelectFiles(job)}
-                                      className="mt-2 rounded-md border border-[#2e8058] bg-[#173c29] px-2.5 py-1.5 text-[11px] font-medium text-[#9be8bd] transition-colors hover:bg-[#205538]">
+                                      className="mt-2 rounded-md border border-[#2e8058] bg-[#173c29] px-2.5 py-1.5 text-[12px] font-medium text-[#b0f0ca] transition-colors hover:bg-[#205538]">
                     Select files and start
                 </button>}
 
@@ -708,7 +708,7 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
                         {!isQueued && <TransferDetails transfer={transfer} total={total}
                                                        status={job.status === "completed" ? "completed" : (/download/i.test(String(job.message || "")) ? "downloading" : "uploading")}
                                                        inline speed={speed} eta={eta}/>}
-                        <span className="shrink-0 text-right font-mono text-[10px] tabular-nums text-[#718477]">
+                        <span className="shrink-0 text-right font-mono text-[12px] tabular-nums text-[#8ca296]">
                             {isQueued ? "Waiting" : `${percent.toFixed(1)}%`}
                         </span>
                     </div>
@@ -889,9 +889,9 @@ export default function UploadJobsTray({
                 <header className="flex items-center justify-between gap-3 border-b border-[#29362e] bg-[#151d18] px-4 py-3">
                     <div className="flex min-w-0 items-center gap-2.5">
                         <Icon name="checklist" className="text-[19px] text-[#3ecf8e]"/>
-                        <h2 className="text-sm font-medium text-[#e8f0eb]">Task tray</h2>
+                        <h2 className="text-base font-medium text-[#f3f7f4]">Task tray</h2>
                         {activeCount > 0 &&
-                            <span className="rounded-full border border-[#2b4938] bg-[#1c2c22] px-2 py-0.5 text-[11px] tabular-nums text-[#9bbba7]">
+                            <span className="rounded-full border border-[#2b4938] bg-[#1c2c22] px-2 py-0.5 text-[12px] tabular-nums text-[#b0c8b9]">
                                 {activeCount} active
                             </span>}
                     </div>
@@ -925,7 +925,7 @@ export default function UploadJobsTray({
                             <Icon name={minimized ? "expand_less" : "minimize"} className="text-[17px]"/>
                         </button>
                         <button type="button" onClick={() => clearAllUploadJobs?.()}
-                                className="rounded-md px-2 py-1 text-[11px] text-[#9bbba7] transition-colors hover:bg-white/5 hover:text-[#f3f7f4]"
+                                className="rounded-md px-2 py-1 text-[12px] text-[#b0c8b9] transition-colors hover:bg-white/5 hover:text-[#f3f7f4]"
                                 title="Cancel active uploads and clear upload history">
                             Clear uploads
                         </button>

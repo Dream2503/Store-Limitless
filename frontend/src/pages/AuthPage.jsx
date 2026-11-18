@@ -10,6 +10,8 @@ export default function AuthPage() {
     const [message, setMessage] = useState("");
     const [loading, setLoading] = useState(false);
 
+    const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+
     const handleChange = (e) => {
         setFormData((prev) => ({...prev, [e.target.name]: e.target.value}));
     };
@@ -19,13 +21,20 @@ export default function AuthPage() {
         setMessage("");
         setLoading(true);
         try {
-            const endpoint = isLogin ? "http://127.0.0.1:8000/auth/login" : "http://127.0.0.1:8000/auth/register";
-            const bodyData = isLogin ? {username: formData.username, password: formData.password} : {...formData};
+            const endpoint = isLogin
+                ? `${API_URL}/auth/login?username=${encodeURIComponent(formData.username)}&password=${encodeURIComponent(formData.password)}`
+                : `${API_URL}/auth/register`;
+
+            const bodyData = isLogin ? undefined : {...formData};
+
             const response = await fetch(endpoint, {
-                method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(bodyData),
+                method: "POST", headers: {"Content-Type": "application/json"},
+                ...(bodyData ? {body: JSON.stringify(bodyData)} : {}),
             });
+
             const data = await response.json();
             if (!response.ok) throw new Error(data.detail || "Something went wrong");
+
             if (isLogin) {
                 localStorage.setItem("token", data.access_token);
                 navigate("/dashboard");

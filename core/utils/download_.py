@@ -10,7 +10,7 @@ import requests
 from yt_dlp import YoutubeDL
 
 import core.transfer
-from backend.database import File
+from backend.database.models import File
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter
 from core.utils import Progress, upload_growing_file, write_log, GOOGLE_API_KEY

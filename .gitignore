@@ -9,5 +9,4 @@ frontend/node_modules
 .python-version
 transfer
 *.pyc
-backend/database/database.db
 telegram_bot.session

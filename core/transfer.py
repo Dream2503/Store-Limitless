@@ -4,7 +4,7 @@ from traceback import format_exc
 from typing import AsyncGenerator, Callable, cast
 from urllib.parse import urlparse, ParseResult
 
-from backend.database import File, add_file, get_user, User
+from backend.database.models import File, User
 from core.data_center import DataCenter
 from core.utils import write_log, Progress, upload_growing_file
 
@@ -22,7 +22,7 @@ async def file_upload(file: File, file_path: Path, upload_task: Task[None] | Non
             yield progress_value
 
         if not intermediate:
-            add_file(file)
+            file.save()
             write_log("INFO", data_center, "UPLOAD", file.username, f"Upload complete `{file_path.name}`")
 
         file_path.unlink(missing_ok=True)
@@ -33,7 +33,8 @@ async def file_upload(file: File, file_path: Path, upload_task: Task[None] | Non
 
 async def link_upload(file: File, link: str) -> AsyncGenerator[Progress, None]:
     from core.utils.download_ import download_google_drive, download_youtube
-    user: User = cast(User, get_user(username=file.username))
+
+    user: User = cast(User, User.get(file.username))
     data_center: DataCenter = DataCenter(file.data_center)
     write_log("INFO", data_center, "DOWNLOAD", user.username, f"Got link: {link}")
 
@@ -54,7 +55,7 @@ async def link_upload(file: File, link: str) -> AsyncGenerator[Progress, None]:
         async for progress in downloader(file, link):
             yield progress
 
-        add_file(file)
+        file.save()
         write_log("INFO", data_center, "DOWNLOAD", user.username, f"Download and upload complete `{file.name}`")
 
     except Exception as e:

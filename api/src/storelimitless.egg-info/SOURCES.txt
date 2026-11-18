@@ -1,0 +1,12 @@
+pyproject.toml
+src/storelimitless.egg-info/PKG-INFO
+src/storelimitless.egg-info/SOURCES.txt
+src/storelimitless.egg-info/dependency_links.txt
+src/storelimitless.egg-info/requires.txt
+src/storelimitless.egg-info/top_level.txt
+src/storelimtless/__init__.py
+src/storelimtless/auth.py
+src/storelimtless/client.py
+src/storelimtless/directory.py
+src/storelimtless/exception.py
+src/storelimtless/file.py

@@ -1,59 +1,46 @@
-from datetime import datetime, timezone
+from typing import Literal
+from urllib.parse import ParseResult, urlparse
 
 from fastapi import HTTPException
-from pydantic import BaseModel
 
-from backend.database import get_files, add_file, File
+from core.config import POSSIBLE_DATACENTERS, UPLOAD_JOBS
 
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-
-class CreateFolderRequest(BaseModel):
-    directory: str
+ValueType = Literal[
+    "datacenter",
+    "directory",
+    "file_name",
+    "job_id",
+    "link",
+]
 
 
-class LinkDownloadRequest(BaseModel):
-    link: str
-    data_center: str
-    directory: str = ""
+def perform_validation(value: str, value_type: ValueType) -> str:
+    value = value.strip()
 
+    match value_type:
+        case "datacenter":
+            if value not in POSSIBLE_DATACENTERS:
+                raise HTTPException(status_code=400, detail="Invalid data center")
 
-def validate_directory_path(directory: str) -> str:
-    directory = directory.strip().strip("/")
+        case "directory":
+            value = "/" + value.strip("/") if value.strip("/") else "/"
+            parts: list[str] = value.split("/")[1:]
 
-    if not directory:
-        return directory
+            if any(not part or part in {".", ".."} or "\\" in part for part in parts):
+                raise HTTPException(status_code=400, detail="Invalid directory")
 
-    for segment in directory.split("/"):
-        if not segment or segment in {".", ".."} or "\\" in segment:
-            raise HTTPException(status_code=400, detail="Invalid folder name")
+        case "file_name":
+            if not value or value in {".", ".."} or "/" in value or "\\" in value:
+                raise HTTPException(status_code=400, detail="Invalid file name")
 
-    return directory
+        case "job_id":
+            if not value or value not in UPLOAD_JOBS:
+                raise HTTPException(status_code=404, detail="Upload job not found")
 
+        case "link":
+            parsed: ParseResult = urlparse(value)
 
-def ensure_folder_chain(username: str, directory: str) -> None:
-    if not directory:
-        return
+            if not value or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise HTTPException(status_code=400, detail="Invalid link")
 
-    segments: list[str] = directory.split("/")
-    existing: set[str] = {f.directory for f in (get_files(username=username) or []) if f.name == ".__folder__"}
-    path_so_far: str = ""
-
-    for segment in segments:
-        path_so_far = f"{path_so_far}/{segment}" if path_so_far else segment
-
-        if path_so_far not in existing:
-            add_file(File(
-                directory=path_so_far,
-                name=".__folder__",
-                type="folder",
-                size=0,
-                modified_at=datetime.now(timezone.utc),
-                links=[],
-                data_center="",
-                username=username)
-            )
-            existing.add(path_so_far)
+    return value

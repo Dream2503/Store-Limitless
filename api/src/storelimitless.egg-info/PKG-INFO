@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: storelimitless
+Version: 0.1.0
+Summary: Python SDK for StoreLimitless
+Requires-Python: >=3.10
+Requires-Dist: requests
+Requires-Dist: tqdm

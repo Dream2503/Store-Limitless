@@ -22,12 +22,17 @@ TRANSFER_PATH: Path = BASE_DIR / "transfer"
 load_dotenv()
 
 # Application constants
-SUPPORTED_DOMAIN: tuple[str, ...] = (
+POSSIBLE_DATACENTERS: frozenset[str] = frozenset({
+    "Discord",
+    "GitHub",
+    "Telegram",
+})
+SUPPORTED_DOMAINS: frozenset[str] = frozenset({
     "drive.google.com",
     "youtube.com",
     "youtu.be",
     "m.youtube.com",
-)
+})
 
 # Runtime state
 UPLOAD_JOBS: dict[str, Progress] = {}

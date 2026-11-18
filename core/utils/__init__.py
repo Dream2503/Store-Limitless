@@ -6,11 +6,11 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, AsyncGenerator, TYPE_CHECKING
 
-from core.config import LOG_HANDLER, TRANSFER_PATH, LOCK
+from core.config import LOG_HANDLER, LOCK
 
 if TYPE_CHECKING:
     from core.data_center import DataCenter
-    from backend.database import File
+    from backend.database.models.file import File
 
 
 def getenv(key: str) -> str:
@@ -30,15 +30,6 @@ def write_log(level: str, data_center: type[DataCenter] | DataCenter, func: str,
     with LOCK:
         LOG_HANDLER.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{data_center.NAME}] [{level}] [{func}] [{user}] {message}\n")
         LOG_HANDLER.flush()
-
-
-def get_transfer_path(username: str, directory: str, filename: str) -> Path:
-    path: Path = TRANSFER_PATH / username
-
-    if directory:
-        path = path / directory
-
-    return path / filename
 
 
 class Progress:

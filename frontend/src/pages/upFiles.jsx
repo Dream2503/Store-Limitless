@@ -1,6 +1,8 @@
 import {useState} from "react";
 import {useNavigate, useSearchParams} from "react-router-dom";
 
+const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+
 const DATA_CENTERS = ["Discord", "Telegram"];
 
 const formatBytes = (bytes) => {
@@ -23,7 +25,7 @@ export default function UploadPage() {
     const [searchParams] = useSearchParams();
 
     // Current directory from dashboard
-    const directory = searchParams.get("directory") || "";
+    const directory = searchParams.get("directory") || "/home";
 
     // Upload states
     const [file, setFile] = useState(null);
@@ -43,7 +45,7 @@ export default function UploadPage() {
         return new Promise((resolve, reject) => {
             const poll = setInterval(async () => {
                 try {
-                    const statusRes = await fetch(`http://127.0.0.1:8000/auth/upload/${jobId}/status`, {
+                    const statusRes = await fetch(`${API_URL}/auth/upload/${jobId}/status`, {
                         headers: {
                             Authorization: `Bearer ${localStorage.getItem("token")}`
                         }
@@ -103,22 +105,20 @@ export default function UploadPage() {
             let res;
 
             if (uploadMode === "file") {
-                res = await fetch("http://127.0.0.1:8000/auth/upload", {
+                res = await fetch(`${API_URL}/auth/upload`, {
                     method: "POST", headers: {
                         Authorization: `Bearer ${localStorage.getItem("token")}`,
                         "Content-Type": file.type || "application/octet-stream",
                         "X-File-Name": file.name,
                         "X-Data-Center": dataCenter,
-                        "X-Directory": directory,
+                        "directory": directory,
                     }, body: file,
                 });
             } else {
-                res = await fetch("http://127.0.0.1:8000/auth/upload-link", {
+                res = await fetch(`${API_URL}/auth/upload-link?link=${encodeURIComponent(link.trim())}&data_center=${encodeURIComponent(dataCenter)}&directory=${encodeURIComponent(directory)}`, {
                     method: "POST", headers: {
-                        Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json",
-                    }, body: JSON.stringify({
-                        link: link.trim(), data_center: dataCenter, directory: directory,
-                    }),
+                        Authorization: `Bearer ${localStorage.getItem("token")}`,
+                    },
                 });
             }
 
@@ -145,7 +145,7 @@ export default function UploadPage() {
             setStatus("done");
 
             setTimeout(() => {
-                if (directory) {
+                if (directory !== "/home") {
                     navigate(`/dashboard?directory=${encodeURIComponent(directory)}`);
                 } else {
                     navigate("/dashboard");

@@ -24,7 +24,7 @@ from backend.server.security import resolve_public_share_id, verify_public_strea
 from backend.server.utils import perform_validation
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter, Database
-from core.transfer import link_upload
+from core.transfer import file_upload, link_upload
 from core.utils.telegram_link import resolve_telegram_message_link
 from core.utils import get_file_mime_type, sanitize_sensitive_urls, write_log
 from core.utils.download_utils import preview_torrent_files
@@ -82,6 +82,181 @@ def _storelimitless_share_token(raw_link: str) -> str | None:
         return unquote(segments[2])
 
     return None
+
+
+@router.post("/file/{fid}/copy")
+async def copy_file_to_directory(
+    fid: int,
+    payload: dict[str, object] = Body(...),
+    user: User = Depends(get_current_user),
+) -> JSONResponse:
+    """Copy a file to an owned directory, sharing links or transferring between providers."""
+    source = await File.get(user.username, fid=fid)
+    if source is None or source.username != user.username or source.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Source file not found")
+
+    directory_path = perform_validation(str(payload.get("directory") or "/home"), "directory")
+    destination_dc = perform_validation(str(payload.get("data_center") or source.data_center), "data_center")
+    destination = await Directory.get(user.username, path=Path(directory_path))
+    if destination is None or destination.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Destination directory not found")
+
+    if destination_dc == source.data_center:
+        copied = File(
+            directory_id=cast("int", destination.id),
+            name=source.name,
+            type=source.type,
+            size=source.size,
+            modified_at=datetime.now(timezone.utc),
+            deleted_at=None,
+            data_center=source.data_center,
+            links=list(source.links),
+            username=user.username,
+        )
+        await copied.save()
+        return JSONResponse({"mode": "metadata", "file_id": copied.id, "name": copied.name})
+
+    destination_provider = DataCenter(destination_dc)
+    source_provider = DataCenter(source.data_center)
+    if destination_provider is None or source_provider is None:
+        raise HTTPException(status_code=422, detail="Unsupported data center")
+    if not source.links:
+        raise HTTPException(status_code=409, detail="The source file has no stored chunks to copy")
+
+    batch_id = str(uuid4())
+    job_id = str(uuid4())
+    safe_name = Path(source.name).name
+    stage_path = TRANSFER_PATH / user.username / "copies" / job_id / safe_name
+    stage_path.parent.mkdir(parents=True, exist_ok=True)
+    batch_items = [{
+        "name": safe_name,
+        "size": max(0, int(source.size or 0)),
+        "directory": str(destination.path),
+        "data_center": destination_dc,
+        "status": "uploading",
+        "message": "Downloading from source data center",
+        "download_transfer": 0,
+        "download_total": max(0, int(source.size or 0)),
+        "upload_transfer": 0,
+        "upload_total": max(0, int(source.size or 0)),
+    }]
+    await register_upload_batch(
+        batch_id, username=user.username, name=f"Copy {safe_name}", kind="copy",
+        directory=str(destination.path), data_center=destination_dc, items=batch_items,
+    )
+    await register_upload_job(
+        job_id, username=user.username, name=safe_name, kind="copy",
+        directory=str(destination.path), data_center=destination_dc,
+        total=max(0, int(source.size or 0)), batch_id=batch_id,
+    )
+    await update_upload_batch(
+        batch_id, user.username, status="uploading", current_job_id=job_id,
+        current_name=safe_name, message="Downloading from source data center",
+    )
+    progress = Progress(safe_name, "Downloading from source data center", max(0, int(source.size or 0)))
+    progress.download_active = True
+    progress.download_total = max(0, int(source.size or 0))
+    await Redis.set(job_id, progress)
+
+    async def run_copy() -> None:
+        """Download source chunks to local staging, then stream the staged file to the target."""
+        target_file = File(
+            directory_id=cast("int", destination.id),
+            name=safe_name,
+            type=source.type,
+            size=max(0, int(source.size or 0)),
+            modified_at=datetime.now(timezone.utc),
+            deleted_at=None,
+            data_center=destination_dc,
+            links=[],
+            username=user.username,
+        )
+        try:
+            expected_size = max(0, int(source.size or 0))
+            downloaded = 0
+            async with aiofiles.open(stage_path, "wb") as output:
+                for index, link in enumerate(source.links, start=1):
+                    meta = await get_upload_job_metadata(job_id)
+                    if not meta or meta.get("cancelled"):
+                        await Redis.set(job_id, Progress(safe_name, "Upload cancelled", downloaded))
+                        await update_upload_batch(batch_id, user.username, status="cancelled", message="Copy cancelled")
+                        return
+                    chunk = await source_provider.download(link)
+                    if not isinstance(chunk, (bytes, bytearray)):
+                        raise TypeError(f"{source.data_center} returned a non-byte chunk")
+                    await output.write(chunk)
+                    downloaded += len(chunk)
+                    progress.download_transfer = downloaded
+                    progress.download_total = expected_size or downloaded
+                    progress.message = f"Downloaded {downloaded} bytes from {source.data_center}"
+                    await Redis.set(job_id, progress)
+                    await update_upload_batch(
+                        batch_id, user.username, status="uploading",
+                        message="Downloading from source data center",
+                        download_transfer=downloaded, download_total=expected_size or downloaded,
+                        download_active=True,
+                    )
+            if expected_size and downloaded != expected_size:
+                raise IOError(f"Downloaded {downloaded} of {expected_size} expected bytes")
+
+            progress.download_transfer = downloaded
+            progress.download_total = downloaded
+            progress.download_active = False
+            progress.message = f"Uploading to {destination_dc}"
+            await Redis.set(job_id, progress)
+            await update_upload_batch(
+                batch_id, user.username, status="uploading", message=f"Uploading to {destination_dc}",
+                download_transfer=downloaded, download_total=downloaded, download_active=False,
+            )
+            async for value in file_upload(
+                target_file, stage_path, track_download=True,
+                download_total=downloaded, 
+            ):
+                # file_upload would report only upload progress. Preserve the completed
+                # source-side counter and publish both lanes to the same copy tray task.
+                value.download_transfer = downloaded
+                value.download_total = downloaded
+                value.download_active = False
+                await Redis.set(job_id, value)
+                await update_upload_batch(
+                    batch_id, user.username, status="uploading", message=f"Uploading to {destination_dc}",
+                    transfer=max(0, int(value.transfer or 0)), total=max(0, int(value.total or downloaded)),
+                    upload_transfer=max(0, int(value.transfer or 0)), upload_total=max(0, int(value.total or downloaded)),
+                    download_transfer=downloaded, download_total=downloaded, download_active=False,
+                )
+            completed = Progress(safe_name, f"Upload Complete of id={target_file.id}", downloaded)
+            completed.transfer = downloaded
+            completed.total = downloaded
+            completed.download_transfer = downloaded
+            completed.download_total = downloaded
+            await Redis.set(job_id, completed)
+            await update_upload_batch(
+                batch_id, user.username, status="completed", message="Copy completed",
+                completed_items=1, progress=100, transfer=downloaded, total=downloaded,
+                upload_transfer=downloaded, upload_total=downloaded,
+                download_transfer=downloaded, download_total=downloaded, download_active=False,
+                items=[dict(batch_items[0], status="completed", message="Copy completed",
+                            transfer=downloaded, total=downloaded, progress=100,
+                            upload_transfer=downloaded, upload_total=downloaded,
+                            download_transfer=downloaded, download_total=downloaded)],
+            )
+        except CancelledError:
+            await Redis.set(job_id, Progress(safe_name, "Upload cancelled", 0))
+            await update_upload_batch(batch_id, user.username, status="cancelled", message="Copy cancelled")
+        except Exception as error:
+            detail = " ".join(sanitize_sensitive_urls(str(error)).split())[:400]
+            await Redis.set(job_id, Progress(safe_name, f"Upload failed: {detail or type(error).__name__}", 0))
+            await update_upload_batch(batch_id, user.username, status="error", message=f"Copy failed: {detail}")
+        finally:
+            stage_path.unlink(missing_ok=True)
+            try:
+                stage_path.parent.rmdir()
+            except OSError:
+                pass
+
+    copy_task: Task[None] = create_task(run_copy())
+    track_upload_task(copy_task, job_id)
+    return JSONResponse({"mode": "transfer", "batch_id": batch_id, "job_id": job_id})
 
 
 @router.post("/upload")

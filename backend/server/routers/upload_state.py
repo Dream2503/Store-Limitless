@@ -732,7 +732,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
         # The browser normally publishes current_job_id, but a frontend hot reload
         # can interrupt that PATCH after the backend has already registered the child.
         # Recover it from the batch's persisted child list instead of relying on UI memory.
-        if metadata.get("kind") == "link" and metadata.get("status") in {"queued", "uploading", "paused"}:
+        if metadata.get("kind") in {"link", "copy"} and metadata.get("status") in {"queued", "uploading", "paused"}:
             current_child_id = str(metadata.get("current_job_id") or "")
             child_ids = [str(value) for value in metadata.get("child_job_ids", []) if str(value)]
             candidates = ([current_child_id] if current_child_id else []) + [
@@ -745,7 +745,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                         child_metadata is not None
                         and child_metadata.get("username") == username
                         and str(child_metadata.get("batch_id") or "") == batch_id
-                        and child_metadata.get("kind") == "link"
+                        and child_metadata.get("kind") == str(metadata.get("kind") or "link")
                 ):
                     if current_child_id != candidate_id:
                         await update_upload_batch(batch_id, username, current_job_id=candidate_id)
@@ -754,7 +754,45 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                     break
 
             if current_child_id:
-                await reconcile_completed_link_batch(batch_id, username, current_child_id)
+                if metadata.get("kind") == "link":
+                    await reconcile_completed_link_batch(batch_id, username, current_child_id)
+                elif metadata.get("kind") == "copy":
+                    child_metadata = await get_upload_job_metadata(current_child_id)
+                    try:
+                        child_progress = cast("Progress", await Redis.get(current_child_id, "Progress"))
+                    except KeyError:
+                        child_progress = None
+                    if child_metadata and child_metadata.get("username") == username and child_progress:
+                        child_state = resolve_upload_job_status(str(child_progress.message or ""), child_metadata)
+                        if child_state in {"completed", "error", "cancelled"} and metadata.get("status") not in {"completed", "error", "cancelled"}:
+                            item_list = [dict(item) if isinstance(item, dict) else {"name": str(item)} for item in metadata.get("items", [])]
+                            if item_list:
+                                size_value = max(0, int(child_progress.total or child_metadata.get("total") or 0))
+                                item_list[0].update({
+                                    "status": child_state,
+                                    "message": str(child_progress.message or child_state.title()),
+                                    "size": size_value,
+                                    "total": size_value,
+                                    "transfer": max(0, int(child_progress.transfer or 0)),
+                                    "upload_transfer": max(0, int(child_progress.transfer or 0)),
+                                    "upload_total": size_value,
+                                    "download_transfer": max(0, int(child_progress.download_transfer or 0)),
+                                    "download_total": max(0, int(child_progress.download_total or 0)),
+                                    "progress": 100.0 if child_state == "completed" else 0.0,
+                                })
+                            metadata = await update_upload_batch(
+                                batch_id, username, status=child_state,
+                                message=str(child_progress.message or child_state.title()),
+                                items=item_list, completed_items=1 if child_state == "completed" else 0,
+                                progress=100 if child_state == "completed" else 0,
+                                transfer=max(0, int(child_progress.transfer or 0)),
+                                total=max(0, int(child_progress.total or 0)),
+                                upload_transfer=max(0, int(child_progress.transfer or 0)),
+                                upload_total=max(0, int(child_progress.total or 0)),
+                                download_transfer=max(0, int(child_progress.download_transfer or 0)),
+                                download_total=max(0, int(child_progress.download_total or 0)),
+                                download_active=bool(child_progress.download_active),
+                            )
                 metadata = await get_upload_batch_metadata(batch_id) or metadata
 
         total_items = max(1, int(metadata.get("total_items") or 0))

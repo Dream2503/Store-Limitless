@@ -151,7 +151,14 @@ export default function DashboardPage({active = true} = {}) {
     const [moveDialogItems, setMoveDialogItems] = useState(null);
     const [deletingId, setDeletingId] = useState(null);
     const [openMenuFileId, setOpenMenuFileId] = useState(null);
-    const [clipboard, setClipboard] = useState(null);
+    const [clipboard, setClipboard] = useState(() => {
+        try { return JSON.parse(sessionStorage.getItem("storelimitless:file-clipboard") || "null"); }
+        catch { return null; }
+    });
+    const [pasteDialogOpen, setPasteDialogOpen] = useState(false);
+    const [pasteDataCenter, setPasteDataCenter] = useState("Discord");
+    const [pasteLoading, setPasteLoading] = useState(false);
+    const [pasteError, setPasteError] = useState("");
     const [menuPosition, setMenuPosition] = useState(null);
     /** @type {[ContextMenuState | null, import("react").Dispatch<import("react").SetStateAction<ContextMenuState | null>>]} */
     const [contextMenu, setContextMenu] = useState(null);
@@ -1007,6 +1014,15 @@ export default function DashboardPage({active = true} = {}) {
 
         const actionItems = selectedItems.has(item.key) ? selectableItems.filter((candidate) => selectedItems.has(candidate.key)) : [item];
 
+        if (action === "copy") {
+            if (item.type !== "file" || item.is_deleted || actionItems.length !== 1) return;
+            const value = item.object || {};
+            const nextClipboard = {fileId: String(item.id), name: item.name, size: Number(value.size || 0), dataCenter: String(value.data_center || "Discord")};
+            setClipboard(nextClipboard);
+            sessionStorage.setItem("storelimitless:file-clipboard", JSON.stringify(nextClipboard));
+            return;
+        }
+
         if (action === "share") {
             if (item.type === "file" && !item.is_deleted && activeTab !== "trash" && actionItems.length === 1) {
                 void createShareLink(item);
@@ -1070,6 +1086,38 @@ export default function DashboardPage({active = true} = {}) {
             return;
         }
         if (action === "rename" && actionItems.length === 1) openRenameDialog(item); else if (action === "download" && item.type === "file") downloadFile(item.id); else if (action === "restore" && item.type === "file") restoreItem(item.id); else if (action === "restore" && item.type === "folder") restoreFolder(item.id);
+    };
+
+    const confirmPaste = async () => {
+        if (!clipboard || pasteLoading) return;
+        const token = getToken();
+        if (!token) { navigate("/"); return; }
+        setPasteLoading(true);
+        setPasteError("");
+        try {
+            const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(clipboard.fileId)}/copy`, {
+                method: "POST",
+                headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
+                body: JSON.stringify({directory: currentFolder || "/home", data_center: pasteDataCenter}),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (getToken() !== token) return;
+            if (!response.ok) throw new Error(data.detail || "Could not copy this file.");
+            setPasteDialogOpen(false);
+            if (data.mode === "transfer") {
+                window.dispatchEvent(new CustomEvent("storelimitless:upload-batch-created", {detail: {
+                    jobId: String(data.batch_id), name: `Copy ${clipboard.name}`, kind: "copy",
+                    directory: currentFolder || "/home", dataCenter: pasteDataCenter,
+                }}));
+            } else {
+                await refreshDirectory(currentFolder || "/home");
+            }
+        } catch (error) {
+            console.error("File copy failed:", error);
+            setPasteError(error instanceof Error ? error.message : "Could not copy this file.");
+        } finally {
+            setPasteLoading(false);
+        }
     };
 
     /* ------------------------------ derived data ---------------------------- */
@@ -2028,7 +2076,7 @@ export default function DashboardPage({active = true} = {}) {
          * @returns {void}
          */
         const onKeyDown = (event) => {
-            if (!active || showUploadModal || moveDialogItems || detailsSelection || detailsTarget) return;
+            if (!active || showUploadModal || moveDialogItems || detailsSelection || detailsTarget || pasteDialogOpen) return;
             if (contextMenu && event.key === "Escape") {
                 event.preventDefault();
                 setContextMenu(null);
@@ -2108,6 +2156,28 @@ export default function DashboardPage({active = true} = {}) {
                 if (activeTab !== "trash" && selected.length === 1 && !bulkActionLoading) {
                     event.preventDefault();
                     openRenameDialog(selected[0]);
+                }
+                return;
+            }
+
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+                const selected = selectableItems.filter((item) => selectedItems.has(item.key));
+                if (selected.length === 1 && selected[0].type === "file" && !selected[0].is_deleted) {
+                    event.preventDefault();
+                    const item = selected[0];
+                    const value = item.object || {};
+                    const nextClipboard = {fileId: String(item.id), name: item.name, size: Number(value.size || 0), dataCenter: String(value.data_center || "Discord")};
+                    setClipboard(nextClipboard);
+                    sessionStorage.setItem("storelimitless:file-clipboard", JSON.stringify(nextClipboard));
+                }
+                return;
+            }
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+                if (clipboard && activeTab !== "trash" && !searchQuery.trim()) {
+                    event.preventDefault();
+                    setPasteDataCenter(clipboard.dataCenter || "Discord");
+                    setPasteError("");
+                    setPasteDialogOpen(true);
                 }
                 return;
             }
@@ -2403,6 +2473,37 @@ export default function DashboardPage({active = true} = {}) {
             dismissUploadJob={dismissUploadJob}
             clearAllUploadJobs={clearAllUploadJobs}
         />
+
+        {pasteDialogOpen && clipboard && (<div className="fixed inset-0 z-[330] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !pasteLoading) setPasteDialogOpen(false);
+        }}>
+            <section role="dialog" aria-modal="true" aria-labelledby="paste-copy-title" className="w-full max-w-md overflow-hidden rounded-xl border border-[#35443a] bg-[#111713] shadow-2xl shadow-black/50" onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === "Escape" && !pasteLoading) setPasteDialogOpen(false);
+            }}>
+                <header className="flex items-start gap-3 border-b border-[#29362e] bg-[#151d18] px-5 py-4">
+                    <span className="material-symbols-outlined mt-0.5 text-[22px] text-[#3ecf8e]">content_paste</span>
+                    <div className="min-w-0 flex-1"><h2 id="paste-copy-title" className="text-sm font-semibold text-[#e8f0eb]">Copy file here?</h2><p className="mt-1 break-words text-xs text-[#8ca296]">{clipboard.name}</p></div>
+                    <button type="button" disabled={pasteLoading} onClick={() => setPasteDialogOpen(false)} className="flex h-7 w-7 items-center justify-center rounded-md text-[#9bbba7] hover:bg-white/5 disabled:opacity-40" aria-label="Close"><span className="material-symbols-outlined text-[18px]">close</span></button>
+                </header>
+                <div className="space-y-4 p-5">
+                    <div className="rounded-lg border border-[#293b30] bg-[#0c110e] p-3"><p className="text-[11px] text-[#718477]">Destination folder</p><p className="mt-1 break-all text-sm text-[#e8f0eb]">{currentFolder || "/home"}</p></div>
+                    <label className="block space-y-2"><span className="text-xs font-medium text-[#c6d2ca]">Destination data center</span>
+                        <select value={pasteDataCenter} onChange={(event) => setPasteDataCenter(event.target.value)} disabled={pasteLoading} className="w-full rounded-lg border border-[#35483b] bg-[#0c110e] px-3 py-3 text-sm text-[#f3f7f4] outline-none focus:border-[#3ecf8e]">
+                            <option value="Discord">Discord</option><option value="Telegram">Telegram</option>
+                        </select>
+                    </label>
+                    <p className="text-xs leading-5 text-[#718477]">Same data center creates another file record. A different data center downloads the source to server storage and uploads it to the selected provider.</p>
+                    {pasteError && <p role="alert" className="text-xs text-[#ff7278]">{pasteError}</p>}
+                </div>
+                <footer className="flex justify-end gap-2 border-t border-[#29362e] px-5 py-3">
+                    <button type="button" disabled={pasteLoading} onClick={() => setPasteDialogOpen(false)} className="rounded-lg border border-[#35443a] bg-[#18211b] px-4 py-2 text-sm font-medium text-[#dce9e0] hover:bg-[#232f27] disabled:opacity-40">Cancel</button>
+                    <button type="button" disabled={pasteLoading} onClick={() => void confirmPaste()} className="inline-flex items-center gap-2 rounded-md border border-[#2e8058] bg-[#17643d] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1d794a] disabled:opacity-50">
+                        {pasteLoading && <span className="material-symbols-outlined animate-spin text-[15px]">progress_activity</span>}{pasteLoading ? "Copying…" : "Confirm paste"}
+                    </button>
+                </footer>
+            </section>
+        </div>)}
 
         {zipDownloadPrompt && (<div
             className="fixed inset-0 z-[300] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"

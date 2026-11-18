@@ -34,7 +34,7 @@ export default function DashboardContextMenu({menu, onClose, onAction, multipleS
         ];
     } else {
         items = [
-            ...(!multipleSelected ? [{id: "share", label: "Share", icon: "share"}] : []),
+            ...(!multipleSelected ? [{id: "share", label: "Share", icon: "share"}, {id: "copy", label: "Copy", icon: "content_copy"}] : []),
             {id: "move", label: "Move to folder", icon: "drive_file_move"},
             ...(!multipleSelected ? [{id: "rename", label: "Rename", icon: "drive_file_rename_outline"}] : []),
             {id: "details", label: "Details", icon: "info"},

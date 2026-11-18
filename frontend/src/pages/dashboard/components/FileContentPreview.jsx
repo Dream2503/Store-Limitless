@@ -1,7 +1,5 @@
 import {useEffect, useState} from "react";
-
-/** @type {string | undefined} */
-const API_URL = window.STORELIMITLESS_CONFIG?.API_URL ?? import.meta.env.VITE_API_URL;
+import {API_URL} from "../../../api.js";
 
 /** @param {{message: string}} props */
 function PreviewMessage({message}) {

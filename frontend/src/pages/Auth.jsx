@@ -1,5 +1,6 @@
 import {useEffect, useState} from "react";
 import {Link, useNavigate} from "react-router-dom";
+import {API_URL} from "../api.js";
 
 /**
  * @typedef {Object} AuthFormData
@@ -32,9 +33,6 @@ export default function Auth({initialMode = "login"}) {
     useEffect(() => {
         setIsLogin(initialMode !== "signup");
     }, [initialMode]);
-
-    /** @type {string | undefined} */
-    const API_URL = window.STORELIMITLESS_CONFIG?.API_URL ?? import.meta.env.VITE_API_URL
 
     /**
      * Update the form field identified by the input name.

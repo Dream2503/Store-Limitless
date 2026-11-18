@@ -1,12 +1,10 @@
 import {useEffect, useRef, useState} from "react";
 import {useNavigate, useSearchParams} from "react-router-dom";
 import {getFilesFromDrop, getUploadRelativePath} from "../uploadFiles.js";
+import {API_URL} from "../../../api.js";
 
 /** @typedef {{cancelled: boolean}} UploadCancelToken */
 /** @typedef {Error & {fatal?: boolean, queueFatal?: boolean}} UploadRequestError */
-
-/** @type {string | undefined} */
-const API_URL = window.STORELIMITLESS_CONFIG?.API_URL ?? import.meta.env.VITE_API_URL
 
 const DATA_CENTERS = ["Discord", "Telegram"];
 

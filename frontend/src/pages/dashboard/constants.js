@@ -1,5 +1,5 @@
-/** Runtime API URL; frozen builds may inject it before the app starts. */
-export const API_URL = window.STORELIMITLESS_CONFIG?.API_URL ?? import.meta.env.VITE_API_URL;
+import {API_URL} from "../../api.js";
+export {API_URL};
 
 export const DASHBOARD_SELECTION_STORAGE_KEY = "storelimitless_dashboard_selection_restore";
 export const DASHBOARD_SELECTIONS_BY_VIEW_KEY = "storelimitless_dashboard_selections_by_view";

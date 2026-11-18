@@ -3,13 +3,15 @@
 __pycache__/
 *.pyc
 
-core/.env
+backend/database/backup
+core/utils/env.py
 core/transfer/
 
 .env
 .venv/
 .python-version
-
+build.log
+logs.log
 logs.lock
 
 frontend/node_modules/

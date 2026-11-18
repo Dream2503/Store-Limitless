@@ -1,4 +1,4 @@
-from asyncio import AbstractEventLoop, get_running_loop, run_coroutine_threadsafe, wrap_future
+from asyncio import AbstractEventLoop, get_running_loop, run_coroutine_threadsafe, wrap_future, sleep
 from traceback import format_exc
 from typing import cast
 
@@ -8,15 +8,15 @@ from discord import Intents, Message, TextChannel
 from discord.ext.commands import Bot
 
 from core.data_center import ConfigMeta, DataCenter
-from core.utils import getenv
 from core.utils import write_log
+from core.utils.env import DISCORD_TOKEN, DISCORD_FILE_DUMP_ID
 from core.utils.progress import Progress, ProgressStream
 
 
 class Discord(DataCenter, metaclass=ConfigMeta):
     NAME: str = "Discord"
-    TOKEN: str = getenv("DISCORD_TOKEN")
-    FILE_DUMP_ID: int = int(getenv("DISCORD_FILE_DUMP_ID"))
+    TOKEN: str = DISCORD_TOKEN
+    FILE_DUMP_ID: int = DISCORD_FILE_DUMP_ID
     FILE_DUMP: TextChannel
     LOOP: AbstractEventLoop
 
@@ -29,13 +29,23 @@ class Discord(DataCenter, metaclass=ConfigMeta):
 
     @staticmethod
     async def upload(chunk: bytes, filename: str, progress: Progress) -> str:
-        return str(
-            (await wrap_future(
-                run_coroutine_threadsafe(
-                    Discord.FILE_DUMP.send(file=discord.File(ProgressStream(chunk, progress), filename=filename)), Discord.LOOP
-                )
-            )).id
-        )
+        attempt: int = 0
+
+        while True:
+            try:
+                return str((await wrap_future(
+                    run_coroutine_threadsafe(
+                        Discord.FILE_DUMP.send(file=discord.File(ProgressStream(chunk, progress), filename=filename)),
+                        Discord.LOOP
+                    )
+                )).id)
+
+            except discord.DiscordServerError as e:
+                if e.status != 503:
+                    raise
+
+                attempt += 1
+                await sleep(min(2 ** min(attempt - 1, 5), 30))
 
     @staticmethod
     async def download(flink: str) -> bytes:

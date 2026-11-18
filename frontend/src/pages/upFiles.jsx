@@ -1,9 +1,15 @@
-import {useState} from "react";
+import {useRef, useState} from "react";
 import {useNavigate, useSearchParams} from "react-router-dom";
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+const API_URL = window.STORELIMITLESS_CONFIG?.API_URL ?? import.meta.env.VITE_API_URL
 
 const DATA_CENTERS = ["Discord", "Telegram"];
+
+// Each chunk is its own PUT; the server writes it to disk as it arrives.
+const CHUNK_SIZE = 1024 * 1024;
+// How many chunks are in flight at once (browsers allow ~6 connections per host).
+const PARALLEL_CHUNKS = 8;
+const MAX_CHUNK_ATTEMPTS = 3;
 
 const formatBytes = (bytes) => {
     if (bytes < 1024) return `${bytes} B`;
@@ -41,107 +47,242 @@ export default function UploadPage() {
     const [status, setStatus] = useState("idle");
     const [dragOver, setDragOver] = useState(false);
 
-    const pollJobStatus = (jobId) => {
-        return new Promise((resolve, reject) => {
-            const poll = setInterval(async () => {
-                try {
-                    const statusRes = await fetch(`${API_URL}/auth/upload/${jobId}/status`, {
-                        headers: {
-                            Authorization: `Bearer ${localStorage.getItem("token")}`
-                        }
-                    });
+    // Every in-flight request, so a failure can abort all of them.
+    const activeXhrs = useRef(new Set());
 
-                    if (!statusRes.ok) {
-                        if (statusRes.status === 404) return;
+    const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-                        clearInterval(poll);
-                        reject(new Error(`Status check failed: ${statusRes.status}`));
-                        return;
+    // ==========================================
+    // Poll the server for cloud upload progress.
+    // `transfer` = bytes uploaded to the cloud so far
+    // `total`    = bytes written to the server's disk so far (it keeps growing)
+    // The percentage is allowed to go DOWN when the disk gets ahead of the cloud.
+    // ==========================================
+    const pollJobStatus = async (jobId, cancelToken) => {
+        let consecutiveErrors = 0;
+
+        while (!cancelToken.cancelled) {
+            try {
+                const statusRes = await fetch(`${API_URL}/public/upload/${jobId}/status`, {
+                    headers: {
+                        Authorization: `Bearer ${localStorage.getItem("token")}`,
+                    }, cache: "no-store",
+                });
+
+                if (cancelToken.cancelled) return;
+
+                if (!statusRes.ok) {
+                    if (statusRes.status === 404) {
+                        // The first chunk may not have reached the server yet.
+                        await sleep(500);
+                        continue;
                     }
 
-                    const data = await statusRes.json();
-
-                    if (data.status === "error") {
-                        clearInterval(poll);
-                        reject(new Error(data.error || "Upload failed"));
-                        return;
-                    }
-
-                    if (data.message !== undefined && data.transfer !== undefined && data.total !== undefined) {
-                        setMessage(data.message);
-                        setTransfer(data.transfer);
-                        setTotal(data.total);
-                        setProgress(data.total ? (data.transfer / data.total) * 100 : 0);
-                    }
-
-                    if (data.status === "completed" || data.message?.startsWith("Upload complete")) {
-                        clearInterval(poll);
-                        setProgress(100);
-                        resolve();
-                    }
-
-                } catch (error) {
-                    clearInterval(poll);
-                    reject(error);
+                    throw new Error(`Status check failed: ${statusRes.status}`);
                 }
-            }, 100);
-        });
+
+                const data = await statusRes.json();
+                consecutiveErrors = 0;
+
+                if (data.status === "error" || data.message?.toLowerCase().startsWith("upload failed")) {
+                    throw new Error(data.error || data.message || "Upload failed");
+                }
+
+                if (data.message !== undefined) {
+                    setMessage(data.message);
+                }
+
+                if (Number.isFinite(data.transfer) && Number.isFinite(data.total)) {
+                    setTransfer(data.transfer);
+                    setTotal(data.total);
+
+                    // No Math.max here: the value is allowed to decrease when `total`
+                    // grows faster than `transfer`. It stays below 100 until the server
+                    // reports completion, so catching up with the disk is not shown as done.
+                    setProgress(data.total > 0 ? Math.min(99, (data.transfer / data.total) * 100) : 0);
+                }
+
+                if (data.status === "completed" || data.message?.toLowerCase().startsWith("upload complete")) {
+                    setProgress(100);
+                    return;
+                }
+            } catch (error) {
+                if (error instanceof TypeError) {
+                    // Transient network errors should not immediately kill polling.
+                    consecutiveErrors += 1;
+
+                    if (consecutiveErrors >= 10) {
+                        throw new Error("Unable to reach the upload status endpoint.");
+                    }
+                } else {
+                    throw error;
+                }
+            }
+
+            // Sequential polling: the next request starts only after the previous
+            // request has completed, preventing overlapping status requests.
+            await sleep(100);
+        }
+    };
+
+    // ==========================================
+    // Send ONE chunk (several of these run in parallel)
+    // ==========================================
+    const sendChunk = (jobId, blob, offset, totalSize) => new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        activeXhrs.current.add(xhr);
+
+        const done = () => activeXhrs.current.delete(xhr);
+
+        xhr.open("PUT", `${API_URL}/public/upload/${jobId}/chunk?offset=${offset}&total=${totalSize}`);
+        xhr.setRequestHeader("Authorization", `Bearer ${localStorage.getItem("token")}`);
+        xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+        xhr.onload = () => {
+            done();
+
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve();
+                return;
+            }
+
+            let errorMessage = `Chunk upload failed (${xhr.status})`;
+
+            try {
+                const response = JSON.parse(xhr.responseText);
+                errorMessage = response.detail || response.error || errorMessage;
+            } catch {
+                // Keep the HTTP status message if the response is not JSON.
+            }
+
+            const error = new Error(errorMessage);
+            // 4xx errors will not be fixed by retrying.
+            error.fatal = xhr.status >= 400 && xhr.status < 500;
+            reject(error);
+        };
+
+        xhr.onerror = () => {
+            done();
+            reject(new Error("Network error while sending the file."));
+        };
+
+        xhr.onabort = () => {
+            done();
+            const error = new Error("File upload was cancelled.");
+            error.fatal = true;
+            reject(error);
+        };
+
+        xhr.send(blob);
+    });
+
+    const uploadFileInChunks = async (jobId, selectedFile, cancelToken) => {
+        const totalSize = selectedFile.size;
+        // An empty file still sends one (empty) chunk so the server can finish.
+        const chunkCount = Math.max(1, Math.ceil(totalSize / CHUNK_SIZE));
+        let nextIndex = 0;
+
+        // Each lane keeps taking the next unsent chunk, so chunks start in order.
+        const lane = async () => {
+            while (!cancelToken.cancelled) {
+                const index = nextIndex++;
+
+                if (index >= chunkCount) return;
+
+                const start = index * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, totalSize);
+                const blob = selectedFile.slice(start, end);
+
+                for (let attempt = 1; ; attempt++) {
+                    if (cancelToken.cancelled) {
+                        throw new Error("File upload was cancelled.");
+                    }
+
+                    try {
+                        await sendChunk(jobId, blob, start, totalSize);
+                        break;
+                    } catch (error) {
+                        if (error.fatal || cancelToken.cancelled || attempt >= MAX_CHUNK_ATTEMPTS) {
+                            throw error;
+                        }
+
+                        setMessage(`Retrying chunk (attempt ${attempt + 1} of ${MAX_CHUNK_ATTEMPTS})`);
+                        await sleep(1000 * attempt);
+                    }
+                }
+            }
+        };
+
+        await Promise.all(Array.from({length: Math.min(PARALLEL_CHUNKS, chunkCount)}, lane));
     };
 
     const handleUpload = async () => {
         if (!dataCenter) return;
-
         if (uploadMode === "file" && !file) return;
-
         if (uploadMode === "link" && !link.trim()) return;
 
         setStatus("uploading");
         setProgress(0);
-        setMessage("");
+        setMessage(uploadMode === "file" ? "Creating upload job" : "Starting import");
         setTransfer(0);
-        setTotal(0);
+        setTotal(uploadMode === "file" && file ? file.size : 0);
+
+        const cancelToken = {cancelled: false};
 
         try {
+            const token = localStorage.getItem("token");
             let res;
 
             if (uploadMode === "file") {
                 res = await fetch(`${API_URL}/auth/upload`, {
                     method: "POST", headers: {
-                        Authorization: `Bearer ${localStorage.getItem("token")}`,
-                        "Content-Type": file.type || "application/octet-stream",
-                        "X-File-Name": file.name,
-                        "X-Data-Center": dataCenter,
-                        "X-Directory": directory,
-                    }, body: file,
+                        Authorization: `Bearer ${token}`, "X-File-Name": file.name, "X-Data-Center": dataCenter, "X-Directory": directory,
+                    },
                 });
             } else {
-                res = await fetch(`${API_URL}/auth/upload-link?link=${encodeURIComponent(link.trim())}&data_center=${encodeURIComponent(dataCenter)}&directory=${encodeURIComponent(directory)}`, {
+                const params = new URLSearchParams({
+                    link: link.trim(), data_center: dataCenter, directory,
+                });
+
+                res = await fetch(`${API_URL}/auth/upload-link?${params.toString()}`, {
                     method: "POST", headers: {
-                        Authorization: `Bearer ${localStorage.getItem("token")}`,
+                        Authorization: `Bearer ${token}`,
                     },
                 });
             }
 
             if (!res.ok) {
-                let errorMessage = "Upload failed";
+                let errorMessage = `Upload setup failed (${res.status})`;
 
                 try {
                     const errorData = await res.json();
                     errorMessage = errorData.detail || errorData.error || errorMessage;
                 } catch {
-                    // Ignore JSON parsing errors
+                    // Ignore non-JSON error responses.
                 }
 
-                console.error("Upload failed:", errorMessage);
-                setStatus("error");
-                return;
+                throw new Error(errorMessage);
             }
 
-            const {job_id} = await res.json();
+            const responseData = await res.json();
+            const jobId = responseData.job_id;
 
-            await pollJobStatus(job_id);
+            if (!jobId) {
+                throw new Error("The server did not return an upload job ID.");
+            }
+
+            if (uploadMode === "file") {
+                setMessage("Sending file to server");
+
+                // Chunks stream to the server's disk in parallel while the server
+                // uploads the growing file to the cloud. Polling reports the cloud side.
+                await Promise.all([uploadFileInChunks(jobId, file, cancelToken), pollJobStatus(jobId, cancelToken),]);
+            } else {
+                await pollJobStatus(jobId, cancelToken);
+            }
 
             setProgress(100);
+            setMessage("Upload complete");
             setStatus("done");
 
             setTimeout(() => {
@@ -151,9 +292,15 @@ export default function UploadPage() {
                     navigate("/dashboard");
                 }
             }, 1200);
-
         } catch (error) {
+            cancelToken.cancelled = true;
+
+            for (const xhr of activeXhrs.current) {
+                xhr.abort();
+            }
+
             console.error("Upload error:", error);
+            setMessage(error instanceof Error ? error.message : "Upload failed");
             setStatus("error");
         }
     };
@@ -165,6 +312,8 @@ export default function UploadPage() {
         event.preventDefault();
 
         setDragOver(false);
+
+        if (status === "uploading") return;
 
         const droppedFile = event.dataTransfer.files?.[0];
 

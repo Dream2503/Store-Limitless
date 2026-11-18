@@ -7,7 +7,7 @@ from typing import Literal, cast, TYPE_CHECKING
 
 import redis.asyncio
 
-from backend.database.connection import CONNECTION, DirectoryDict, FileDict
+from backend.database.connection import POOL, DirectoryDict, FileDict
 from core.utils.progress import Progress
 
 if TYPE_CHECKING:
@@ -16,7 +16,17 @@ if TYPE_CHECKING:
 
 class Redis:
     ValueTypes = Literal["Progress", "Directory", "File", "User"]
-    redis: redis.asyncio.Redis = redis.asyncio.Redis.from_url("redis://localhost:6379", decode_responses=True)
+    redis: redis.asyncio.Redis
+
+    @classmethod
+    async def initialize(cls) -> None:
+        cls.redis = redis.asyncio.Redis.from_url("redis://localhost:6379", decode_responses=True)
+        await cls.redis.ping()
+        await cls.redis.flushall()
+
+    @classmethod
+    async def close(cls) -> None:
+        await cls.redis.aclose()
 
     @classmethod
     async def exists(cls, key: str, type: ValueTypes) -> bool:
@@ -42,7 +52,7 @@ class Redis:
                 if not data:
                     raise KeyError(key)
 
-                progress: Progress = Progress(data["message"], int(data["total"]))
+                progress: Progress = Progress(data["name"], data["message"], int(data["total"]))
                 progress.transfer = int(data["transfer"])
                 return progress
 
@@ -154,35 +164,36 @@ class Redis:
         from backend.database.models import User, Directory, File
 
         if isinstance(value, Progress):
-            await cls.redis.hset(key, mapping={"message": value.message, "transfer": value.transfer, "total": value.total})
+            await cls.redis.hset(key, mapping={"name": value.name, "message": value.message, "transfer": value.transfer, "total": value.total})
 
         elif isinstance(value, User):
-            directories: list[DirectoryDict] = CONNECTION.execute(
-                """
-                SELECT id, path, modified_at, deleted_at, username
-                FROM directories
-                WHERE username = %s;
-                """,
-                (value.username,),
-            ).fetchall()
+            with POOL.connection() as connection:
+                directories: list[DirectoryDict] = connection.execute(
+                    """
+                    SELECT id, path, modified_at, deleted_at, username
+                    FROM directories
+                    WHERE username = %s;
+                    """,
+                    (value.username,),
+                ).fetchall()
 
-            files: list[FileDict] = CONNECTION.execute(
-                """
-                SELECT id,
-                       directory_id,
-                       name,
-                       type,
-                       size,
-                       modified_at,
-                       data_center,
-                       links,
-                       deleted_at,
-                       username
-                FROM files
-                WHERE username = %s;
-                """,
-                (value.username,),
-            ).fetchall()
+                files: list[FileDict] = connection.execute(
+                    """
+                    SELECT id,
+                           directory_id,
+                           name,
+                           type,
+                           size,
+                           modified_at,
+                           data_center,
+                           links,
+                           deleted_at,
+                           username
+                    FROM files
+                    WHERE username = %s;
+                    """,
+                    (value.username,),
+                ).fetchall()
 
             await cls.redis.hset(key, mapping={
                 "username": value.username,

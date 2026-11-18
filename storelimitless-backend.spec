@@ -1,21 +1,43 @@
+
 # -*- mode: python ; coding: utf-8 -*-
 
-import os
+from pathlib import Path
+from PyInstaller.utils.hooks import collect_all, copy_metadata
 
-FFMPEG = os.environ["STORELIMITLESS_FFMPEG"]
-REDIS = os.environ.get("STORELIMITLESS_REDIS")
+ROOT = Path(SPECPATH).resolve()
+FRONTEND_DIST = ROOT / "frontend" / "dist"
 
-binaries = [(FFMPEG, ".")]
+if not FRONTEND_DIST.is_dir():
+    raise FileNotFoundError(
+        f"Frontend build not found: {FRONTEND_DIST}\n"
+        "Build it first with: cd frontend && npm install && npm run build"
+    )
 
-if REDIS:
-    binaries.append((REDIS, "."))
+frontend_datas = [
+    (
+        str(path),
+        str(
+            Path("frontend")
+            / "dist"
+            / path.relative_to(FRONTEND_DIST).parent
+        ),
+    )
+    for path in FRONTEND_DIST.rglob("*")
+    if path.is_file()
+]
+
+# Collect gdown's package files, binaries, hidden imports, and metadata.
+gdown_datas, gdown_binaries, gdown_hiddenimports = collect_all("gdown")
+gdown_datas += copy_metadata("gdown")
 
 a = Analysis(
     ["core/main.py"],
-    pathex=[],
-    binaries=binaries,
-    datas=[(".env", ".")],
-    hiddenimports=["passlib.handlers.bcrypt"],
+    pathex=[str(ROOT)],
+    binaries=gdown_binaries,
+    datas=frontend_datas + gdown_datas,
+    hiddenimports=[
+        "passlib.handlers.bcrypt",
+    ] + gdown_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -32,11 +54,11 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="storelimitless-backend",
+    name="StoreLimitlessServer",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,

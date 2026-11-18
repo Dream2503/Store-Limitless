@@ -2,12 +2,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from backend.database.connection import CONNECTION
+from backend.database.connection import POOL
 from backend.database.redis_server import Redis
 from core.data_center import Database
 from core.utils import write_log
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Directory(BaseModel):
@@ -29,33 +28,33 @@ class Directory(BaseModel):
         )
 
     async def save(self) -> None:
-        if await Directory.get(path=self.path, username=self.username) is not None:
+        if await Directory.get(self.username, path=self.path) is not None:
             parent: Path = self.path.parent
             name: str = self.path.name
             i: int = 1
 
-            while await Directory.get(path=parent / name, username=self.username) is not None:
+            while await Directory.get(self.username, path=parent / name) is not None:
                 name = f"{self.path.name}({i})"
                 i += 1
 
             self.path = parent / name
 
-        try:
-            self.id = cast(dict[str, int], CONNECTION.execute(
-                """
-                INSERT INTO directories (path, modified_at, deleted_at, username)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id;
-                """,
-                (str(self.path), self.modified_at, self.deleted_at, self.username),
-            ).fetchone())["id"]
-            CONNECTION.commit()
-            await Redis.set(f"user:{self.username}:directories", self)
+        with POOL.connection() as connection:
+            try:
+                self.id = cast(dict[str, int], connection.execute(
+                    """
+                    INSERT INTO directories (path, modified_at, deleted_at, username)
+                    VALUES (%s, %s, %s, %s) RETURNING id;
+                    """,
+                    (str(self.path), self.modified_at, self.deleted_at, self.username),
+                ).fetchone())["id"]
+                connection.commit()
+                await Redis.set(f"user:{self.username}:directories", self)
 
-        except Exception as e:
-            CONNECTION.rollback()
-            write_log("ERROR", Database, "INSERT DIRECTORY", self.username, f"Failed to insert directory: {e}")
-            raise
+            except Exception as e:
+                connection.rollback()
+                write_log("ERROR", Database, "INSERT DIRECTORY", self.username, f"Failed to insert directory: {e}")
+                raise
 
     @classmethod
     async def get(
@@ -64,8 +63,7 @@ class Directory(BaseModel):
             *,
             did: int | None = None,
             path: Path | None = None,
-            include_trashed: bool = False,
-            trashed_only: bool = False
+            trash: bool = False
     ) -> "Directory | None":
         if did is not None:
             try:
@@ -74,25 +72,16 @@ class Directory(BaseModel):
             except KeyError:
                 return None
 
-            if directory.deleted_at is not None and not include_trashed:
-                return None
-
-            if directory.deleted_at is None and trashed_only:
+            if trash != (directory.deleted_at is not None):
                 return None
 
             return directory
 
-        elif path is not None and username is not None:
+        elif path is not None:
             directories: list[Directory] = cast(list[Directory], await Redis.get(f"user:{username}:directories", "Directory"))
 
             for directory in directories:
-                if directory.path != path:
-                    continue
-
-                if directory.deleted_at is not None and not include_trashed:
-                    continue
-
-                if directory.deleted_at is None and trashed_only:
+                if directory.path != path or trash != (directory.deleted_at is not None):
                     continue
 
                 return directory
@@ -100,60 +89,42 @@ class Directory(BaseModel):
         return None
 
     @classmethod
-    async def get_all(
-            cls,
-            username: str,
-            *,
-            directory: Path | None = None,
-            include_trashed: bool = False,
-            trashed_only: bool = False
-    ) -> list["Directory"]:
+    async def get_all(cls, username: str, directory: Path | None = None, trash: bool = False) -> list["Directory"]:
         directories: list[Directory] = cast(list[Directory], await Redis.get(f"user:{username}:directories", "Directory"))
         result: list[Directory] = []
 
         for data in directories:
-            if data.deleted_at is not None and not include_trashed:
+            if trash != (data.deleted_at is not None) or directory is not None and data.path.parent != directory:
                 continue
-
-            if data.deleted_at is None and trashed_only:
-                continue
-
-            if directory is not None:
-                if data.path.parent != directory:
-                    continue
 
             result.append(data)
 
-        result.sort(key=lambda directory: str(directory.path))
+        result.sort(key=lambda dir: str(dir.path))
         return result
 
     async def update(self) -> None:
         if self.id is None:
             raise ValueError("Directory has no ID")
 
-        try:
-            CONNECTION.execute(
-                """
-                UPDATE directories
-                SET path        = %s,
-                    modified_at = %s,
-                    deleted_at  = %s
-                WHERE id = %s;
-                """,
-                (
-                    str(self.path),
-                    self.modified_at,
-                    self.deleted_at,
-                    self.id,
-                ),
-            )
-            CONNECTION.commit()
-            await Redis.set(f"user:{self.username}:directories", self)
+        with POOL.connection() as connection:
+            try:
+                connection.execute(
+                    """
+                    UPDATE directories
+                    SET path        = %s,
+                        modified_at = %s,
+                        deleted_at  = %s
+                    WHERE id = %s;
+                    """,
+                    (str(self.path), self.modified_at, self.deleted_at, self.id),
+                )
+                connection.commit()
+                await Redis.set(f"user:{self.username}:directories", self)
 
-        except Exception as e:
-            CONNECTION.rollback()
-            write_log("ERROR", Database, "UPDATE DIRECTORY", self.username, f"Failed to update directory: {e}")
-            raise
+            except Exception as e:
+                connection.rollback()
+                write_log("ERROR", Database, "UPDATE DIRECTORY", self.username, f"Failed to update directory: {e}")
+                raise
 
     async def move_to_trash(self) -> None:
         if self.id is None:
@@ -167,24 +138,24 @@ class Directory(BaseModel):
         if self.id is None:
             raise ValueError("Directory has no ID")
 
-        try:
-            CONNECTION.execute(
-                """
-                DELETE
-                FROM directories
-                WHERE id = %s
-                  AND username = %s;
-                """,
-                (self.id, self.username),
-            )
-            CONNECTION.commit()
+        with POOL.connection() as connection:
+            try:
+                connection.execute(
+                    """
+                    DELETE
+                    FROM directories
+                    WHERE id = %s
+                      AND username = %s;
+                    """,
+                    (self.id, self.username),
+                )
+                connection.commit()
+                await Redis.delete(f"user:{self.username}:directories {self.id}", "Directory")
 
-            await Redis.delete(f"user:{self.username}:directories {self.id}", "Directory")
-
-        except Exception as e:
-            CONNECTION.rollback()
-            write_log("ERROR", Database, "DELETE DIRECTORY", str(self.id), f"Failed to delete directory: {e}")
-            raise
+            except Exception as e:
+                connection.rollback()
+                write_log("ERROR", Database, "DELETE DIRECTORY", str(self.id), f"Failed to delete directory: {e}")
+                raise
 
     async def restore(self) -> None:
         if self.id is None:

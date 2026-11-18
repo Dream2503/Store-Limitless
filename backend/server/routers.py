@@ -1,12 +1,16 @@
-from asyncio import Task, create_task
+from asyncio import Event, Task, sleep
+from asyncio import create_task
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from mimetypes import guess_type
 from pathlib import Path
+from time import monotonic
 from typing import cast
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Header
+import aiofiles
+from fastapi import APIRouter, Depends, HTTPException, Request, Header, Query
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 
 from backend.database.models import Directory, File, User
@@ -22,6 +26,58 @@ from core.utils.progress import Progress
 
 auth: APIRouter = APIRouter(prefix="/auth")
 public: APIRouter = APIRouter(prefix="/public")
+
+PENDING_UPLOADS: dict[str, tuple[File, Path]] = {}
+UPLOAD_IDLE_TIMEOUT: int = 120
+
+
+@dataclass
+class UploadSession:
+    file: File
+    file_path: Path
+    total: int
+    finished: Event
+    ranges: list[tuple[int, int]] = field(default_factory=list)  # merged, written byte ranges
+    contiguous: int = 0  # bytes written from 0 with no gaps
+    last_activity: float = field(default_factory=monotonic)
+    upload_task: Task[None] | None = None
+    job_task: Task[None] | None = None
+
+
+UPLOAD_SESSIONS: dict[str, UploadSession] = {}
+
+
+def mark_written(session: UploadSession, start: int, end: int) -> None:
+    if end > start:
+        session.ranges.append((start, end))
+        session.ranges.sort()
+        merged: list[tuple[int, int]] = []
+
+        for range_start, range_end in session.ranges:
+            if merged and range_start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], range_end))
+
+            else:
+                merged.append((range_start, range_end))
+
+        session.ranges = merged
+
+    if session.ranges and session.ranges[0][0] == 0:
+        session.contiguous = session.ranges[0][1]
+
+    session.file.size = session.contiguous
+    session.last_activity = monotonic()
+
+    if session.contiguous >= session.total:
+        session.finished.set()
+
+
+async def wait_for_all_chunks(session: UploadSession) -> None:
+    while not session.finished.is_set():
+        if monotonic() - session.last_activity > UPLOAD_IDLE_TIMEOUT:
+            raise TimeoutError("No data received from the browser")
+
+        await sleep(0.25)
 
 
 @public.get("/ready")
@@ -63,22 +119,34 @@ async def login(username: str, password: str) -> tuple[dict[str, str], dict[str,
             }, await user.home)
 
 
-@auth.get("/upload/{job_id}/status")
+@public.get("/upload/{job_id}/status")
 async def upload_status(job_id: str) -> JSONResponse:
-    progress: Progress = cast(Progress, await Redis.get(job_id, "Progress"))
+    progress: Progress | None = cast(Progress | None, await Redis.get(job_id, "Progress"))
+
+    if progress is None:
+        raise HTTPException(status_code=404, detail="Upload job not found")
+
     completed: bool = "complete" in progress.message.lower()
+    file_id: int | None = None
+
+    if completed and "id=" in progress.message:
+        try:
+            file_id = int(progress.message.split("id=")[-1].split()[0])
+
+        except (ValueError, IndexError):
+            file_id = None
+
     return JSONResponse({
         "status": "completed" if completed else "uploading",
         "message": " ".join(progress.message.split()[:2]) if completed else progress.message,
         "transfer": progress.transfer,
         "total": progress.total,
-        "file_id": int(progress.message.split("id=")[-1]) if completed else None,
+        "file_id": file_id,
     })
 
 
 @auth.post("/upload")
 async def upload_file(
-        request: Request,
         data_center: str = Header(..., alias="X-Data-Center"),
         directory: str = Header(..., alias="X-Directory"),
         file_name: str = Header(..., alias="X-File-Name"),
@@ -86,14 +154,14 @@ async def upload_file(
 ) -> JSONResponse:
     data_center = perform_validation(data_center, "data_center")
     file_name = perform_validation(file_name, "file_name")
-    directory_obj: Directory | None = await Directory.get(path=Path(directory), username=user.username)
+    directory_obj: Directory | None = await Directory.get(user.username, path=Path(directory))
 
     if directory_obj is None:
         raise HTTPException(status_code=404, detail="Directory not found")
 
     file_path: Path = TRANSFER_PATH / user.username / file_name
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.touch()
+
     file: File = File(
         directory_id=cast(int, directory_obj.id),
         name=file_name,
@@ -105,33 +173,96 @@ async def upload_file(
         username=user.username
     )
 
-    async def write_file() -> None:
-        with file_path.open("wb") as buffer:
-            chunk: bytes
-
-            async for chunk in request.stream():
-                buffer.write(chunk)
-
-    upload_task: Task[None] = create_task(write_file())
     job_id: str = str(uuid4())
-    await Redis.set(job_id, Progress("Starting", 0))
+    PENDING_UPLOADS[job_id] = (file, file_path)
 
-    async def run_upload_job() -> None:
-        progress: Progress
+    await Redis.set(job_id, Progress(file_name, "Waiting for upload", 0))
 
-        async for progress in file_upload(file, file_path, upload_task):
-            await Redis.set(job_id, progress)
-
-    create_task(run_upload_job())
-    await upload_task
     return JSONResponse({"job_id": job_id})
+
+
+@public.put("/upload/{job_id}/chunk")
+async def upload_chunk(
+        job_id: str,
+        request: Request,
+        offset: int = Query(..., ge=0),
+        total: int = Query(..., ge=0),
+        user: User = Depends(get_current_user)
+) -> JSONResponse:
+    session: UploadSession | None = UPLOAD_SESSIONS.get(job_id)
+
+    if session is None:
+        pending: tuple[File, Path] | None = PENDING_UPLOADS.get(job_id)
+
+        if pending is None:
+            raise HTTPException(status_code=404, detail="Upload job not found")
+
+        file, file_path = pending
+
+        if file.username != user.username:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        PENDING_UPLOADS.pop(job_id)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(b"")
+
+        session: UploadSession = UploadSession(file=file, file_path=file_path, total=total, finished=Event())
+        UPLOAD_SESSIONS[job_id] = session
+
+        await Redis.set(job_id, Progress(file.name, "Receiving and uploading", 0))
+
+        session.upload_task = create_task(wait_for_all_chunks(session))
+
+        async def run_upload_job() -> None:
+            try:
+                async for progress in file_upload(session.file, session.file_path, session.upload_task):
+                    await Redis.set(job_id, progress)
+
+            except Exception as error:
+                await Redis.set(job_id, Progress(session.file.name, f"Upload failed: {error}", 0))
+
+            finally:
+                if session.upload_task is not None and not session.upload_task.done():
+                    session.upload_task.cancel()
+
+                UPLOAD_SESSIONS.pop(job_id, None)
+
+        session.job_task = create_task(run_upload_job())
+
+    elif session.file.username != user.username:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if total != session.total:
+        raise HTTPException(status_code=409, detail="File size changed during upload")
+
+    position = offset
+
+    async with aiofiles.open(session.file_path, "r+b") as buffer:
+        await buffer.seek(offset)
+
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+
+            if position + len(chunk) > session.total:
+                raise HTTPException(status_code=413, detail="Chunk exceeds declared file size")
+
+            await buffer.write(chunk)
+            await buffer.flush()
+
+            mark_written(session, position, position + len(chunk))
+            position += len(chunk)
+
+    mark_written(session, offset, position)
+
+    return JSONResponse({"job_id": job_id, "contiguous": session.contiguous})
 
 
 @auth.post("/upload-link")
 async def upload_link(link: str, data_center: str, directory: str, user: User = Depends(get_current_user)) -> JSONResponse:
     link = perform_validation(link, "link")
     data_center = perform_validation(data_center, "data_center")
-    directory_obj: Directory | None = await Directory.get(path=Path(directory), username=user.username)
+    directory_obj: Directory | None = await Directory.get(user.username, path=Path(directory))
 
     if directory_obj is None:
         raise HTTPException(status_code=404, detail="Directory not found")
@@ -147,7 +278,7 @@ async def upload_link(link: str, data_center: str, directory: str, user: User = 
         username=user.username
     )
     job_id: str = str(uuid4())
-    await Redis.set(job_id, Progress("Starting", 0))
+    await Redis.set(job_id, Progress(file.name, "Starting", 0))
 
     async def run_upload_job() -> None:
         progress: Progress
@@ -175,18 +306,18 @@ async def create_folder(directory: str, name: str, user: User = Depends(get_curr
 
 @auth.get("/directory")
 async def get_directory(directory: str, user: User = Depends(get_current_user)) -> tuple[list[Directory], list[File]]:
-    directory_obj: Directory | None = await Directory.get(path=Path(directory), username=user.username)
+    directory_obj: Directory | None = await Directory.get(user.username, path=Path(directory))
 
     if directory_obj is None:
         raise HTTPException(status_code=404, detail="Directory not found")
 
-    return await Directory.get_all(user.username, directory=Path(directory)), await File.get_all(user.username, directory_id=directory_obj.id)
+    return await Directory.get_all(user.username, Path(directory)), await File.get_all(user.username, directory_obj.id)
 
 
 @auth.get("/trash")
 async def get_trash(user: User = Depends(get_current_user)) -> tuple[list[Directory], list[File]]:
     await File.purge_expired(user.username)
-    return await Directory.get_all(user.username, trashed_only=True), await File.get_all(user.username, trashed_only=True)
+    return await Directory.get_all(user.username, trash=True), await File.get_all(user.username, trash=True)
 
 
 @auth.delete("/file/{fid}")
@@ -219,7 +350,7 @@ async def directory_delete(did: int, user: User = Depends(get_current_user)) -> 
 
 @auth.delete("/trash/file/{fid}")
 async def permanently_delete(fid: int, user: User = Depends(get_current_user)) -> JSONResponse:
-    file: File | None = await File.get(user.username, fid=fid, trashed_only=True)
+    file: File | None = await File.get(user.username, fid=fid, trash=True)
 
     if file is None or file.username != user.username:
         raise HTTPException(status_code=404, detail="File not found")
@@ -230,15 +361,15 @@ async def permanently_delete(fid: int, user: User = Depends(get_current_user)) -
 
 @auth.delete("/trash/directory/{did}")
 async def permanently_delete_directory(did: int, user: User = Depends(get_current_user)) -> JSONResponse:
-    directory: Directory | None = await Directory.get(user.username, did=did, trashed_only=True)
+    directory: Directory | None = await Directory.get(user.username, did=did, trash=True)
 
     if directory is None or directory.username != user.username:
         raise HTTPException(status_code=404, detail="Directory not found")
 
-    for file in await File.get_all(user.username, directory_id=directory.id, trashed_only=True):
+    for file in await File.get_all(user.username, directory.id, True):
         await file.delete()
 
-    for child in await Directory.get_all(user.username, directory=directory.path, trashed_only=True):
+    for child in await Directory.get_all(user.username, directory.path, True):
         await permanently_delete_directory(cast(int, child.id), user)
 
     await directory.delete()
@@ -247,7 +378,7 @@ async def permanently_delete_directory(did: int, user: User = Depends(get_curren
 
 @auth.post("/trash/file/{fid}/restore")
 async def restore_file(fid: int, user: User = Depends(get_current_user)) -> JSONResponse:
-    file: File | None = await File.get(user.username, fid=fid, trashed_only=True)
+    file: File | None = await File.get(user.username, fid=fid, trash=True)
 
     if file is None or file.username != user.username:
         raise HTTPException(status_code=404, detail="File not found")
@@ -258,7 +389,7 @@ async def restore_file(fid: int, user: User = Depends(get_current_user)) -> JSON
 
 @auth.post("/trash/directory/{did}/restore")
 async def restore_directory(did: int, user: User = Depends(get_current_user)) -> JSONResponse:
-    directory: Directory | None = await Directory.get(user.username, did=did, trashed_only=True)
+    directory: Directory | None = await Directory.get(user.username, did=did, trash=True)
 
     if directory is None or directory.username != user.username:
         raise HTTPException(status_code=404, detail="Directory not found")

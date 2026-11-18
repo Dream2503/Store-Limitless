@@ -13,14 +13,15 @@ if TYPE_CHECKING:
 
 
 class Progress:
-    def __init__(self, message: str, total: int):
+    def __init__(self, name: str, message: str, total: int):
+        self.name = name
         self.message: str = message
         self.transfer: int = 0
         self.total: int = total
 
     @property
-    def value(self) -> tuple[str, int, int]:
-        return self.message, self.transfer, self.total
+    def value(self) -> tuple[str, str, int, int]:
+        return self.name, self.message, self.transfer, self.total
 
 
 class ProgressStream(BytesIO):

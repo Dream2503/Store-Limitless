@@ -10,7 +10,7 @@ export default function AuthPage() {
     const [message, setMessage] = useState("");
     const [loading, setLoading] = useState(false);
 
-    const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+    const API_URL = window.STORELIMITLESS_CONFIG?.API_URL ?? import.meta.env.VITE_API_URL
 
     const handleChange = (e) => {
         setFormData((prev) => ({...prev, [e.target.name]: e.target.value}));

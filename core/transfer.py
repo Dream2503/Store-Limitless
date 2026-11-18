@@ -21,7 +21,7 @@ async def file_upload(
 
     try:
         write_log("INFO", data_center, "UPLOAD", file.username, f"Found local file: {file_path.name}")
-        progress = Progress("Uploading File", 0)
+        progress: Progress = Progress(file.name, "Uploading File", 0)
         progress_value: Progress
 
         async for progress_value in upload_growing_file(file=file, path=file_path, data_center=data_center, progress=progress, producer=upload_task):
@@ -44,7 +44,7 @@ async def link_upload(file: File, link: str) -> AsyncGenerator[Progress, None]:
 
     user: User = cast(User, await User.get(file.username))
     data_center: DataCenter = DataCenter(file.data_center)
-    progress: Progress = Progress("Uploading File", 0)
+    progress: Progress = Progress("link", "Uploading File", 0)
     write_log("INFO", data_center, "DOWNLOAD", user.username, f"Got link: {link}")
 
     try:

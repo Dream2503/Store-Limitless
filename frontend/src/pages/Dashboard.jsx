@@ -2,7 +2,7 @@ import {useCallback, useEffect, useMemo, useState} from "react";
 import {useNavigate} from "react-router-dom";
 import {createPortal} from "react-dom";
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+const API_URL = window.STORELIMITLESS_CONFIG?.API_URL ?? import.meta.env.VITE_API_URL
 
 const NAV_ITEMS = [{id: "files", icon: "folder_open", label: "All Files", enabled: true}, {
     id: "trash", icon: "delete", label: "Trash", enabled: true

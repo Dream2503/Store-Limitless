@@ -5,16 +5,17 @@ from telethon.errors import RPCError
 
 from core.config import TELEGRAM_SESSION
 from core.data_center import ConfigMeta, DataCenter
-from core.utils import write_log, getenv
+from core.utils import write_log
+from core.utils.env import TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_TOKEN, TELEGRAM_FILE_DUMP_ID
 from core.utils.progress import Progress
 
 
 class Telegram(DataCenter, metaclass=ConfigMeta):
     NAME: str = "Telegram"
-    API_ID: int = int(getenv("TELEGRAM_API_ID"))
-    API_HASH: str = getenv("TELEGRAM_API_HASH")
-    TOKEN: str = getenv("TELEGRAM_TOKEN")
-    FILE_DUMP_ID: int = int(getenv("TELEGRAM_FILE_DUMP_ID"))
+    API_ID: int = TELEGRAM_API_ID
+    API_HASH: str = TELEGRAM_API_HASH
+    TOKEN: str = TELEGRAM_TOKEN
+    FILE_DUMP_ID: int = TELEGRAM_FILE_DUMP_ID
     FILE_DUMP: TelegramClient
 
     @staticmethod

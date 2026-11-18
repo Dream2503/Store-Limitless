@@ -27,12 +27,11 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "resources/backend": "backend",
-      "resources/Memurai.msi": "Memurai.msi"
+      "resources/backend": "backend"
     },
     "windows": {
-      "nsis": {
-        "installerHooks": "windows/hooks.nsh"
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
       }
     },
     "icon": [

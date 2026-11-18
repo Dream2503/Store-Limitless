@@ -7,20 +7,6 @@ if TYPE_CHECKING:
     from core.data_center import DataCenter
 
 
-def getenv(key: str) -> str:
-    import os
-
-    value: str | None = os.getenv(key)
-
-    if value is None or not value.strip():
-        raise RuntimeError(
-            f"Environment variable '{key}' is missing or empty. "
-            "Check your .env file or system environment."
-        )
-
-    return value
-
-
 def write_log(level: str, data_center: type[DataCenter] | DataCenter, func: str, user: str, message: str) -> None:
     from core.config import LOG_HANDLER, LOCK
 

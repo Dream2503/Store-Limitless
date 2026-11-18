@@ -5,10 +5,9 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 
 from backend.database.models import User
-from core.utils import getenv
+from core.utils.env import SECRET_KEY
 
 OAuth2_scheme: OAuth2PasswordBearer = OAuth2PasswordBearer(tokenUrl="/login")
-SECRET_KEY: str = getenv("SECRET_KEY")
 ALGORITHM: str = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 

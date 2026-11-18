@@ -106,6 +106,12 @@ function triggerBrowserDownload(url) {
 export default function DashboardPage({active = true} = {}) {
     const navigate = useNavigate();
     const location = useLocation();
+    const isDashboardRoute = location.pathname === "/home" || location.pathname.startsWith("/home/");
+    const isFilePreviewRoute = /^\\/(?:view|s)\\/[^/]+\\/?$/.test(location.pathname);
+    // Keep the cached dashboard surface visible underneath a file preview.
+    // The preview is stacked above it, so returning never depends on restoring
+    // visibility after PDF.js has been torn down.
+    const isDashboardSurfaceVisible = isDashboardRoute || isFilePreviewRoute;
 
     /** @type {[DashboardTab, import("react").Dispatch<import("react").SetStateAction<DashboardTab>>]} */
     const [activeTab, setActiveTab] = useState("files");
@@ -2408,11 +2414,11 @@ export default function DashboardPage({active = true} = {}) {
     const isSearchBusy = isSearching && searchLoading;
 
     return (<div
-        className="absolute inset-0 flex h-screen overflow-hidden bg-[#1c1c1c] text-[#fafafa]"
+        className="absolute inset-0 z-0 flex h-screen overflow-hidden bg-[#1c1c1c] text-[#fafafa]"
         style={{
             fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
-            visibility: active ? "visible" : "hidden",
-            pointerEvents: active ? "auto" : "none",
+            visibility: isDashboardSurfaceVisible ? "visible" : "hidden",
+            pointerEvents: isDashboardRoute ? "auto" : "none",
         }}
         onDragEnter={handleExternalDragEnter}
         onDragOver={handleExternalDragOver}

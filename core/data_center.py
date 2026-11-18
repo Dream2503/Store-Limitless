@@ -6,12 +6,12 @@ from collections import OrderedDict
 from pathlib import Path
 from shutil import rmtree
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from core.config import TRANSFER_PATH
 
 if TYPE_CHECKING:
-    from core.utils import Progress
+    from core.utils.progress import Progress
 
 
 class DataCenter:
@@ -22,7 +22,7 @@ class DataCenter:
     MAX_SIZE: int = 10 * 1024 * 1024
 
     CACHE_DIR: Path = TRANSFER_PATH / Path("cached")
-    CACHE_LIMIT: int = 512 * 1024 * 1024
+    CACHE_LIMIT: int = 256 * 1024 * 1024
 
     _cache: OrderedDict[str, tuple[int, float | int]] = OrderedDict()
     _cache_size: int = 0
@@ -56,7 +56,7 @@ class DataCenter:
         if DataCenter._cache_lock is None:
             DataCenter._cache_lock = Lock()
 
-        return DataCenter._cache_lock
+        return cast(Lock, DataCenter._cache_lock)
 
     @staticmethod
     def _part_path(fid: str, part: int) -> Path:
@@ -143,6 +143,8 @@ class DataCenter:
     @staticmethod
     async def _evict() -> None:
         while DataCenter._cache_size > DataCenter.CACHE_LIMIT and DataCenter._cache:
+            key: str
+            size: int
             key, (size, _) = DataCenter._cache.popitem(last=False)
             path: Path = Path(key)
 
@@ -159,36 +161,12 @@ class DataCenter:
                 DataCenter._cache_size -= size
 
     @staticmethod
-    async def clear_cache(fid: str | None = None) -> None:
-        async with DataCenter._lock():
-            if fid is None:
-                if DataCenter.CACHE_DIR.exists():
-                    await to_thread(rmtree, DataCenter.CACHE_DIR)
-
-                DataCenter._cache.clear()
-                DataCenter._cache_size = 0
-                return
-
-            folder: Path = DataCenter.CACHE_DIR / fid
-
-            if folder.exists():
-                await to_thread(rmtree, folder)
-
-            prefix: str = str(folder) + os.sep
-
-            for key, (size, _) in list(DataCenter._cache.items()):
-                if key.startswith(prefix):
-                    DataCenter._cache.pop(key)
-                    DataCenter._cache_size -= size
-
-    @staticmethod
     async def initialize_cache() -> None:
         async with DataCenter._lock():
             if DataCenter.CACHE_DIR.exists():
                 await to_thread(rmtree, DataCenter.CACHE_DIR)
 
             DataCenter.CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            DataCenter._cache.clear()
             DataCenter._cache_size = 0
 
     @staticmethod

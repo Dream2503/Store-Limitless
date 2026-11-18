@@ -5,11 +5,11 @@ from typing import cast
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.database.connection import CONNECTION
-from backend.database.connection import UserDict
+from backend.database.connection import CONNECTION, UserDict
 from core.data_center import Database
 from core.utils import write_log
 from .directory import Directory
+from ..redis_server import Redis
 
 
 class User(BaseModel):
@@ -29,7 +29,7 @@ class User(BaseModel):
             f"created_at={self.created_at})"
         )
 
-    def save(self) -> None:
+    async def save(self) -> None:
         try:
             CONNECTION.execute(
                 """
@@ -53,11 +53,17 @@ class User(BaseModel):
             raise
 
     @property
-    def home(self) -> Directory:
-        return cast(Directory, Directory.get(path=Path("/home"), username=self.username))
+    async def home(self) -> Directory:
+        return cast(Directory, await Directory.get(path=Path("/home"), username=self.username))
 
     @classmethod
-    def get(cls, username: str) -> "User | None":
+    async def get(cls, username: str) -> "User | None":
+        try:
+            return cast(User, await Redis.get(f"user:{username}", "User"))
+
+        except KeyError:
+            pass
+
         row: UserDict | None = CONNECTION.execute(
             """
             SELECT username, password, first_name, last_name, created_at
@@ -70,7 +76,9 @@ class User(BaseModel):
         if row is None:
             return None
 
-        return cls(**row)
+        user: User = cls(**row)
+        await Redis.set(f"user:{user.username}", user)
+        return user
 
     def update(self) -> None:
         try:

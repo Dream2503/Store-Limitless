@@ -27,13 +27,13 @@ def verify_token(token: str) -> str | None:
         return None
 
 
-def get_current_user(token: str = Depends(OAuth2_scheme)) -> User:
+async def get_current_user(token: str = Depends(OAuth2_scheme)) -> User:
     username: str | None = verify_token(token)
 
     if username is None:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user: User | None = User.get(username)
+    user: User | None = await User.get(username)
 
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")

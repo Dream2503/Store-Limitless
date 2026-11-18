@@ -21,7 +21,7 @@ releases
 build/
 dist/
 frontend/dist/
-api/dist/
+api/
 frontend/src-tauri/target/
 frontend/src-tauri/resources/backend/
 

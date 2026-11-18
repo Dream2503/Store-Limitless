@@ -28,14 +28,14 @@ version_ge() {
 require_file "$ROOT/frontend/src-tauri/tauri.conf.json"
 require_file "$ROOT/requirements.txt"
 require_file "$ROOT/storelimitless-backend.spec"
-require_file "$ROOT/build/dependencies/Memurai.msi"
+require_file "$ROOT/build/Memurai.msi"
 
 VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
     "$ROOT/frontend/src-tauri/tauri.conf.json")
 
 [ -n "$VERSION" ] || die "could not determine version from tauri.conf.json"
 
-MEMURAI_MSI="$ROOT/build/dependencies/Memurai.msi"
+MEMURAI_MSI="$ROOT/build/Memurai.msi"
 
 echo "==> Building StoreLimitless version: $VERSION"
 
@@ -60,7 +60,6 @@ rm -rf \
     "$ROOT/frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
 
 mkdir -p \
-    "$ROOT/build/dependencies" \
     "$ROOT/dist/linux" \
     "$ROOT/dist/windows" \
     "$ROOT/releases/linux" \
@@ -351,31 +350,40 @@ echo "==> Preparing Windows FFmpeg"
 
 FFMPEG_WINDOWS_ROOT="$ROOT/build/ffmpeg-windows"
 FFMPEG_WINDOWS_ARCHIVE="$ROOT/build/ffmpeg-windows.zip"
+FFMPEG_WINDOWS="$FFMPEG_WINDOWS_ROOT/ffmpeg.exe"
 
-if [ ! -s "$FFMPEG_WINDOWS_ARCHIVE" ]; then
-    echo "==> Downloading Windows FFmpeg"
-    wget -q --show-progress \
-        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" \
-        -O "$FFMPEG_WINDOWS_ARCHIVE" \
-        || die "could not download Windows FFmpeg."
-    [ -s "$FFMPEG_WINDOWS_ARCHIVE" ] \
-        || die "Windows FFmpeg download is empty."
-else
-    echo "==> Using cached Windows FFmpeg archive"
-fi
+if [ ! -f "$FFMPEG_WINDOWS" ]; then
+    if [ ! -s "$FFMPEG_WINDOWS_ARCHIVE" ]; then
+        echo "==> Downloading Windows FFmpeg"
+        wget -q --show-progress \
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" \
+            -O "$FFMPEG_WINDOWS_ARCHIVE" \
+            || die "could not download Windows FFmpeg."
 
-FFMPEG_WINDOWS="$(find "$FFMPEG_WINDOWS_ROOT" -type f -name "ffmpeg.exe" -print -quit)"
+        [ -s "$FFMPEG_WINDOWS_ARCHIVE" ] \
+            || die "Windows FFmpeg download is empty."
+    else
+        echo "==> Using cached Windows FFmpeg archive"
+    fi
 
-if [ -z "$FFMPEG_WINDOWS" ]; then
     echo "==> Extracting Windows FFmpeg"
+
+    rm -rf "$FFMPEG_WINDOWS_ROOT"
     mkdir -p "$FFMPEG_WINDOWS_ROOT"
-    unzip -q "$FFMPEG_WINDOWS_ARCHIVE" -d "$FFMPEG_WINDOWS_ROOT"
-    FFMPEG_WINDOWS="$(find "$FFMPEG_WINDOWS_ROOT" -type f -name "ffmpeg.exe" -print -quit)"
-else
-    echo "==> Using cached extracted Windows FFmpeg"
+
+    unzip -q \
+        "$FFMPEG_WINDOWS_ARCHIVE" \
+        -d "$FFMPEG_WINDOWS_ROOT"
+
+    EXTRACTED_FFMPEG="$(find "$FFMPEG_WINDOWS_ROOT" -type f -name "ffmpeg.exe" -print -quit)"
+
+    [ -n "$EXTRACTED_FFMPEG" ] \
+        || die "Windows ffmpeg.exe was not found in the archive."
+
+    cp "$EXTRACTED_FFMPEG" "$FFMPEG_WINDOWS"
 fi
 
-[ -n "$FFMPEG_WINDOWS" ] || die "Windows ffmpeg.exe was not found."
+echo "==> Using Windows FFmpeg: $FFMPEG_WINDOWS"
 
 cp "$FFMPEG_WINDOWS" "$RUNTIME_DIR/windows/ffmpeg.exe"
 

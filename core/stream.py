@@ -1,7 +1,7 @@
 from bisect import bisect_right
 from dataclasses import dataclass
-from re import fullmatch
-from typing import AsyncGenerator
+from re import fullmatch, Match
+from typing import AsyncGenerator, cast
 
 from backend.database.models.file import File
 from core.data_center import DataCenter
@@ -39,15 +39,17 @@ class Stream:
             self.byte_range: Stream.ByteRange = Stream.ByteRange(0, self.file.size - 1)
 
         else:
-            match = fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+            match: Match[str] | None = fullmatch(r"bytes=(\d*)-(\d*)", range_header)
 
             if match is None:
                 raise ValueError("Invalid Range header")
 
+            start: int | None
+            end: int | None
             start, end = (int(value) if value else None for value in match.groups())
 
             if start is None:
-                if not end or end <= 0:
+                if end is None or end <= 0:
                     raise ValueError("Invalid suffix range")
 
                 self.byte_range = Stream.ByteRange(max(self.file.size - end, 0), self.file.size - 1)
@@ -61,7 +63,7 @@ class Stream:
                 if end < start:
                     raise ValueError("Invalid range")
 
-                self.byte_range = Stream.ByteRange(start, min(end, self.file.size - 1))
+                self.byte_range = Stream.ByteRange(start, min(cast(int, end), self.file.size - 1))
 
     async def stream(self) -> AsyncGenerator[bytes, None]:
         chunks: list[Stream.FileChunk] = self.chunks

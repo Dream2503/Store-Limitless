@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from core.config import POSSIBLE_DATACENTERS
 
 ValueType = Literal[
-    "datacenter",
+    "data_center",
     "directory",
     "file_name",
     "link",
@@ -17,7 +17,7 @@ def perform_validation(value: str, value_type: ValueType) -> str:
     value = value.strip()
 
     match value_type:
-        case "datacenter":
+        case "data_center":
             if value not in POSSIBLE_DATACENTERS:
                 raise HTTPException(status_code=400, detail="Invalid data center")
 

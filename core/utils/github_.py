@@ -4,7 +4,8 @@ from aiohttp import ClientSession
 
 from backend.database.models import GitHubCursor
 from core.data_center import ConfigMeta, DataCenter
-from core.utils import Progress, getenv, write_log
+from core.utils import getenv, write_log
+from core.utils.progress import Progress
 
 
 class GitHub(DataCenter, metaclass=ConfigMeta):

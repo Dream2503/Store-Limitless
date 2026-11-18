@@ -2,10 +2,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
 
-from psycopg import Cursor
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.database.connection import CONNECTION, FileDict
+from backend.database.connection import CONNECTION
+from backend.database.redis_server import Redis
 from core.data_center import Database
 from core.utils import write_log
 
@@ -38,13 +38,13 @@ class File(BaseModel):
             f"username={self.username!r})"
         )
 
-    def save(self) -> None:
-        if self.get(did=self.directory_id, name=self.name, username=self.username):
+    async def save(self) -> None:
+        if await self.get(did=self.directory_id, name=self.name, username=self.username):
             path: Path = Path(self.name)
             stem, extension = path.stem, path.suffix
             i = 1
 
-            while self.get(did=self.directory_id, name=f"{stem}({i}){extension}", username=self.username):
+            while await self.get(did=self.directory_id, name=f"{stem}({i}){extension}", username=self.username):
                 i += 1
 
             self.name = f"{stem}({i}){extension}"
@@ -69,6 +69,7 @@ class File(BaseModel):
                 ),
             ).fetchone())["id"]
             CONNECTION.commit()
+            await Redis.set(f"user:{self.username}:files", self)
 
         except Exception as e:
             CONNECTION.rollback()
@@ -76,104 +77,76 @@ class File(BaseModel):
             raise
 
     @classmethod
-    def get(cls, *,
+    async def get(
+            cls,
+            username: str,
+            *,
             fid: int | None = None,
             did: int | None = None,
             name: str | None = None,
-            username: str | None = None,
             include_trashed: bool = False,
-            trashed_only: bool = False) -> "File | None":
-        if trashed_only:
-            trash_clause: str = "AND deleted_at IS NOT NULL"
-
-        elif not include_trashed:
-            trash_clause: str = "AND deleted_at IS NULL"
-
-        else:
-            trash_clause: str = ""
-
+            trashed_only: bool = False
+    ) -> "File | None":
         if fid is not None:
-            cursor: Cursor[FileDict] = CONNECTION.execute(
-                f"""
-                SELECT id, directory_id, name, type, size, modified_at, data_center, links, deleted_at, username
-                FROM files
-                WHERE id = %s 
-                  {trash_clause};
-                """,
-                (fid,),
-            )
+            try:
+                file: File = cast(File, await Redis.get(f"user:{username}:files {fid}", "File"))
 
-        elif did is not None and name is not None and username is not None:
-            cursor: Cursor[FileDict] = CONNECTION.execute(
-                f"""
-                SELECT id, directory_id, name, type, size, modified_at, data_center, links, deleted_at, username
-                FROM files
-                WHERE directory_id = %s 
-                  AND name = %s 
-                  AND username = %s 
-                  {trash_clause};
-                """,
-                (
-                    did,
-                    name,
-                    username
-                ),
-            )
+            except KeyError:
+                return None
 
-        else:
-            return None
+            if file.deleted_at is not None and not include_trashed:
+                return None
 
-        row: FileDict | None = cursor.fetchone()
+            if file.deleted_at is None and trashed_only:
+                return None
 
-        if row is None:
-            return None
+            return file
 
-        return cls(**row)
+        elif did is not None and name is not None:
+            files: list[File] = cast(list[File], await Redis.get(f"user:{username}:files", "File"))
+
+            for file in files:
+                if file.directory_id != did or file.name != name:
+                    continue
+
+                if file.deleted_at is not None and not include_trashed:
+                    continue
+
+                if file.deleted_at is None and trashed_only:
+                    continue
+
+                return file
+
+        return None
 
     @classmethod
-    def get_all(cls, username: str, *, directory_id: int | None = None, include_trashed: bool = False, trashed_only: bool = False, ) -> list["File"]:
-        if trashed_only:
-            trash_clause: str = "AND deleted_at IS NOT NULL"
+    async def get_all(
+            cls,
+            username: str,
+            *,
+            directory_id: int | None = None,
+            include_trashed: bool = False,
+            trashed_only: bool = False
+    ) -> list["File"]:
+        files: list[File] = cast(list[File], await Redis.get(f"user:{username}:files", "File"))
+        result: list[File] = []
 
-        elif not include_trashed:
-            trash_clause: str = "AND deleted_at IS NULL"
+        for file in files:
+            if file.deleted_at is not None and not include_trashed:
+                continue
 
-        else:
-            trash_clause: str = ""
+            if file.deleted_at is None and trashed_only:
+                continue
 
-        if directory_id is not None:
-            cursor: Cursor[FileDict] = CONNECTION.execute(
-                f"""
-                SELECT id, directory_id, name, type, size, modified_at, data_center, links, deleted_at, username
-                FROM files
-                WHERE directory_id = %s 
-                  AND username = %s 
-                  {trash_clause}
-                ORDER BY name;
-                """,
-                (directory_id, username),
-            )
-        else:
-            cursor: Cursor[FileDict] = CONNECTION.execute(
-                f"""
-                SELECT id, directory_id, name, type, size, modified_at, data_center, links, deleted_at, username
-                FROM files
-                WHERE username = %s 
-                  {trash_clause}
-                ORDER BY name;
-                """,
-                (username,),
-            )
+            if directory_id is not None and file.directory_id != directory_id:
+                continue
 
-        row: FileDict
-        files: list[File] = []
+            result.append(file)
 
-        for row in cursor.fetchall():
-            files.append(cls(**row))
+        result.sort(key=lambda file: file.name)
+        return result
 
-        return files
-
-    def update(self) -> None:
+    async def update(self) -> None:
         if self.id is None:
             raise ValueError("File has no ID")
 
@@ -204,21 +177,22 @@ class File(BaseModel):
                 ),
             )
             CONNECTION.commit()
+            await Redis.set(f"user:{self.username}:files", self)
 
         except Exception as e:
             CONNECTION.rollback()
             write_log("ERROR", Database, "UPDATE FILE", self.username, f"Failed to update file: {e}")
             raise
 
-    def move_to_trash(self) -> None:
+    async def move_to_trash(self) -> None:
         if self.id is None:
             raise ValueError("File has no ID")
 
         self.modified_at = datetime.now(timezone.utc)
         self.deleted_at = self.modified_at
-        self.update()
+        await self.update()
 
-    def delete(self) -> None:
+    async def delete(self) -> None:
         if self.id is None:
             raise ValueError("File has no ID")
 
@@ -232,37 +206,47 @@ class File(BaseModel):
                 (self.id,),
             )
             CONNECTION.commit()
+            await Redis.delete(f"user:{self.username}:files {self.id}", "File")
 
         except Exception as e:
             CONNECTION.rollback()
             write_log("ERROR", Database, "DELETE FILE", str(self.id), f"Failed to delete file: {e}")
             raise
 
-    def restore(self) -> None:
+    async def restore(self) -> None:
         if self.id is None:
             raise ValueError("File has no ID")
 
         self.deleted_at = None
         self.modified_at = datetime.now(timezone.utc)
-        self.update()
+        await self.update()
 
     @classmethod
-    def purge_expired(cls, username: str, older_than_days: int = 30) -> None:
+    async def purge_expired(cls, username: str, older_than_days: int = 30) -> None:
         try:
+            files: list[File] = cast(list[File], await Redis.get(f"user:{username}:files", "File"))
+            cutoff: datetime = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+            expired: list[File] = [file for file in files if file.deleted_at is not None and file.deleted_at < cutoff]
+
+            if not expired:
+                return
+
             CONNECTION.execute(
                 """
                 DELETE
                 FROM files
                 WHERE username = %s
-                  AND deleted_at IS NOT NULL
-                  AND deleted_at < %s;
+                  AND id = ANY(%s);
                 """,
                 (
                     username,
-                    datetime.now(timezone.utc) - timedelta(days=older_than_days),
+                    [file.id for file in expired],
                 ),
             )
             CONNECTION.commit()
+
+            for file in expired:
+                await Redis.delete(f"user:{username}:files {file.id}", "File")
 
         except Exception as e:
             CONNECTION.rollback()

@@ -21,16 +21,17 @@ def verify_password(password: str, hashed_password: str) -> bool:
 
 
 def create_public_stream_token(file: File, username: str) -> str:
-    encoded_payload: bytes = urlsafe_b64encode(dumps({
-        "file_id": file.id,
-        "username": username
-    }, separators=(",", ":"), sort_keys=True).encode()).rstrip(b"=")
+    encoded_payload: bytes = urlsafe_b64encode(
+        dumps({"file_id": file.id, "username": username}, separators=(",", ":"), sort_keys=True).encode()
+    ).rstrip(b"=")
     encoded_signature: bytes = urlsafe_b64encode(hmac.new(SECRET_KEY.encode(), encoded_payload, sha256).digest()).rstrip(b"=")
     return f"{encoded_payload.decode()}.{encoded_signature.decode()}"
 
 
 def verify_public_stream_token(token: str) -> dict[str, str | int]:
     try:
+        encoded_payload: str
+        encoded_signature: str
         encoded_payload, encoded_signature = token.split(".", 1)
         expected_signature: bytes = hmac.new(SECRET_KEY.encode(), encoded_payload.encode(), sha256).digest()
         signature: bytes = urlsafe_b64decode(encoded_signature + "=" * (-len(encoded_signature) % 4))

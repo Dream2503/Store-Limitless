@@ -5,7 +5,7 @@ from backend.server.routers import auth, public
 
 app = FastAPI()
 
-origins = [
+origins: list[str] = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:5174",

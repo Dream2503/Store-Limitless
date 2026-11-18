@@ -11,10 +11,11 @@ from yt_dlp import YoutubeDL
 
 import core.transfer
 from backend.database.models import File
-from core.config import FFMPEG_PATH, FROZEN
+from core.config import FFMPEG_PATH
 from core.config import TRANSFER_PATH, GOOGLE_API_KEY
 from core.data_center import DataCenter
-from core.utils import Progress, upload_growing_file, write_log
+from core.utils import write_log
+from core.utils.progress import Progress, upload_growing_file
 
 
 async def download_google_drive(file: File, link: str) -> AsyncGenerator[Progress, None]:
@@ -58,12 +59,16 @@ async def download_google_drive(file: File, link: str) -> AsyncGenerator[Progres
 
             await sleep(0.1)
 
-        async for progress_value in upload_growing_file(file=file,
-                                                        path=output,
-                                                        data_center=data_center,
-                                                        progress=progress,
-                                                        producer=download_task,
-                                                        total_size=total_size):
+        progress_value: Progress
+
+        async for progress_value in upload_growing_file(
+                file=file,
+                path=output,
+                data_center=data_center,
+                progress=progress,
+                producer=download_task,
+                total_size=total_size
+        ):
             yield progress_value
 
         file.type = guess_type(file.name)[0] or "application/octet-stream"
@@ -166,6 +171,7 @@ async def download_youtube(file: File, link: str) -> AsyncGenerator[Progress, No
         file.size = output.stat().st_size
         file.type = guess_type(file.name)[0] or "application/octet-stream"
         yield current_progress["value"]
+        progress: Progress
 
         async for progress in core.transfer.file_upload(file, output, intermediate=True):
             yield progress

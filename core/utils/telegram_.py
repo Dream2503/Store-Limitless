@@ -5,7 +5,8 @@ from telethon.errors import RPCError
 
 from core.config import TELEGRAM_SESSION
 from core.data_center import ConfigMeta, DataCenter
-from core.utils import write_log, Progress, getenv
+from core.utils import write_log, getenv
+from core.utils.progress import Progress
 
 
 class Telegram(DataCenter, metaclass=ConfigMeta):
@@ -67,7 +68,6 @@ class Telegram(DataCenter, metaclass=ConfigMeta):
         try:
             Telegram.FILE_DUMP = TelegramClient(str(TELEGRAM_SESSION), Telegram.API_ID, Telegram.API_HASH)
             await Telegram.FILE_DUMP.start(bot_token=Telegram.TOKEN)
-
             me = await Telegram.FILE_DUMP.get_me()
             write_log("INFO", Telegram, "INIT", me.username or str(me.id), f"Bot is online. Logged in (id={me.id})")
 

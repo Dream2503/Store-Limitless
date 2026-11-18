@@ -2,10 +2,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
-from psycopg import Cursor
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.database.connection import CONNECTION, DirectoryDict
+from backend.database.connection import CONNECTION
+from backend.database.redis_server import Redis
 from core.data_center import Database
 from core.utils import write_log
 
@@ -28,13 +28,13 @@ class Directory(BaseModel):
             f"username={self.username!r})"
         )
 
-    def save(self) -> None:
-        if Directory.get(path=self.path, username=self.username) is not None:
+    async def save(self) -> None:
+        if await Directory.get(path=self.path, username=self.username) is not None:
             parent: Path = self.path.parent
             name: str = self.path.name
-            i = 1
+            i: int = 1
 
-            while Directory.get(path=parent / name, username=self.username, ) is not None:
+            while await Directory.get(path=parent / name, username=self.username) is not None:
                 name = f"{self.path.name}({i})"
                 i += 1
 
@@ -50,6 +50,7 @@ class Directory(BaseModel):
                 (str(self.path), self.modified_at, self.deleted_at, self.username),
             ).fetchone())["id"]
             CONNECTION.commit()
+            await Redis.set(f"user:{self.username}:directories", self)
 
         except Exception as e:
             CONNECTION.rollback()
@@ -57,100 +58,76 @@ class Directory(BaseModel):
             raise
 
     @classmethod
-    def get(cls, *,
+    async def get(
+            cls,
+            username: str,
+            *,
             did: int | None = None,
             path: Path | None = None,
-            username: str | None = None,
             include_trashed: bool = False,
-            trashed_only: bool = False) -> "Directory | None":
-        if trashed_only:
-            trash_clause: str = "AND deleted_at IS NOT NULL"
-
-        elif not include_trashed:
-            trash_clause: str = "AND deleted_at IS NULL"
-
-        else:
-            trash_clause: str = ""
-
+            trashed_only: bool = False
+    ) -> "Directory | None":
         if did is not None:
-            cursor: Cursor[DirectoryDict] = CONNECTION.execute(
-                f"""
-                SELECT id, path, modified_at, deleted_at, username
-                FROM directories
-                WHERE id = %s
-                  {trash_clause};
-                """,
-                (did,),
-            )
+            try:
+                directory: Directory = cast(Directory, await Redis.get(f"user:{username}:directories {did}", "Directory"))
+
+            except KeyError:
+                return None
+
+            if directory.deleted_at is not None and not include_trashed:
+                return None
+
+            if directory.deleted_at is None and trashed_only:
+                return None
+
+            return directory
 
         elif path is not None and username is not None:
-            cursor: Cursor[DirectoryDict] = CONNECTION.execute(
-                f"""
-                SELECT id, path, modified_at, deleted_at, username
-                FROM directories
-                WHERE path = %s
-                  AND username = %s
-                  {trash_clause};
-                """,
-                (
-                    str(path),
-                    username
-                ),
-            )
+            directories: list[Directory] = cast(list[Directory], await Redis.get(f"user:{username}:directories", "Directory"))
 
-        else:
-            return None
+            for directory in directories:
+                if directory.path != path:
+                    continue
 
-        row: DirectoryDict | None = cursor.fetchone()
+                if directory.deleted_at is not None and not include_trashed:
+                    continue
 
-        if row is None:
-            return None
+                if directory.deleted_at is None and trashed_only:
+                    continue
 
-        data: dict[str, int | str | Path | datetime | None] = row
-        data["path"] = Path(cast(str, data["path"]))
-        return cls(**data)
+                return directory
+
+        return None
 
     @classmethod
-    def get_all(cls, username: str, *, directory: Path | None = None, include_trashed: bool = False, trashed_only: bool = False) -> list["Directory"]:
-        if trashed_only:
-            trash_clause: str = "AND deleted_at IS NOT NULL"
+    async def get_all(
+            cls,
+            username: str,
+            *,
+            directory: Path | None = None,
+            include_trashed: bool = False,
+            trashed_only: bool = False
+    ) -> list["Directory"]:
+        directories: list[Directory] = cast(list[Directory], await Redis.get(f"user:{username}:directories", "Directory"))
+        result: list[Directory] = []
 
-        elif not include_trashed:
-            trash_clause: str = "AND deleted_at IS NULL"
+        for data in directories:
+            if data.deleted_at is not None and not include_trashed:
+                continue
 
-        else:
-            trash_clause: str = ""
+            if data.deleted_at is None and trashed_only:
+                continue
 
-        if directory is not None:
-            directory_string: str = str(directory).strip("/")
-            path_clause: str = "AND path LIKE %s AND path NOT LIKE %s"
-            parameters: tuple[str, ...] = (f"/{directory_string}/%", f"/{directory_string}/%/%")
+            if directory is not None:
+                if data.path.parent != directory:
+                    continue
 
-        else:
-            path_clause: str = ""
-            parameters: tuple[str, ...] = tuple()
+            result.append(data)
 
-        rows: list[DirectoryDict] = CONNECTION.execute(
-            f"""
-            SELECT id, path, modified_at, deleted_at, username
-            FROM directories
-            WHERE username = %s
-              {path_clause}
-              {trash_clause}
-            ORDER BY path;
-            """,
-            (username, *parameters),
-        ).fetchall()
-        directories: list[Directory] = []
+        result.sort(key=lambda directory: str(directory.path))
+        return result
 
-        for row in rows:
-            data: dict[str, int | str | Path | datetime | None] = row
-            data["path"] = Path(cast(str, data["path"]))
-            directories.append(cls(**data))
-
-        return directories
-
-    def update(self) -> None:
+    async def update(self) -> None:
         if self.id is None:
             raise ValueError("Directory has no ID")
 
@@ -171,21 +148,22 @@ class Directory(BaseModel):
                 ),
             )
             CONNECTION.commit()
+            await Redis.set(f"user:{self.username}:directories", self)
 
         except Exception as e:
             CONNECTION.rollback()
             write_log("ERROR", Database, "UPDATE DIRECTORY", self.username, f"Failed to update directory: {e}")
             raise
 
-    def move_to_trash(self) -> None:
+    async def move_to_trash(self) -> None:
         if self.id is None:
             raise ValueError("Directory has no ID")
 
         self.modified_at = datetime.now(timezone.utc)
         self.deleted_at = self.modified_at
-        self.update()
+        await self.update()
 
-    def delete(self) -> None:
+    async def delete(self) -> None:
         if self.id is None:
             raise ValueError("Directory has no ID")
 
@@ -201,15 +179,17 @@ class Directory(BaseModel):
             )
             CONNECTION.commit()
 
+            await Redis.delete(f"user:{self.username}:directories {self.id}", "Directory")
+
         except Exception as e:
             CONNECTION.rollback()
             write_log("ERROR", Database, "DELETE DIRECTORY", str(self.id), f"Failed to delete directory: {e}")
             raise
 
-    def restore(self) -> None:
+    async def restore(self) -> None:
         if self.id is None:
             raise ValueError("Directory has no ID")
 
         self.deleted_at = None
         self.modified_at = datetime.now(timezone.utc)
-        self.update()
+        await self.update()

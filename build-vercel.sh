@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Build and deploy ONLY the StoreLimitless Vite frontend.
-# Frontend project: drive-bot
-# Frontend domain:  storelimitless.vercel.app
-# Backend domain is used only as the API URL; this script never deploys or relinks it.
+# Build and deploy both StoreLimitless Vercel applications:
+#   drive-bot      -> React/Vite frontend
+#   drive-bot-nema -> Next.js API proxy
 
 set -Eeuo pipefail
 
@@ -37,17 +36,27 @@ MESSAGE
 fi
 
 FRONTEND_DIR="$REPO_ROOT/frontend"
-ROOT_VERCEL_DIR="$REPO_ROOT/.vercel"
-PROJECT_JSON="$ROOT_VERCEL_DIR/project.json"
+BACKEND_DIR="$REPO_ROOT/backend/storelimitlessbackend"
+FRONTEND_VERCEL_DIR="$FRONTEND_DIR/.vercel"
+BACKEND_VERCEL_DIR="$BACKEND_DIR/.vercel"
+FRONTEND_PROJECT_JSON="$FRONTEND_VERCEL_DIR/project.json"
+BACKEND_PROJECT_JSON="$BACKEND_VERCEL_DIR/project.json"
+FRONTEND_ENV_FILE="$FRONTEND_DIR/.env.production.local"
+BACKEND_ENV_FILE="$BACKEND_DIR/.env.production.local"
 FRONTEND_DOMAIN="${VERCEL_FRONTEND_DOMAIN:-storelimitless.vercel.app}"
 BACKEND_DOMAIN="${VERCEL_BACKEND_DOMAIN:-cdn-storelimitless.vercel.app}"
 BACKEND_API_URL="https://${BACKEND_DOMAIN}"
 FRONTEND_PROJECT="${VERCEL_FRONTEND_PROJECT:-drive-bot}"
+BACKEND_PROJECT="${VERCEL_BACKEND_PROJECT:-drive-bot-nema}"
 VERCEL_SCOPE="${VERCEL_SCOPE:-}"
 EXPECTED_VERCEL_USER="${VERCEL_EXPECTED_USER:-}"
 
 [[ -f "$FRONTEND_DIR/package.json" ]] || fail "frontend/package.json was not found under $REPO_ROOT"
+[[ -f "$FRONTEND_DIR/package-lock.json" ]] || fail "frontend/package-lock.json is required for a reproducible frontend install"
 [[ -f "$FRONTEND_DIR/vercel.json" ]] || fail "frontend/vercel.json was not found; expected the StoreLimitless Vite frontend"
+[[ -f "$BACKEND_DIR/package.json" ]] || fail "backend/storelimitlessbackend/package.json was not found"
+[[ -f "$BACKEND_DIR/package-lock.json" ]] || fail "backend/storelimitlessbackend/package-lock.json is required for a reproducible API proxy install"
+[[ -f "$BACKEND_DIR/vercel.json" ]] || fail "backend/storelimitlessbackend/vercel.json was not found"
 
 for tool in node npm git; do
     command -v "$tool" >/dev/null 2>&1 || fail "Required tool '$tool' is not installed or not on PATH"
@@ -60,6 +69,114 @@ vercel_cli() {
     else
         npx --yes vercel@latest "$@"
     fi
+}
+
+run_vercel_in() {
+    local working_dir="$1"
+    shift
+    (cd "$working_dir" && vercel_cli "$@")
+}
+
+project_name_from_link() {
+    local project_json="$1"
+    [[ -f "$project_json" ]] || return 0
+    node -e 'try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).projectName || "")); } catch {}' "$project_json"
+}
+
+project_id_from_link() {
+    local project_json="$1"
+    [[ -f "$project_json" ]] || return 0
+    node -e 'try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).projectId || "")); } catch {}' "$project_json"
+}
+
+ensure_project_link() {
+    local working_dir="$1"
+    local project_json="$2"
+    local project_name="$3"
+    local label="$4"
+    local inspect_args=(project inspect "$project_name")
+    local create_args=(project create "$project_name")
+    local link_args=(link --yes --project "$project_name")
+
+    if [[ -n "$VERCEL_SCOPE" ]]; then
+        inspect_args+=(--scope "$VERCEL_SCOPE")
+        create_args+=(--scope "$VERCEL_SCOPE")
+        link_args+=(--scope "$VERCEL_SCOPE")
+    fi
+
+    log "Verifying the $label Vercel project '$project_name'"
+    if ! run_vercel_in "$working_dir" "${inspect_args[@]}" >/dev/null 2>&1; then
+        log "Project '$project_name' was not found in the selected Vercel scope; creating it"
+        if ! run_vercel_in "$working_dir" "${create_args[@]}"; then
+            fail "Could not create Vercel project '$project_name'. Check the project name, scope, and account permissions. You can override it with the corresponding VERCEL_*_PROJECT variable."
+        fi
+    fi
+
+    # Each app has its own .vercel/project.json. Never share a link context
+    # between the frontend and API proxy in this monorepo.
+    log "Linking the $label directory to '$project_name'"
+    run_vercel_in "$working_dir" "${link_args[@]}"
+
+    local linked_name linked_id
+    linked_name="$(project_name_from_link "$project_json")"
+    linked_id="$(project_id_from_link "$project_json")"
+    [[ "${linked_name,,}" == "${project_name,,}" ]] || fail "$label directory is linked to '$linked_name', not '$project_name'; refusing to deploy the wrong project."
+    [[ -n "$linked_id" ]] || fail "Vercel did not write a projectId to $project_json; refusing to deploy."
+    printf '%s project: %s (project ID %s)\n' "$label" "$project_name" "$linked_id"
+}
+
+pull_production_environment() {
+    local working_dir="$1"
+    local env_file="$2"
+    local label="$3"
+    local env_pull_args=(env pull .env.production.local --environment=production --yes)
+    if [[ -n "$VERCEL_SCOPE" ]]; then env_pull_args+=(--scope "$VERCEL_SCOPE"); fi
+
+    log "Pulling $label production environment variables"
+    run_vercel_in "$working_dir" "${env_pull_args[@]}"
+    chmod 600 "$env_file" 2>/dev/null || true
+}
+
+extract_deployment_url() {
+    local deployment_output="$1"
+    printf '%s\n' "$deployment_output" \
+        | grep -Eo 'https://[A-Za-z0-9.-]+\.vercel\.app' \
+        | grep -Fvx "https://${FRONTEND_DOMAIN}" \
+        | grep -Fvx "https://${BACKEND_DOMAIN}" \
+        | tail -n 1 || true
+}
+
+DEPLOYMENT_URL_RESULT=""
+deploy_prebuilt_project() {
+    local working_dir="$1"
+    local project_name="$2"
+    local label="$3"
+    local deploy_args=(deploy --prebuilt --prod --yes)
+    local deployment_output deployment_url
+    if [[ -n "$VERCEL_SCOPE" ]]; then deploy_args+=(--scope "$VERCEL_SCOPE"); fi
+
+    log "Deploying the $label project '$project_name' to Vercel production"
+    if ! deployment_output="$(run_vercel_in "$working_dir" "${deploy_args[@]}" 2>&1)"; then
+        printf '%s\n' "$deployment_output" >&2
+        fail "$label deployment failed. The other project will not be deployed after this failure."
+    fi
+    printf '%s\n' "$deployment_output"
+
+    deployment_url="$(extract_deployment_url "$deployment_output")"
+    [[ -n "$deployment_url" ]] || fail "Could not extract the $label deployment URL from Vercel CLI output."
+    DEPLOYMENT_URL_RESULT="$deployment_url"
+}
+
+assign_production_domain() {
+    local working_dir="$1"
+    local deployment_url="$2"
+    local domain="$3"
+    local label="$4"
+    local alias_args=(alias set "$deployment_url" "$domain")
+    if [[ -n "$VERCEL_SCOPE" ]]; then alias_args+=(--scope "$VERCEL_SCOPE"); fi
+
+    log "Assigning $label production domain '$domain'"
+    run_vercel_in "$working_dir" "${alias_args[@]}"
 }
 
 log "Checking tools and Vercel authentication"
@@ -84,90 +201,53 @@ else
     printf 'Vercel deployment scope: personal scope for %s\n' "$AUTHENTICATED_USER"
 fi
 
-# Keep the local Vercel link and pulled production env file out of Git.
+# Keep per-project Vercel links and pulled production env files out of Git.
 if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     GIT_EXCLUDE="$(git -C "$REPO_ROOT" rev-parse --git-path info/exclude)"
     if [[ "$GIT_EXCLUDE" != /* ]]; then GIT_EXCLUDE="$REPO_ROOT/$GIT_EXCLUDE"; fi
     mkdir -p "$(dirname -- "$GIT_EXCLUDE")"
     touch "$GIT_EXCLUDE"
-    for exclude_pattern in '/.vercel/' '/frontend/.vercel/' '/frontend/.env.production.local'; do
+    for exclude_pattern in \
+        '/frontend/.vercel/' \
+        '/backend/storelimitlessbackend/.vercel/' \
+        '/frontend/.env.production.local' \
+        '/backend/storelimitlessbackend/.env.production.local'; do
         if ! grep -Fqx "$exclude_pattern" "$GIT_EXCLUDE"; then
             printf '%s\n' "$exclude_pattern" >> "$GIT_EXCLUDE"
         fi
     done
 fi
 
-project_name_from_link() {
-    local project_json="$1"
-    [[ -f "$project_json" ]] || return 0
-    node -e 'try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).projectName || "")); } catch {}' "$project_json"
-}
+# Link each project from its own app directory. This prevents the Vercel CLI
+# from using drive-bot's project ID while building or deploying drive-bot-nema.
+ensure_project_link "$BACKEND_DIR" "$BACKEND_PROJECT_JSON" "$BACKEND_PROJECT" "API proxy"
+ensure_project_link "$FRONTEND_DIR" "$FRONTEND_PROJECT_JSON" "$FRONTEND_PROJECT" "frontend"
 
-project_id_from_link() {
-    local project_json="$1"
-    [[ -f "$project_json" ]] || return 0
-    node -e 'try { process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).projectId || "")); } catch {}' "$project_json"
-}
-
-log "Verifying the frontend Vercel project only"
-mkdir -p "$ROOT_VERCEL_DIR"
-
-inspect_args=(project inspect "$FRONTEND_PROJECT")
-link_args=(link --yes --project "$FRONTEND_PROJECT")
-if [[ -n "$VERCEL_SCOPE" ]]; then
-    inspect_args+=(--scope "$VERCEL_SCOPE")
-    link_args+=(--scope "$VERCEL_SCOPE")
-fi
-
-# A project from the previous Vercel account will not exist in the new account.
-# Create it in the selected personal/team scope rather than aborting.
-if ! (cd "$REPO_ROOT" && vercel_cli "${inspect_args[@]}") >/dev/null 2>&1; then
-    log "Project '$FRONTEND_PROJECT' was not found in the selected Vercel scope; creating it"
-
-    create_args=(project create "$FRONTEND_PROJECT")
-    if [[ -n "$VERCEL_SCOPE" ]]; then
-        create_args+=(--scope "$VERCEL_SCOPE")
-    fi
-
-    if ! (cd "$REPO_ROOT" && vercel_cli "${create_args[@]}"); then
-        fail "Could not create Vercel project '$FRONTEND_PROJECT'. Check that this name is available and that the authenticated account has permission to create projects. You can choose another name with VERCEL_FRONTEND_PROJECT."
-    fi
-fi
-
-# Always relink, even when the project name matches. A project with the same
-# name may exist under the previous Vercel account, and project.json contains
-# the actual project/team IDs used by subsequent env-pull and deploy commands.
-log "Linking repository root to '$FRONTEND_PROJECT' in the selected Vercel scope"
-(cd "$REPO_ROOT" && vercel_cli "${link_args[@]}")
-
-CURRENT_PROJECT="$(project_name_from_link "$PROJECT_JSON")"
-CURRENT_PROJECT_ID="$(project_id_from_link "$PROJECT_JSON")"
-[[ "${CURRENT_PROJECT,,}" == "${FRONTEND_PROJECT,,}" ]] || fail "Root Vercel link is not '$FRONTEND_PROJECT'; stopping to avoid deploying the wrong project."
-[[ -n "$CURRENT_PROJECT_ID" ]] || fail "Vercel did not write a projectId to $PROJECT_JSON; refusing to deploy."
-printf 'Frontend project: %s (project ID %s, domain %s)\n' "$FRONTEND_PROJECT" "$CURRENT_PROJECT_ID" "$FRONTEND_DOMAIN"
-printf 'Backend API URL (unchanged): %s\n' "$BACKEND_API_URL"
+log "Installing locked API proxy dependencies"
+(cd "$BACKEND_DIR" && npm ci)
 
 log "Installing locked frontend dependencies"
 (cd "$FRONTEND_DIR" && npm ci)
 
-log "Pulling frontend production environment variables"
-env_pull_args=(env pull frontend/.env.production.local --environment=production --yes)
-if [[ -n "$VERCEL_SCOPE" ]]; then env_pull_args+=(--scope "$VERCEL_SCOPE"); fi
-(cd "$REPO_ROOT" && vercel_cli "${env_pull_args[@]}")
-chmod 600 "$FRONTEND_DIR/.env.production.local" 2>/dev/null || true
+pull_production_environment "$BACKEND_DIR" "$BACKEND_ENV_FILE" "API proxy"
+pull_production_environment "$FRONTEND_DIR" "$FRONTEND_ENV_FILE" "frontend"
+
+log "Building the Next.js API proxy for Vercel production"
+run_vercel_in "$BACKEND_DIR" build --prod
+[[ -f "$BACKEND_VERCEL_DIR/output/config.json" ]] || fail "Vercel did not produce backend .vercel/output/config.json; API proxy deployment stopped"
 
 log "Building the Vite frontend locally"
-# Force the existing stable backend URL into the bundle. The backend is not deployed or modified.
+# The browser continues using the stable proxy for metadata/control requests.
+# Only file chunk PUT bodies discover and use the current Quick Tunnel directly.
 (cd "$FRONTEND_DIR" && VITE_API_URL="$BACKEND_API_URL" npm run build)
-[[ -f "$FRONTEND_DIR/dist/index.html" ]] || fail "Vite did not produce frontend/dist/index.html; deployment stopped"
 
 log "Preparing Vercel static Build Output for the frontend"
-rm -rf "$ROOT_VERCEL_DIR/output"
-mkdir -p "$ROOT_VERCEL_DIR/output/static"
-cp -a "$FRONTEND_DIR/dist/." "$ROOT_VERCEL_DIR/output/static/"
+rm -rf "$FRONTEND_VERCEL_DIR/output"
+mkdir -p "$FRONTEND_VERCEL_DIR/output/static"
+cp -a "$FRONTEND_DIR/dist/." "$FRONTEND_VERCEL_DIR/output/static/"
 
 # Build Output API v3: serve files first, then send SPA routes to index.html.
-cat > "$ROOT_VERCEL_DIR/output/config.json" <<'JSON'
+cat > "$FRONTEND_VERCEL_DIR/output/config.json" <<'JSON'
 {
   "version": 3,
   "routes": [
@@ -177,38 +257,26 @@ cat > "$ROOT_VERCEL_DIR/output/config.json" <<'JSON'
 }
 JSON
 
-[[ -f "$ROOT_VERCEL_DIR/output/config.json" ]] || fail "Failed to create frontend Vercel output configuration"
-[[ -f "$ROOT_VERCEL_DIR/output/static/index.html" ]] || fail "Frontend Vercel output is missing index.html"
+[[ -f "$FRONTEND_VERCEL_DIR/output/config.json" ]] || fail "Failed to create frontend Vercel output configuration"
+[[ -f "$FRONTEND_VERCEL_DIR/output/static/index.html" ]] || fail "Frontend Vercel output is missing index.html"
 
-log "Deploying ONLY the frontend to Vercel production"
-deploy_args=(deploy --prebuilt --prod --yes)
-if [[ -n "$VERCEL_SCOPE" ]]; then deploy_args+=(--scope "$VERCEL_SCOPE"); fi
+# Deploy the API proxy first so /api/current-upstream exists before the new
+# frontend starts calling it for direct file uploads.
+deploy_prebuilt_project "$BACKEND_DIR" "$BACKEND_PROJECT" "API proxy"
+BACKEND_DEPLOYMENT_URL="$DEPLOYMENT_URL_RESULT"
+assign_production_domain "$BACKEND_DIR" "$BACKEND_DEPLOYMENT_URL" "$BACKEND_DOMAIN" "API proxy"
 
-if ! DEPLOY_OUTPUT="$(cd "$REPO_ROOT" && vercel_cli "${deploy_args[@]}" 2>&1)"; then
-    printf '%s\n' "$DEPLOY_OUTPUT" >&2
-    fail "Frontend deployment failed. No backend deployment was attempted."
-fi
-printf '%s\n' "$DEPLOY_OUTPUT"
-
-DEPLOYMENT_URL="$(printf '%s\n' "$DEPLOY_OUTPUT" \
-    | grep -Eo 'https://[A-Za-z0-9.-]+\.vercel\.app' \
-    | grep -Fvx "https://${FRONTEND_DOMAIN}" \
-    | grep -Fvx "https://${BACKEND_DOMAIN}" \
-    | tail -n 1 || true)"
-[[ -n "$DEPLOYMENT_URL" ]] || fail "Could not extract the frontend deployment URL from Vercel CLI output."
-
-log "Assigning the frontend production domain"
-alias_args=(alias set "$DEPLOYMENT_URL" "$FRONTEND_DOMAIN")
-if [[ -n "$VERCEL_SCOPE" ]]; then alias_args+=(--scope "$VERCEL_SCOPE"); fi
-(cd "$REPO_ROOT" && vercel_cli "${alias_args[@]}")
+deploy_prebuilt_project "$FRONTEND_DIR" "$FRONTEND_PROJECT" "frontend"
+FRONTEND_DEPLOYMENT_URL="$DEPLOYMENT_URL_RESULT"
+assign_production_domain "$FRONTEND_DIR" "$FRONTEND_DEPLOYMENT_URL" "$FRONTEND_DOMAIN" "frontend"
 
 cat <<MESSAGE
 
-Frontend deployment completed:
-  Frontend: https://${FRONTEND_DOMAIN}
-  API:      ${BACKEND_API_URL}
+Both StoreLimitless Vercel deployments completed:
+  Frontend:  https://${FRONTEND_DOMAIN}  ($FRONTEND_PROJECT)
+  API proxy: https://${BACKEND_DOMAIN}  ($BACKEND_PROJECT)
 
-Only the '$FRONTEND_PROJECT' Vercel project was deployed.
-The backend project was not inspected, relinked, built, or deployed.
+The API proxy was deployed first, followed by the frontend.
+The Cloudflare Quick Tunnel registration flow and its runtime URL remain unchanged.
 No git commit or git push was performed.
 MESSAGE

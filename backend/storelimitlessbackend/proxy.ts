@@ -53,7 +53,7 @@ export async function proxy(request: NextRequest) {
         );
     }
 
-    if (pathname === "/api/register" || pathname === "/health") {
+    if (pathname === "/api/register" || pathname === "/api/current-upstream" || pathname === "/health") {
         return NextResponse.next();
     }
 

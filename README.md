@@ -166,8 +166,9 @@ FTP client ── FTP port ──► FTP virtual filesystem ──► same model
 
 The optional deployment proxy is a separate service rather than part of the Python process: `backend/storelimitlessbackend/` is a Next.js app that
 stores the active Cloudflare Quick Tunnel URL and its update timestamp in Upstash Redis. In `CLOUD` mode, the Python process registers its temporary
-HTTPS API tunnel with this service; the stable proxy forwards browser requests to that current upstream. The proxy does not provide file storage and
-does not expose the FTP listener.
+HTTPS API tunnel with this service. The browser discovers the current URL through the uncached `GET /api/current-upstream` endpoint. Browser file-chunk
+`PUT` requests then go directly to that random Quick Tunnel; upload-job creation, progress, authentication, and other metadata/control requests continue
+through the stable API proxy. The proxy does not provide file storage and does not expose the FTP listener.
 
 ### Responsibility boundaries
 
@@ -434,9 +435,11 @@ transfer layer.
 3. The backend validates the requested provider, file name, target directory, batch ownership, and batch status. A child job ID is created. The
    backend stores the child's owner, display name, destination directory, provider, type, batch ID, and progress metadata in Redis, adds the job to
    the per-user index, and associates it with the parent batch. Pending file/session data also uses a time-to-live.
-4. The frontend divides each local file into **1 MiB chunks**, sends up to **8 chunks concurrently**, and allows up to **3 total attempts** for each
-   chunk before failing the item.
-5. The frontend sends byte chunks to `PUT /public/upload/{job_id}/chunk`, with `offset` and `total` query parameters.
+4. Before each file transfer, the browser discovers the latest registered Cloudflare Quick Tunnel URL through the uncached
+   `GET /api/current-upstream` endpoint on the stable API proxy. Local and custom API configurations keep using their configured API URL.
+5. The frontend divides each local file into **1 MiB chunks**, sends up to **8 chunks concurrently**, and allows up to **3 total attempts** for each
+   chunk before failing the item. The chunk `PUT /public/upload/{job_id}/chunk` requests go directly to the discovered tunnel, with `offset` and
+   `total` query parameters. Job creation, status, progress, and other control requests continue through the stable API proxy.
 6. The backend writes each chunk at its declared byte offset and records received ranges in Redis. The range helper merges overlapping/adjacent ranges
    and tracks the contiguous byte count from offset zero.
 7. A producer task waits for incoming bytes while the upload worker passes the growing temporary file through the core upload pipeline. The transfer
@@ -1095,8 +1098,8 @@ The current deployment separates the static React frontend from the Python API:
 | Component             | URL / location                                          | Role                                                                                              |
 |-----------------------|---------------------------------------------------------|---------------------------------------------------------------------------------------------------|
 | Frontend              | `https://storelimitless.vercel.app`                     | Public landing page, authentication UI, and dashboard                                             |
-| Stable API proxy      | `https://cdn-storelimitless.vercel.app`              | Stable browser-facing API origin; forwards requests to the currently registered Cloudflare tunnel |
-| Cloud-mode API tunnel | Generated at runtime                                    | Temporary HTTPS upstream to the Python API on port `8000`                                         |
+| Stable API proxy      | `https://cdn-storelimitless.vercel.app`                | Metadata/control API and uncached tunnel discovery endpoint                                          |
+| Cloud-mode API tunnel | Generated at runtime                                    | Temporary HTTPS upstream; receives browser file-chunk PUT requests directly                          |
 | Tunnel registry       | Upstash Redis, configured in the Next.js Vercel project | Stores the active tunnel URL and last registration timestamp                                      |
 
 When the Python application starts in `HOST="CLOUD"`, it creates a Cloudflare Quick Tunnel for `http://127.0.0.1:8000`, then attempts to register
@@ -1105,13 +1108,15 @@ the generated HTTPS URL with `POST /api/register` on the stable API proxy. The r
 failures are logged and do not necessarily stop the local services, so a running Colab/server does not by itself prove that the stable proxy is
 registered.
 
-The proxy's `/health` endpoint reports whether an upstream is registered and the last update timestamp. It reports registry state, not whether every
-API route is healthy. If browser API requests return `503`, check the health endpoint, confirm the cloud runtime is still running, inspect the
+The proxy's `/health` endpoint reports whether an upstream is registered and the last update timestamp. The browser also reads
+`GET /api/current-upstream` before each file transfer; this endpoint is uncached and returns the current Quick Tunnel URL. File chunk bodies are sent
+directly to that URL, bypassing Vercel. Metadata and control requests still use the stable proxy. The health endpoint reports registry state, not whether
+every API route is healthy. If browser API requests return `503`, check the health endpoint, confirm the cloud runtime is still running, inspect the
 registration logs, and verify that the Vercel and Python runtime use the same `STORELIMITLESS_PROXY_TOKEN` and valid Upstash Redis environment
-variables. Public stream, file-download, and ZIP-download responses also emit CORS headers for the production frontend origin because browsers may
-follow the stable proxy redirect to the current Cloudflare tunnel. If you change the frontend origin, update the allowlist in
-`backend/server/routers/public_routes.py` as well as the general FastAPI CORS configuration. If a request fails with a browser CORS error, inspect the
-actual final response and `OPTIONS` preflight; a proxy-generated `503` is not the same as a response from FastAPI with its CORS headers.
+variables. The Cloudflare tunnel accepts direct browser uploads from the production frontend origin through the existing FastAPI CORS configuration.
+If you change the frontend origin, update the allowlist in `backend/server/routers/public_routes.py` as well as the general FastAPI CORS configuration.
+If a request fails with a browser CORS error, inspect the actual final response and `OPTIONS` preflight; a proxy-generated `503` is not the same as a
+response from FastAPI with its CORS headers.
 
 The Next.js proxy project lives in `backend/storelimitlessbackend/`. Its `.next/`, `node_modules/`, `.turbo/`, and `coverage/` directories are
 generated artifacts and are removed by the successful root build cleanup when present. Keep `package.json`, `package-lock.json`, `app/`, `proxy.ts`,

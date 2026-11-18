@@ -2,7 +2,7 @@ import {useEffect, useRef, useState} from "react";
 import {useNavigate, useSearchParams} from "react-router-dom";
 import {getFilesFromDrop, getUploadRelativePath} from "../uploadFiles.js";
 import {formatFileSize} from "../utils.js";
-import {API_URL} from "../../../api.js";
+import {API_URL, getDirectUploadApiUrl} from "../../../api.js";
 
 /** @typedef {{cancelled: boolean, paused: boolean, pauseWaiters?: Array<() => void>}} UploadCancelToken */
 /** @typedef {Error & {fatal?: boolean, queueFatal?: boolean}} UploadRequestError */
@@ -188,6 +188,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
     // ==========================================
     /**
      * Send one file chunk and track its XMLHttpRequest in this job’s set.
+     * @param {string} uploadApiUrl Direct API origin for the chunk body.
      * @param {string} jobId
      * @param {Blob} blob
      * @param {number} offset
@@ -195,13 +196,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      * @param {Set<XMLHttpRequest>} jobXhrs
      * @returns {Promise<void>}
      */
-    const sendChunk = (jobId, blob, offset, totalSize, jobXhrs, onProgress = null) => new Promise((resolve, reject) => {
+    const sendChunk = (uploadApiUrl, jobId, blob, offset, totalSize, jobXhrs, onProgress = null) => new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         jobXhrs.add(xhr);
 
         const done = () => jobXhrs.delete(xhr);
 
-        xhr.open("PUT", `${API_URL}/public/upload/${jobId}/chunk?offset=${offset}&total=${totalSize}`);
+        xhr.open("PUT", `${uploadApiUrl}/public/upload/${encodeURIComponent(jobId)}/chunk?offset=${offset}&total=${totalSize}`);
         xhr.setRequestHeader("Authorization", `Bearer ${localStorage.getItem("token")}`);
         xhr.setRequestHeader("Content-Type", "application/octet-stream");
 
@@ -254,12 +255,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      * Upload a file in parallel chunks with retries and per-job cancellation.
      * @param {string} jobId
      * @param {File} selectedFile
+     * @param {string} uploadApiUrl Direct API origin for the chunk bodies.
      * @param {UploadCancelToken} cancelToken
      * @param {Set<XMLHttpRequest>} jobXhrs
      * @param {(progress: {transfer: number, total: number, progress: number, message: string}, immediate?: boolean) => void} onProgress
      * @returns {Promise<void>}
      */
-    const uploadFileInChunks = async (jobId, selectedFile, cancelToken, jobXhrs, onProgress = null) => {
+    const uploadFileInChunks = async (jobId, selectedFile, uploadApiUrl, cancelToken, jobXhrs, onProgress = null) => {
         const totalSize = selectedFile.size;
         // An empty file still sends one (empty) chunk so the server can finish.
         const chunkCount = Math.max(1, Math.ceil(totalSize / CHUNK_SIZE));
@@ -306,7 +308,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     }
 
                     try {
-                        await sendChunk(jobId, blob, start, totalSize, jobXhrs, (loaded) => {
+                        await sendChunk(uploadApiUrl, jobId, blob, start, totalSize, jobXhrs, (loaded) => {
                             activeChunkProgress.set(index, loaded);
                             reportProgress();
                         });
@@ -913,6 +915,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             const createJob = async (selectedFile, selectedLink = "", destinationDirectory = directory, displayName = selectedFile?.name || selectedLink, itemNumber = 1, itemDataCenter = dataCenter) => {
                 await waitWhilePaused(cancelToken);
                 if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
+
+                // Resolve the direct tunnel before creating a child job. If discovery
+                // fails, no orphaned "Waiting for upload" child is left in Redis.
+                const directUploadApiUrl = uploadMode === "file"
+                    ? await getDirectUploadApiUrl()
+                    : API_URL;
                 let response;
                 if (uploadMode === "file") {
                     response = await fetch(`${API_URL}/auth/upload`, {
@@ -988,7 +996,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 if (uploadMode === "file") {
                     try {
                         await waitWhilePaused(batchTransfer);
-                        await uploadFileInChunks(jobId, selectedFile, cancelToken, batchTransfer.xhrs, publishCurrentFileProgress);
+                        await uploadFileInChunks(jobId, selectedFile, directUploadApiUrl, cancelToken, batchTransfer.xhrs, publishCurrentFileProgress);
                         await flushPendingProgressUpdate();
                         await waitWhilePaused(batchTransfer);
                         if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
@@ -1131,6 +1139,10 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         queueItem.progress = 100;
                         unpersistedCompletedIndex = index;
                     } catch (error) {
+                        // A missing/unavailable tunnel registry prevents every file from
+                        // reaching FastAPI. Stop the shared queue instead of failing each
+                        // queued file one by one against the same unavailable route.
+                        if (error?.queueFatal) throw error;
                         if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) {
                             queueItem.status = "cancelled";
                             queueItem.message = "Cancelled";

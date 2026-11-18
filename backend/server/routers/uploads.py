@@ -741,7 +741,10 @@ async def upload_chunk(
         if created:
             state = new_state
             await Redis.delete_key(pending_upload_key(job_id))
-            await Redis.set(job_id, Progress(pending_file.name, "Receiving and uploading", 0))
+            initial_progress = Progress(pending_file.name, "Receiving and uploading", total)
+            initial_progress.download_active = True
+            initial_progress.download_total = total
+            await Redis.set(job_id, initial_progress)
             producer_task: Task[None] = create_task(wait_for_all_chunks(job_id, pending_file))
             upload_task: Task[None] = create_task(run_chunk_upload_job(job_id, pending_file, file_path, producer_task))
             track_upload_task(upload_task, job_id)

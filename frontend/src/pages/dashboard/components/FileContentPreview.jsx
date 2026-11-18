@@ -312,14 +312,21 @@ function MarkdownPreview({content}) {
 }
 
 /**
- * Render the browser's native PDF or audio preview.
- * @param {{fileId: string, navigate: Function, type: "pdf" | "audio"}} props
+ * Render a browser-native image, PDF, or audio preview from a signed stream URL.
+ * Image formats are displayed as contained media so the full photo remains visible.
+ * @param {{fileId: string, navigate: Function, type: "image" | "pdf" | "audio", fileName?: string}} props
  */
-export function MediaPreview({fileId, navigate, type, publicToken}) {
+export function MediaPreview({fileId, navigate, type, publicToken, fileName}) {
     const [streamUrl, setStreamUrl] = useState("");
     const [error, setError] = useState("");
+    const [imageLoaded, setImageLoaded] = useState(false);
+
     useEffect(() => {
         let cancelled = false;
+        setStreamUrl("");
+        setError("");
+        setImageLoaded(false);
+
         (async () => {
             try {
                 const url = await getPreviewUrl(fileId, publicToken);
@@ -332,12 +339,29 @@ export function MediaPreview({fileId, navigate, type, publicToken}) {
                 }
             }
         })();
+
         return () => {
             cancelled = true;
         };
     }, [fileId, navigate, publicToken]);
+
     if (error) return <PreviewMessage message={error}/>;
     if (!streamUrl) return <PreviewMessage message="Preparing preview…"/>;
+
+    if (type === "image") return <div className="relative flex h-full min-h-0 w-full items-center justify-center overflow-auto bg-[#111111] p-3 sm:p-6">
+        {!imageLoaded && <div className="absolute inset-0">
+            <PreviewMessage message="Loading image…"/>
+        </div>}
+        <img
+            src={streamUrl}
+            alt={fileName || "Image preview"}
+            draggable={false}
+            onLoad={() => setImageLoaded(true)}
+            onError={() => setError("This image could not be displayed. Your browser may not support this image format.")}
+            className={`max-h-full max-w-full object-contain transition-opacity duration-150 ${imageLoaded ? "opacity-100" : "opacity-0"}`}
+        />
+    </div>;
+
     if (type === "pdf") return <iframe title="PDF preview" src={streamUrl} className="h-full w-full bg-[#222]"/>;
     return <div className="flex h-full items-center justify-center px-6">
         <audio controls src={streamUrl} className="w-full max-w-2xl"/>

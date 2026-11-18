@@ -98,6 +98,23 @@ from pathlib import Path
 
 MIME_TYPE_OVERRIDES: dict[str, str] = {
     ".mkv": "video/x-matroska",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".jpe": "image/jpeg",
+    ".jfif": "image/jpeg",
+    ".png": "image/png",
+    ".apng": "image/apng",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".dib": "image/bmp",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".avif": "image/avif",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
 }
 
 

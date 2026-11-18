@@ -1019,7 +1019,7 @@ export default function ViewFile({active = true} = {}) {
         <header className="relative z-30 flex min-h-14 shrink-0 items-center gap-3 border-b border-[#243229] bg-[#0b0f0c] px-4 py-2.5 sm:px-5">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#3ecf8e]/20 bg-[#3ecf8e]/10 text-[#3ecf8e]">
                 <span className="material-symbols-outlined text-[19px]"
-                      aria-hidden="true">{kind === "pdf" ? "picture_as_pdf" : kind === "text" ? "code" : kind === "markdown" ? "article" : kind === "audio" ? "audio_file" : "movie"}</span>
+                      aria-hidden="true">{kind === "pdf" ? "picture_as_pdf" : kind === "image" ? "image" : kind === "text" ? "code" : kind === "markdown" ? "article" : kind === "audio" ? "audio_file" : "movie"}</span>
             </div>
             <h1 className="min-w-0 flex-1 whitespace-normal break-words text-sm font-medium leading-5 [overflow-wrap:anywhere] lg:truncate" title={name}>{name}</h1>
 
@@ -1130,7 +1130,7 @@ export default function ViewFile({active = true} = {}) {
                     <span className="material-symbols-outlined text-[40px] text-[#ff6369]" aria-hidden="true">error</span>
                     <p className="text-sm text-[#ff6369]">{publicFileError}</p>
                 </div>
-            ) : kind === "text" || kind === "markdown" ? <FileContentPreview fileId={fileId} kind={kind} navigate={navigate} publicToken={publicToken} onRegisterActions={registerPreviewActions}/> : kind === "pdf" ?
+            ) : kind === "text" || kind === "markdown" ? <FileContentPreview fileId={fileId} kind={kind} navigate={navigate} publicToken={publicToken} onRegisterActions={registerPreviewActions}/> : kind === "image" ? <MediaPreview fileId={fileId} navigate={navigate} type="image" fileName={name} publicToken={publicToken}/> : kind === "pdf" ?
                 <MediaPreview fileId={fileId} navigate={navigate} type="pdf" publicToken={publicToken}/> : kind === "audio" ?
                     <MediaPreview fileId={fileId} navigate={navigate} type="audio" publicToken={publicToken}/> : kind !== "video" ? (
                         <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-[#898989]">

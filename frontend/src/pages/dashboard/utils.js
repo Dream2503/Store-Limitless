@@ -44,6 +44,7 @@ export function formatDate(dateStr) {
 export function getFileKind(filename) {
     const ext = filename?.split(".").pop()?.toLowerCase();
     if (["mp4", "mkv", "webm", "mov", "m4v"].includes(ext)) return "video";
+    if (["jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "webp", "bmp", "dib", "tif", "tiff", "avif", "heic", "heif", "svg", "ico"].includes(ext)) return "image";
     if (["mp3", "wav", "ogg", "m4a", "flac"].includes(ext)) return "audio";
     if (ext === "pdf") return "pdf";
     if (["md", "markdown", "mdown", "mkd"].includes(ext)) return "markdown";

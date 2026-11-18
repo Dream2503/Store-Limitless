@@ -1,7 +1,8 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import {useNavigate, useParams, useSearchParams} from "react-router-dom";
 import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
-import {getFileKind} from "../utils.js";
+import DownloadJobsTray from "./DownloadJobsTray.jsx";
+import {createUniqueId, getFileKind} from "../utils.js";
 
 /**
  * @typedef {{name: string}} PreviewFile
@@ -486,6 +487,15 @@ export default function ViewFile() {
     const downloadMountedRef = useRef(true);
     const name = searchParams.get("name") || publicFile?.name || "Untitled";
     const kind = searchParams.get("kind") || getFileKind(publicFile?.name || name);
+    const downloadTrayJobs = downloadError || downloadState.status !== "idle" ? [{
+        id: `view-file-download-${fileId || publicToken || "shared"}`,
+        name,
+        status: downloadError && downloadState.status === "idle" ? "error" : downloadState.status,
+        transferred: downloadState.transferred,
+        total: downloadState.total,
+        message: downloadError || downloadState.message || "Preparing StoreLimitless download",
+        viewerDownload: true,
+    }] : [];
 
     useEffect(() => {
         if (!publicToken) {
@@ -635,7 +645,7 @@ export default function ViewFile() {
             }
 
             root = await navigator.storage.getDirectory();
-            tempName = `storelimitless-view-${crypto.randomUUID()}.download`;
+            tempName = `storelimitless-view-${createUniqueId()}.download`;
             const handle = await root.getFileHandle(tempName, {create: true});
             const initialWriter = await handle.createWritable();
             await initialWriter.truncate(0);
@@ -894,35 +904,6 @@ export default function ViewFile() {
             </div>
         </header>
 
-        {(downloadError || downloadState.status !== "idle") && (<section
-            aria-live="polite"
-            className={`shrink-0 border-b px-5 py-3 ${downloadState.status === "error" || downloadError ? "border-[#7f3539] bg-[#241416]" : downloadState.status === "completed" ? "border-[#24583d] bg-[#101d15]" : "border-[#2e4d3a] bg-[#111a14]"}`}
-        >
-            <div className="flex items-center gap-3">
-                <span className={`material-symbols-outlined text-[18px] ${downloadState.status === "error" || downloadError ? "text-[#ff7278]" : "text-[#3ecf8e]"}`} aria-hidden="true">
-                    {downloadState.status === "error" || downloadError ? "error" : downloadState.status === "completed" ? "check_circle" : "downloading"}
-                </span>
-                <div className="min-w-0 flex-1">
-                    <p className="truncate text-xs font-medium">
-                        {downloadError ? downloadError : downloadState.message || "Preparing StoreLimitless download"}
-                    </p>
-                    {downloadState.status === "downloading" && (
-                        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
-                            <div
-                                className="h-full rounded-full bg-[#3ecf8e] transition-[width] duration-150"
-                                style={{width: `${downloadState.total > 0 ? Math.min(100, (downloadState.transferred / downloadState.total) * 100) : 0}%`}}
-                            />
-                        </div>
-                    )}
-                </div>
-                {downloadState.status === "downloading" && (
-                    <span className="shrink-0 text-xs tabular-nums text-[#9bad9f]">
-                        {downloadState.total > 0 ? `${Math.floor((downloadState.transferred / downloadState.total) * 100)}%` : "Preparing"}
-                    </span>
-                )}
-            </div>
-        </section>)}
-
         <main className="min-h-0 flex-1 overflow-hidden p-0">
             {publicToken && !publicFile && !publicFileError ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-[#898989]">
@@ -952,5 +933,6 @@ export default function ViewFile() {
                         </div>
                     </div>)}
         </main>
+        <DownloadJobsTray jobs={downloadTrayJobs} readOnly/>
     </div>);
 }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from asyncio import CancelledError, Task, create_task, gather, get_running_loop, run, sleep, to_thread
-from os import environ
+from os import environ, execv
 from pathlib import Path
 from shutil import rmtree
 from subprocess import DEVNULL, Popen, run as subprocess_run
@@ -50,6 +50,7 @@ async def main() -> None:
     discord_thread: Thread | None = None
     discord_started: bool = False
     telegram_started: bool = False
+    restart_requested: bool = False
 
     try:
         await Redis.initialize()
@@ -164,11 +165,27 @@ async def main() -> None:
                         else:
                             print("Interactive prompt restored.")
 
-                    elif command in {"telegram-login", "login-telegram"}:
+                    elif command in {
+                        "telegram-login",
+                        "login-telegram",
+                        "telegram-login --new",
+                        "login-telegram --new",
+                        "telegram-login-new",
+                    }:
                         try:
-                            await to_thread(run, login_telegram_user_session())
+                            force_new: bool = command in {
+                                "telegram-login --new",
+                                "login-telegram --new",
+                                "telegram-login-new",
+                            }
+                            await to_thread(run, login_telegram_user_session(force_new=force_new))
                         except Exception as error:
                             print(f"Telegram user login failed: {error}")
+
+                    elif command == "restart":
+                        print("Restarting StoreLimitless after shutting down its services...")
+                        restart_requested = True
+                        break
 
                     elif command in {"exit", "stop"}:
                         print("Shutting down StoreLimitless...")
@@ -223,6 +240,18 @@ async def main() -> None:
             stop_process(frontend_process)
 
         rmtree(TRANSFER_PATH, ignore_errors=True)
+
+    if restart_requested:
+        if frozen:
+            execv(sys.executable, [sys.executable, *sys.argv[1:]])
+
+        else:
+            original_args: list[str] = list(getattr(sys, "orig_argv", []))[1:]
+
+            if not original_args:
+                original_args = sys.argv
+
+            execv(sys.executable, [sys.executable, *original_args])
 
 
 if __name__ == "__main__":

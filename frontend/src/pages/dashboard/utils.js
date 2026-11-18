@@ -1,5 +1,26 @@
 import {FILE_ICONS} from "./constants.js";
 
+/** Generate a unique identifier with compatibility for browsers lacking crypto.randomUUID(). */
+export function createUniqueId() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+    }
+
+    if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+        const bytes = new Uint8Array(16);
+        crypto.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("").replace(
+            /^(........)(....)(....)(....)(............)$/,
+            "$1-$2-$3-$4-$5",
+        );
+    }
+
+    // Older or restricted browsers may not expose Web Crypto at all.
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
 /** Stable key for storing per-view selection snapshots. */
 export function makeSelectionViewKey(pathname, activeTab, searchQuery) {
     return JSON.stringify([pathname, activeTab, searchQuery]);

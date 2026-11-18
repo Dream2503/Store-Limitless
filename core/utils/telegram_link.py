@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import SplitResult, urlsplit
 
 from core.config import BASE_DIR
+from core.utils import env as env_config
 from core.utils.env import TELEGRAM_API_HASH, TELEGRAM_API_ID
 
 TELEGRAM_PROCESSING_BOT: str = "PremiumFiletoLink_Bot"
@@ -63,39 +64,59 @@ def _fast_download_target(message: Any) -> str | None:
 
 
 def _message_location(link: str) -> tuple[str, int]:
-    """Parse public, preview, and private Telegram message links into chat and ID."""
+    """Parse a publicly accessible Telegram message link into its chat and message ID."""
 
     parsed: SplitResult = urlsplit(link)
     hostname: str = (parsed.hostname or "").lower()
 
-    if hostname not in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
-        raise ValueError("Expected a Telegram message link from t.me or telegram.me")
+    if parsed.scheme.lower() not in {"http", "https"} or hostname not in {
+        "t.me", "www.t.me", "telegram.me", "www.telegram.me"
+    }:
+        raise ValueError("Paste a public Telegram message URL beginning with https://t.me/ or https://telegram.me/")
 
     parts: list[str] = [part for part in parsed.path.split("/") if part]
 
-    if parts and parts[0] == "s":
+    if parts and parts[0].casefold() == "s":
         parts = parts[1:]
 
     if not parts:
-        raise ValueError("Telegram link does not identify a message")
+        raise ValueError("Telegram link does not identify a message. Use a public link to the actual file message.")
 
-    if parts[0] == "c":
-        if len(parts) < 3 or not parts[1].isdigit() or not parts[2].isdigit():
-            raise ValueError("Invalid private Telegram message link")
-
-        return f"-100{parts[1]}", int(parts[2])
+    if parts[0].casefold() == "c":
+        raise ValueError(
+            "This is a private Telegram /c/ message link. StoreLimitless can only process publicly accessible "
+            "Telegram messages. Open the post through its public channel username and use that t.me/<username>/<message-id> link."
+        )
 
     if parts[0].isdigit():
-        if len(parts) < 2 or not parts[1].isdigit():
-            raise ValueError("Invalid Telegram message link")
+        raise ValueError(
+            "This Telegram link uses an internal chat ID and is not publicly accessible. "
+            "Use the public t.me/<channel-username>/<message-id> link instead."
+        )
 
-        return f"-100{parts[0]}", int(parts[1])
+    username: str = parts[0]
+    if (
+        not 5 <= len(username) <= 32
+        or not all(character.isascii() and (character.isalnum() or character == "_") for character in username)
+        or not username[0].isalpha()
+    ):
+        raise ValueError(
+            "This Telegram link does not contain a public channel or group username. "
+            "Use a publicly accessible t.me/<username>/<message-id> link."
+        )
 
-    if len(parts) < 2 or not parts[1].isdigit():
-        raise ValueError("Telegram link does not identify a supported message")
+    message_segments: list[str] = parts[1:]
+    if not message_segments or not all(segment.isdigit() for segment in message_segments):
+        raise ValueError(
+            "Telegram link does not identify a public message. Use a t.me/<username>/<message-id> link to a post with a file attached."
+        )
 
-    return parts[0], int(parts[1])
+    # Topic links can include a thread ID before the actual message ID.
+    message_id: int = int(message_segments[-1])
+    if message_id <= 0:
+        raise ValueError("Telegram message ID must be a positive number")
 
+    return username, message_id
 
 async def resolve_telegram_message_link(link: str) -> tuple[str, str]:
     """Forward the attached Telegram message and return its verified FAST DOWNLOAD URL and name.
@@ -113,6 +134,7 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
 
     from telethon import TelegramClient, events
     from telethon.errors import RPCError
+    from telethon.sessions import StringSession
 
     if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
         raise RuntimeError("Telegram API_ID/API_HASH are missing from core.utils.env")
@@ -122,7 +144,9 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
     except ValueError as error:
         raise ValueError(str(error)) from error
 
-    client = TelegramClient(str(TELEGRAM_USER_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
+    session_string: str = str(getattr(env_config, "TELEGRAM_USER_SESSION_STRING", "") or "").strip()
+    session = StringSession(session_string) if session_string else str(TELEGRAM_USER_SESSION)
+    client = TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH)
     responses: Queue[Any] = Queue()
 
     async def receive_bot_message(event: Any) -> None:
@@ -144,18 +168,86 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
 
         if not await client.is_user_authorized():
             raise RuntimeError(
-                "Telegram user session is not authenticated. Run "
-                "'python -m core.utils.telegram_link --login' once and complete the Telegram login prompts."
+                "Telegram link processing is not configured yet: the Telegram user session is not authenticated. "
+                "Run 'telegram-login --new' at the StoreLimitless terminal prompt and sign in with your personal "
+                "Telegram account."
+            )
+
+        account = await client.get_me()
+
+        if account is None:
+            raise RuntimeError("Telegram did not return the account for the configured user session.")
+
+        if getattr(account, "bot", False):
+            raise RuntimeError(
+                "TELEGRAM_USER_SESSION_STRING is authenticated as a Telegram BOT account, not a personal user "
+                "account. Message-history lookup requires a user session. Run 'telegram-login --new', sign in "
+                "with your personal Telegram phone number, then replace TELEGRAM_USER_SESSION_STRING in your "
+                "private core/utils/env.py with the newly printed value."
             )
 
         try:
-            source_message = await wait_for(client.get_messages(chat, ids=message_id), timeout=20)
-        except (RPCError, AsyncTimeoutError) as error:
-            raise RuntimeError(f"Could not access Telegram message: {type(error).__name__}") from error
+            chat_entity = await wait_for(client.get_entity(chat), timeout=20)
+            source_message = await wait_for(client.get_messages(chat_entity, ids=message_id), timeout=20)
 
-        source_file = getattr(source_message, "file", None) if source_message is not None else None
-        if source_message is None or not getattr(source_message, "media", None) or source_file is None:
-            raise ValueError("Telegram message was not found or does not contain a downloadable file attachment")
+            if source_message is None:
+                async def find_message_in_history() -> Any | None:
+                    """Retry a direct message lookup through the group's history."""
+
+                    async for candidate in client.iter_messages(
+                        chat_entity,
+                        min_id=message_id - 1,
+                        max_id=message_id + 1,
+                        limit=3,
+                    ):
+                        if int(getattr(candidate, "id", 0)) == message_id:
+                            return candidate
+
+                    return None
+
+                source_message = await wait_for(find_message_in_history(), timeout=20)
+        except (RPCError, AsyncTimeoutError) as error:
+            error_name: str = type(error).__name__
+            if error_name in {"ChannelPrivateError", "ChannelInvalidError", "UsernameInvalidError", "UsernameNotOccupiedError"}:
+                raise ValueError(
+                    "Telegram could not access this message publicly. The channel may be private, deleted, or unavailable. "
+                    "Use a public t.me/<channel-username>/<message-id> link."
+                ) from error
+            if error_name == "MessageIdInvalidError":
+                raise ValueError(
+                    "Telegram could not find that public message. Check the message ID and make sure the post is still available."
+                ) from error
+            if isinstance(error, AsyncTimeoutError):
+                raise TimeoutError(
+                    "Timed out while checking the public Telegram message. Check the link and try again."
+                ) from error
+            if error_name == "BotMethodInvalidError":
+                raise RuntimeError(
+                    "Telegram rejected a user-only message-history request. The configured Telegram session "
+                    "is likely a bot session. Run 'telegram-login --new' and save the generated personal-user "
+                    "session string in core/utils/env.py."
+                ) from error
+            raise RuntimeError(
+                f"Could not access the public Telegram message ({error_name}). "
+                "Check that the channel and attached post are still publicly accessible."
+            ) from error
+
+        if source_message is None:
+            raise ValueError(
+                f"Telegram resolved @{chat} (ID {getattr(chat_entity, 'id', 'unknown')}), "
+                f"but neither direct lookup nor history lookup returned message {message_id}. "
+                "This does not by itself mean the group is private or that you are not a member. "
+                "Confirm that the exact message still opens in Telegram and that the deployed "
+                "TELEGRAM_USER_SESSION_STRING belongs to the account you expect. The lookup may also "
+                "fail if Telegram no longer exposes that message through the API."
+            )
+
+        source_file = getattr(source_message, "file", None)
+        if not getattr(source_message, "media", None) or source_file is None:
+            raise ValueError(
+                "The public Telegram message was found, but it does not contain a downloadable file attachment. "
+                "Paste a link to the message that contains the actual file."
+            )
 
         client.add_event_handler(receive_bot_message, events.NewMessage(incoming=True))
         client.add_event_handler(receive_bot_message, events.MessageEdited())
@@ -255,15 +347,17 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
         await client.disconnect()
 
 
-async def login_telegram_user_session() -> None:
-    """Interactively authenticate the separate Telegram user session."""
+async def login_telegram_user_session(force_new: bool = False) -> None:
+    """Authenticate a personal Telegram account and print a portable session string."""
 
     from telethon import TelegramClient
+    from telethon.sessions import StringSession
 
     if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
         raise RuntimeError("Telegram API_ID/API_HASH are missing from core.utils.env")
 
-    client = TelegramClient(str(TELEGRAM_USER_SESSION), TELEGRAM_API_ID, TELEGRAM_API_HASH)
+    session = StringSession() if force_new else str(TELEGRAM_USER_SESSION)
+    client = TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH)
 
     try:
         await client.start()
@@ -272,8 +366,20 @@ async def login_telegram_user_session() -> None:
         if account is None:
             raise RuntimeError("Telegram returned no account after login")
 
+        if getattr(account, "bot", False):
+            raise RuntimeError(
+                "The session file is authenticated as a Telegram BOT account, not a personal user account. "
+                "Run 'telegram-login --new' to create a fresh session, then sign in with your personal phone number."
+            )
+
         print(f"Telegram user session authenticated as @{account.username or account.id}.")
-        print(f"Session stored at: {TELEGRAM_USER_SESSION}")
+
+        if not force_new:
+            print(f"Session stored at: {TELEGRAM_USER_SESSION}")
+
+        exported_session: str = StringSession.save(client.session)
+        print("Copy this line into your private core/utils/env.py file to persist the login across redeployments:")
+        print(f'TELEGRAM_USER_SESSION_STRING: str = "{exported_session}"')
 
     finally:
         await client.disconnect()
@@ -282,7 +388,9 @@ async def login_telegram_user_session() -> None:
 if __name__ == "__main__":
     import sys
 
-    if sys.argv[1:] != ["--login"]:
-        raise SystemExit("Usage: python -m core.utils.telegram_link --login")
+    arguments: list[str] = sys.argv[1:]
 
-    run(login_telegram_user_session())
+    if arguments not in (["--login"], ["--login", "--new"]):
+        raise SystemExit("Usage: python -m core.utils.telegram_link --login [--new]")
+
+    run(login_telegram_user_session(force_new=arguments == ["--login", "--new"]))

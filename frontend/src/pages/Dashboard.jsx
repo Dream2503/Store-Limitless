@@ -17,7 +17,7 @@ import useDashboardData, {clearDashboardTreeCache} from "./dashboard/hooks/useDa
 import useGlobalFileSearch from "./dashboard/hooks/useGlobalFileSearch.js";
 import useUploadJobs from "./dashboard/hooks/useUploadJobs.js";
 import {API_URL, DASHBOARD_SELECTION_STORAGE_KEY, DASHBOARD_SELECTIONS_BY_VIEW_KEY,} from "./dashboard/constants.js";
-import {decodePathSegment, folderPathToRoute, getFileIcon, getFileKind, getToken, makeSelectionViewKey,} from "./dashboard/utils.js";
+import {createUniqueId, decodePathSegment, folderPathToRoute, getFileIcon, getFileKind, getToken, makeSelectionViewKey,} from "./dashboard/utils.js";
 
 /** @typedef {"files" | "trash"} DashboardTab */
 /** @typedef {{icon: string, color: string}} FileIconStyle */
@@ -164,6 +164,81 @@ export default function DashboardPage() {
         updateDownloadJob(job.id, {status: "downloading", message: job.tempName ? "Downloading to temporary storage" : "Downloading"});
 
         try {
+            if (job.blobFallback) {
+                const response = await fetch(job.url, {signal: controller.signal, cache: "no-store"});
+                if (!response.ok) throw new Error(`Download failed (${response.status}).`);
+
+                const contentLength = response.headers.get("content-length");
+                const latestTotal = contentLength ? Number(contentLength) : Number(job.total || 0);
+                updateDownloadJob(job.id, {
+                    status: "downloading",
+                    total: latestTotal,
+                    transferred: 0,
+                    message: "Downloading to temporary browser memory",
+                });
+
+                const chunks = [];
+                let transferred = 0;
+                let lastReported = 0;
+                const reader = response.body?.getReader();
+
+                if (reader) {
+                    try {
+                        while (true) {
+                            if (controller.signal.aborted) {
+                                await reader.cancel().catch(() => {});
+                                throw new DOMException("Download paused", "AbortError");
+                            }
+
+                            const {done, value} = await reader.read();
+                            if (done) break;
+                            if (!value?.byteLength) continue;
+
+                            chunks.push(value);
+                            transferred += value.byteLength;
+
+                            if (transferred - lastReported >= 1024 * 1024 || (latestTotal > 0 && transferred >= latestTotal)) {
+                                updateDownloadJob(job.id, {
+                                    transferred,
+                                    total: latestTotal,
+                                    message: "Downloading to temporary browser memory",
+                                });
+                                lastReported = transferred;
+                            }
+                        }
+                    } finally {
+                        reader.releaseLock();
+                    }
+                } else {
+                    const bytes = await response.arrayBuffer();
+                    chunks.push(bytes);
+                    transferred = bytes.byteLength;
+                }
+
+                if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
+
+                const blob = new Blob(chunks, {
+                    type: response.headers.get("content-type") || "application/octet-stream",
+                });
+                const objectUrl = URL.createObjectURL(blob);
+                const anchor = document.createElement("a");
+                anchor.href = objectUrl;
+                anchor.download = job.name || "download";
+                anchor.rel = "noreferrer";
+                document.body.appendChild(anchor);
+                anchor.click();
+                anchor.remove();
+                window.setTimeout(() => URL.revokeObjectURL(objectUrl), 5 * 60 * 1000);
+
+                updateDownloadJob(job.id, {
+                    status: "completed",
+                    transferred,
+                    total: latestTotal || transferred,
+                    message: "Download staged in browser memory · browser download started",
+                });
+                return;
+            }
+
             const staged = Boolean(job.tempName);
             const handle = staged
                 ? await (await navigator.storage.getDirectory()).getFileHandle(job.tempName, {create: true})
@@ -323,8 +398,10 @@ export default function DashboardPage() {
             if (error?.name === "AbortError" || controller.signal.aborted) {
                 updateDownloadJob(job.id, {
                     status: "paused",
-                    transferred: job.streamOnly ? 0 : (downloadJobsRef.current.find((item) => item.id === job.id)?.transferred || 0),
-                    message: job.streamOnly ? "Paused · resuming restarts the ZIP transfer" : "Paused",
+                    transferred: job.streamOnly || job.blobFallback ? 0 : (downloadJobsRef.current.find((item) => item.id === job.id)?.transferred || 0),
+                    message: job.streamOnly
+                        ? "Paused · resuming restarts the ZIP transfer"
+                        : job.blobFallback ? "Paused · resuming restarts the transfer" : "Paused",
                 });
             } else {
                 updateDownloadJob(job.id, {status: "error", message: error?.message || "Download failed"});
@@ -552,7 +629,7 @@ export default function DashboardPage() {
                 }
                 await navigator.storage.persist().catch(() => false);
 
-                const tempName = `storelimitless-${crypto.randomUUID()}.download`;
+                const tempName = `storelimitless-${createUniqueId()}.download`;
                 const root = await navigator.storage.getDirectory();
                 const tempHandle = await root.getFileHandle(tempName, {create: true});
                 const writer = await tempHandle.createWritable();
@@ -561,7 +638,7 @@ export default function DashboardPage() {
 
                 const file = files.find((item) => String(item.id) === String(fileId));
                 const job = {
-                    id: crypto.randomUUID(),
+                    id: createUniqueId(),
                     fileId: String(fileId),
                     name: file?.name || "download",
                     tempName,
@@ -621,7 +698,7 @@ export default function DashboardPage() {
                     await writable.truncate(0);
                     await writable.close();
                     const job = {
-                        id: crypto.randomUUID(),
+                        id: createUniqueId(),
                         fileId: String(fileId),
                         name: file?.name || handle.name || "download",
                         handle,
@@ -647,9 +724,10 @@ export default function DashboardPage() {
             }
         }
 
-        // Browsers without File System Access keep the existing native-download path.
+        // Last-resort fallback for browsers without OPFS or a save-file picker.
+        // Keep the transfer in the Downloads tray and delay the browser save until it is complete.
         try {
-            const response = await fetch(`${API_URL}/auth/file/${fileId}/public-link`, {
+            const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(fileId))}/public-link`, {
                 method: "POST", headers: {Authorization: `Bearer ${token}`},
             });
             const data = await response.json().catch(() => ({}));
@@ -662,15 +740,28 @@ export default function DashboardPage() {
                 throw new Error(data.detail || "Failed to prepare the download.");
             }
             if (!data.public_token) throw new Error("The server did not return a download token.");
-            const anchor = document.createElement("a");
-            anchor.href = `${API_URL}/public/download/${data.public_token}`;
-            anchor.setAttribute("download", "");
-            document.body.appendChild(anchor);
-            anchor.click();
-            anchor.remove();
+
+            const file = files.find((item) => String(item.id) === String(fileId));
+            const job = {
+                id: createUniqueId(),
+                fileId: String(fileId),
+                name: file?.name || "download",
+                url: `${API_URL}/public/download/${encodeURIComponent(data.public_token)}`,
+                total: Number(file?.size || 0),
+                transferred: 0,
+                status: "paused",
+                blobFallback: true,
+                message: "Queued · browser storage staging is unavailable",
+                createdAt: Date.now(),
+            };
+            const next = [job, ...downloadJobsRef.current];
+            downloadJobsRef.current = next;
+            setDownloadJobs(next);
+            await saveResumableDownload(job);
+            runResumableDownload(job);
         } catch (error) {
-            console.error("Download failed:", error);
-            alert(error.message || "Failed to download file.");
+            console.error("Could not queue download:", error);
+            alert(error.message || "Failed to queue the download.");
         }
     };
 
@@ -816,14 +907,14 @@ export default function DashboardPage() {
             const filenameQuery = new URLSearchParams({filename: downloadName}).toString();
             const url = `${API_URL}/public/download-zip/${encodeURIComponent(data.public_token)}?${filenameQuery}`;
             const root = await navigator.storage.getDirectory();
-            const tempName = `storelimitless-zip-${crypto.randomUUID()}.download`;
+            const tempName = `storelimitless-zip-${createUniqueId()}.download`;
             const tempHandle = await root.getFileHandle(tempName, {create: true});
             const writer = await tempHandle.createWritable();
             await writer.truncate(0);
             await writer.close();
 
             const job = {
-                id: crypto.randomUUID(),
+                id: createUniqueId(),
                 name: downloadName,
                 tempName,
                 streamOnly: true,

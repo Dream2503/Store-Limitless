@@ -697,13 +697,23 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
             if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
             if (failedItems.length) {
+                const rawFailure = String(failedItems[0]?.message || "Import failed").replace(/^Upload failed:\s*/i, "").replace(/\s+/g, " ").trim();
+                const normalizedFailure = rawFailure.toLowerCase();
+                const firstFailure = normalizedFailure.includes("forward") && normalizedFailure.includes("restrict")
+                    ? "Telegram has restricted forwarding for this message. Use a public file message that allows forwarding."
+                    : rawFailure;
+                const failureRemainder = failedItems.length > 1
+                    ? ` (${failedItems.length - 1} additional failure${failedItems.length === 2 ? "" : "s"})`
+                    : "";
+                const failureSummary = `${failedItems.length} of ${queueTotal} item(s) failed: ${firstFailure}${failureRemainder}`.slice(0, 480);
+
                 await publishBatch({
                     status: "error",
                     current_index: queueTotal,
                     completed_items: successfulItems,
                     current_job_id: "",
                     current_name: "",
-                    message: `${failedItems.length} of ${queueTotal} item(s) failed`
+                    message: failureSummary
                 });
             } else {
                 await publishBatch({
@@ -1105,7 +1115,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                         Import from Link
                                     </p>
                                     <p className="text-xs text-[#898989]">
-                                        Import one HTTP(S) URL or one torrent magnet per task.
+                                        Import one HTTP(S) URL, public Telegram file-message link, or torrent magnet per task.
                                     </p>
                                 </div>
                             </div>
@@ -1140,7 +1150,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                         setTorrentSelectionReady(false);
                                         setTorrentSelectionModal(false);
                                     }}
-                                    placeholder="https://example.com/file.zip or magnet:?xt=urn:btih:..."
+                                    placeholder="https://example.com/file.zip, https://t.me/channel/123 or magnet:?xt=urn:btih:..."
                                     className={["w-full h-11 rounded-md border border-[#363636]", "bg-white/[0.026] pl-10 pr-3 py-2 text-sm text-[#fafafa]", "placeholder:text-[#707070] outline-none transition-colors", "focus:border-[#707070] focus:ring-2 focus:ring-[#4d4d4d]/50", "disabled:opacity-60",].join(" ")}
                                 />
                             </div>
@@ -1155,9 +1165,10 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                 </p>
                             </div>)}
                             <p className="text-xs text-[#707070] mt-3 leading-relaxed">
-                                Enter one publicly accessible HTTP(S) URL or one valid torrent magnet URI. Multiple links in a single task are
-                                disabled. Torrent contents
-                                are downloaded completely before their files are uploaded, and torrent folder paths are preserved.
+                                Enter one publicly accessible HTTP(S) URL, one public Telegram file-message link, or one valid torrent magnet URI.
+                                Telegram links must point to a public post with a downloadable attachment. Private /c/ links, invite-only chats,
+                                and messages without a file attachment are rejected with a specific error. Multiple links in a single task are
+                                disabled. Torrent contents are downloaded completely before their files are uploaded, and torrent folder paths are preserved.
                             </p>
                         </div>
                     </div>)}

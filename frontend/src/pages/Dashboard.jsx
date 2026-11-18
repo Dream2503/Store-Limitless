@@ -128,7 +128,14 @@ export default function DashboardPage({active = true} = {}) {
         files, setFiles, folders, setFolders, storageUsed, loadingFiles, loadedFolder, pageError, setPageError, fetchFiles, refreshDirectory,
     } = useDashboardData(currentFolder, navigate);
     const {searchResults, searchLoading, searchError} = useGlobalFileSearch(searchQuery, activeTab, files);
-    const {uploadJobs, dismissUploadJob, cancelUploadJob, clearAllUploadJobs} = useUploadJobs(refreshDirectory);
+    const {
+        uploadJobs,
+        dismissUploadJob,
+        cancelUploadJob,
+        pauseUploadJob,
+        resumeUploadJob,
+        clearAllUploadJobs,
+    } = useUploadJobs(refreshDirectory);
     const [showFolderModal, setShowFolderModal] = useState(false);
     const [showUploadModal, setShowUploadModal] = useState(false);
     const [shareDialog, setShareDialog] = useState(null);
@@ -2391,6 +2398,8 @@ export default function DashboardPage({active = true} = {}) {
             trayPosition="bottom"
             uploadJobs={uploadJobs}
             cancelUploadJob={cancelUploadJob}
+            pauseUploadJob={pauseUploadJob}
+            resumeUploadJob={resumeUploadJob}
             dismissUploadJob={dismissUploadJob}
             clearAllUploadJobs={clearAllUploadJobs}
         />

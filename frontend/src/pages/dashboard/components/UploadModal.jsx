@@ -95,8 +95,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      */
     const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-    const waitWhilePaused = async (transfer) => {
-        const control = transfer?.cancelToken;
+    const waitWhilePaused = async (control) => {
         while (control?.paused && !control.cancelled) {
             await new Promise((resolve) => {
                 if (!Array.isArray(control.pauseWaiters)) control.pauseWaiters = [];
@@ -104,6 +103,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             });
         }
         if (control?.cancelled) throw new Error("Upload task was cancelled.");
+    };
+
+    const pauseInterruptError = () => {
+        const error = new Error("Chunk interrupted for pause.");
+        error.paused = true;
+        error.fatal = false;
+        return error;
     };
 
     const notifyPauseWaiters = (control) => {
@@ -121,22 +127,23 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         let delay = 500;
 
         while (true) {
-            await waitWhilePaused(batchTransfer);
-            if (cancelToken?.cancelled) throw new Error("Upload task was cancelled.");
+            await waitWhilePaused(cancelToken);
             let response;
-
             try {
                 response = await fetch(`${API_URL}/auth/upload-jobs/${encodeURIComponent(jobId)}/status`, {
                     headers: {Authorization: `Bearer ${token}`}, cache: "no-store",
                 });
             } catch {
+                await waitWhilePaused(cancelToken);
                 await sleep(delay);
                 delay = Math.min(delay * 2, 3000);
                 continue;
             }
 
+            await waitWhilePaused(cancelToken);
             if (!response.ok) {
                 if (response.status >= 500) {
+                    await waitWhilePaused(cancelToken);
                     await sleep(delay);
                     delay = Math.min(delay * 2, 3000);
                     continue;
@@ -166,13 +173,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             }
 
             if (typeof onProgress === "function") onProgress(job);
-
             if (job.status === "completed") return;
             if (job.status === "cancelled") throw new Error(`${job.name || "Upload"} was cancelled.`);
             if (job.status === "error") throw new Error(job.message || `${job.name || "Upload"} failed.`);
 
             delay = 500;
-            await waitWhilePaused(batchTransfer);
+            await waitWhilePaused(cancelToken);
             await sleep(500);
         }
     };
@@ -223,8 +229,10 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             }
 
             const error = new Error(errorMessage);
-            // 4xx errors will not be fixed by retrying.
-            error.fatal = xhr.status >= 400 && xhr.status < 500;
+            // The backend rejects chunks that arrive after the pause flag is set.
+            // This is a resumable interruption, not a permanent 4xx failure.
+            error.paused = xhr.status === 409 && /upload is paused/i.test(errorMessage);
+            error.fatal = xhr.status >= 400 && xhr.status < 500 && !error.paused;
             reject(error);
         };
 
@@ -235,9 +243,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
         xhr.onabort = () => {
             done();
-            const error = new Error("File upload was cancelled.");
-            error.fatal = true;
-            reject(error);
+            // The worker retries this same byte range after the pause is lifted.
+            reject(pauseInterruptError());
         };
 
         xhr.send(blob);
@@ -283,7 +290,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
          */
         const lane = async () => {
             while (!cancelToken.cancelled) {
-                await waitWhilePaused(batchTransfer);
+                await waitWhilePaused(cancelToken);
                 const index = nextIndex++;
 
                 if (index >= chunkCount) return;
@@ -293,7 +300,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 const blob = selectedFile.slice(start, end);
 
                 for (let attempt = 1; ; attempt++) {
-                    await waitWhilePaused(batchTransfer);
+                    await waitWhilePaused(cancelToken);
                     if (cancelToken.cancelled) {
                         throw new Error("File upload was cancelled.");
                     }
@@ -311,11 +318,26 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         activeChunkProgress.delete(index);
                         reportProgress();
 
-                        if (error.fatal || cancelToken.cancelled || attempt >= MAX_CHUNK_ATTEMPTS) {
+                        if (cancelToken.cancelled) {
                             throw error;
                         }
 
-                        await waitWhilePaused(batchTransfer);
+                        // Pause conflicts and browser aborts must not consume retry
+                        // attempts. Wait for Resume, then resend the exact same range.
+                        if (error.paused || cancelToken.paused) {
+                            // A server-side pause can be requested from another signed-in
+                            // tab/device. Mirror the 409 pause response locally so this
+                            // worker waits for the shared batch status to report Resume.
+                            if (error.paused) cancelToken.paused = true;
+                            await waitWhilePaused(cancelToken);
+                            continue;
+                        }
+
+                        if (error.fatal || attempt >= MAX_CHUNK_ATTEMPTS) {
+                            throw error;
+                        }
+
+                        await waitWhilePaused(cancelToken);
                         await sleep(1000 * attempt);
                     }
                 }
@@ -395,7 +417,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         let batchIds = [];
         let batchId = "";
         let batchTransfer = null;
-        let cancelToken = {cancelled: false};
+        let cancelToken = {cancelled: false, paused: false, pauseWaiters: []};
 
         try {
             const folderRoots = [...new Set(filesWithPaths.map(({relativePath}) => relativePath.split("/").filter(Boolean)[0]).filter(Boolean))];
@@ -464,6 +486,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             const publishBatch = async (updates) => {
                 if (!batchId) return;
                 const batchUpdates = {...updates};
+                // Do not let routine progress snapshots overwrite a pause requested
+                // from the tray while the active chunk worker is waiting to resume.
+                if (cancelToken.paused && batchUpdates.status === "uploading") {
+                    batchUpdates.status = "paused";
+                    batchUpdates.message = "Paused by you";
+                }
                 // Every server task represents exactly one queue item; the browser
                 // coordinates the full queue and publishes progress only for the active task.
                 if (batchUpdates.item_index != null) batchUpdates.item_index = 0;
@@ -694,6 +722,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
             /** Create one child upload job, and fully finish it before starting the next item. */
             const createJob = async (selectedFile, selectedLink = "", destinationDirectory = directory, displayName = selectedFile?.name || selectedLink, itemNumber = 1) => {
+                await waitWhilePaused(cancelToken);
                 if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
                 let response;
                 if (uploadMode === "file") {

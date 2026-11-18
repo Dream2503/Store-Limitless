@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from asyncio import Task, create_task, gather, sleep, to_thread, wait
+from asyncio import FIRST_COMPLETED, Task, create_task, gather, sleep, to_thread, wait
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 
 from core.utils import write_log, read_chunk
 
@@ -74,6 +74,7 @@ async def upload_growing_file(
         track_download: bool = False,
         download_total: int = 0,
         download_from_path: bool = False,
+        pause_check: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncGenerator[Progress]:
     """Upload completed chunks as a file grows, bounded by the selected provider's own parallelism."""
 
@@ -112,9 +113,12 @@ async def upload_growing_file(
         """Read exactly one chunk off the event loop and retry temporary provider I/O errors."""
 
         while True:
+            # Read the local staging file outside the provider retry handler. A
+            # missing/removed source is a terminal local-file error, never a network retry.
+            offset: int = (index - start_part) * chunk_size
+            chunk: bytes = await to_thread(read_chunk, path, offset, size)
+
             try:
-                offset: int = (index - start_part) * chunk_size
-                chunk: bytes = await to_thread(read_chunk, path, offset, size)
                 message_id: str = await data_center.upload(chunk, f"{file.name}.part{index:03d}", progress)
 
                 if total_size:
@@ -127,7 +131,12 @@ async def upload_growing_file(
                 return index, message_id
 
             except OSError as error:
-                write_log("ERROR", data_center, "UPLOAD", file.username, f"Network error part {index}, retrying: {error}")
+                # A cancelled child job raises from pause_check(), ending this retry
+                # loop even if cancellation races with a provider/network failure.
+                if pause_check is not None:
+                    await pause_check()
+
+                write_log("ERROR", data_center, "UPLOAD", file.username, f"Storage provider error part {index}, retrying: {error}")
                 await sleep(2)
 
     async def collect_done() -> None:
@@ -144,6 +153,16 @@ async def upload_growing_file(
             index, message_id = task.result()
             results[index] = message_id
 
+    async def honor_pause() -> None:
+        """Stop scheduling new provider parts while paused, draining only in-flight parts."""
+
+        while pause_check is not None and await pause_check():
+            if upload_tasks:
+                await wait(upload_tasks, timeout=0.2, return_when=FIRST_COMPLETED)
+                await collect_done()
+            else:
+                await sleep(0.2)
+
     def update_progress(current_size: int) -> None:
         """Keep the shared progress record aligned with known or discovered file size."""
 
@@ -151,7 +170,9 @@ async def upload_growing_file(
 
     try:
         while producer is not None and not producer.done():
+            await honor_pause()
             while not path.exists() and not producer.done():
+                await honor_pause()
                 await sleep(0.1)
 
             if producer.done():
@@ -160,6 +181,7 @@ async def upload_growing_file(
             size: int = path.stat().st_size
 
             while size >= (part - start_part + 1) * chunk_size and len(upload_tasks) < max(1, int(data_center.MAX_PARALLEL_UPLOADS)):
+                await honor_pause()
                 upload_tasks.add(create_task(upload_part(part, chunk_size)))
                 part += 1
 
@@ -170,6 +192,7 @@ async def upload_growing_file(
             await sleep(0.1)
 
         if producer is not None:
+            await honor_pause()
             await producer
 
         try:
@@ -188,7 +211,9 @@ async def upload_growing_file(
         offset: int = (part - start_part) * chunk_size
 
         while size >= offset + chunk_size:
+            await honor_pause()
             while len(upload_tasks) >= max(1, int(data_center.MAX_PARALLEL_UPLOADS)):
+                await honor_pause()
                 await collect_done()
                 update_progress(size)
                 update_download_progress()
@@ -200,7 +225,9 @@ async def upload_growing_file(
             offset += chunk_size
 
         if size > offset:
+            await honor_pause()
             while len(upload_tasks) >= max(1, int(data_center.MAX_PARALLEL_UPLOADS)):
+                await honor_pause()
                 await collect_done()
                 update_progress(size)
                 update_download_progress()
@@ -211,12 +238,14 @@ async def upload_growing_file(
             part += 1
 
         while upload_tasks:
+            await honor_pause()
             await collect_done()
             update_progress(size)
             update_download_progress()
             yield progress
             await sleep(0.1)
 
+        await honor_pause()
         update_progress(size)
         update_download_progress()
         if track_download and download_from_path and progress.download_total <= 0:

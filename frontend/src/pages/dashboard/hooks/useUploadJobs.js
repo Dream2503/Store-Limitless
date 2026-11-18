@@ -143,10 +143,11 @@ export default function useUploadJobs(refreshDirectory) {
                 if (!Array.isArray(payload.batches)) return;
 
                 const batches = await Promise.all(payload.batches.map(async (batch) => {
-                    const status = ["queued", "uploading", "completed", "error", "cancelled"].includes(batch.status) ? batch.status : "queued";
+                    const status = ["queued", "uploading", "paused", "completed", "error", "cancelled"].includes(batch.status) ? batch.status : "queued";
                     const totalItems = Math.max(0, Number(batch.total_items) || 0);
                     const normalized = {
                         jobId: String(batch.batch_id),
+                        paused: Boolean(batch.paused) || status === "paused",
                         name: String(batch.name || "Upload task"),
                         kind: String(batch.kind || "file"),
                         directory: String(batch.directory || "/home"),
@@ -325,16 +326,27 @@ export default function useUploadJobs(refreshDirectory) {
                 }));
                 // Active batches stay near-real-time; while idle, the longer interval
                 // still discovers work started by another device without constant empty polls.
-                hasActiveUploads.current = batches.some((batch) => batch.status === "queued" || batch.status === "uploading");
+                hasActiveUploads.current = batches.some((batch) => ["queued", "uploading", "paused"].includes(batch.status));
 
-                // Cancellation and Clear all can be initiated from another signed-in device.
-                // Mirror those server-side changes into this tab's active chunk requests.
-                const batchStatusById = new Map(batches.map((batch) => [batch.jobId, batch.status]));
+                // Mirror pause/resume/cancel requests made from another signed-in device.
+                const batchById = new Map(batches.map((batch) => [batch.jobId, batch]));
                 for (const [batchId, transfer] of window.__storeLimitlessUploadTransfers?.entries?.() || []) {
-                    const serverStatus = batchStatusById.get(batchId);
-                    if (serverStatus === undefined || serverStatus === "cancelled") {
+                    const serverBatch = batchById.get(batchId);
+                    if (serverBatch === undefined || serverBatch.status === "cancelled") {
                         transfer.cancelToken.cancelled = true;
+                        transfer.cancelToken.paused = false;
+                        const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+                        waiters.forEach((resolve) => resolve());
                         for (const xhr of transfer.xhrs || []) xhr.abort();
+                    } else if (serverBatch.status === "paused" && !transfer.cancelToken.paused) {
+                        transfer.cancelToken.paused = true;
+                        // Abort only in-flight chunks. Their offsets are retried after resume;
+                        // completed chunks stay committed on the server.
+                        for (const xhr of transfer.xhrs || []) xhr.abort();
+                    } else if (serverBatch.status !== "paused" && transfer.cancelToken.paused) {
+                        transfer.cancelToken.paused = false;
+                        const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+                        waiters.forEach((resolve) => resolve());
                     }
                 }
 
@@ -393,11 +405,77 @@ export default function useUploadJobs(refreshDirectory) {
         }).catch((error) => console.error("Could not remove upload task:", error));
     };
 
+    /** Pause or resume a browser-driven upload without discarding completed chunks. */
+    const setUploadPaused = (jobId, paused) => {
+        const token = getToken();
+        if (!token) return;
+        const currentJob = uploadJobs.find((job) => job.jobId === jobId);
+        if (currentJob?.kind !== "file") {
+            console.warn("Pause/resume is currently available for file uploads only.");
+            return;
+        }
+        if (paused && currentJob.status === "queued") {
+            console.warn("Wait until the file begins uploading before pausing.");
+            return;
+        }
+        const transfer = window.__storeLimitlessUploadTransfers?.get(jobId);
+        const localTransfer = Boolean(transfer);
+        const previousPaused = Boolean(transfer?.cancelToken?.paused);
+        if (!localTransfer && paused) {
+            console.warn("This upload was started in another tab/device. Pause it from the tab running the upload.");
+        }
+        if (transfer?.cancelToken) {
+            transfer.cancelToken.paused = paused;
+            const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+            waiters.forEach((resolve) => resolve());
+            if (paused) {
+                // Aborted in-flight chunks are retried by their worker after resume.
+                for (const xhr of transfer.xhrs || []) xhr.abort();
+            }
+        }
+        setUploadJobs((current) => current.map((job) => job.jobId === jobId ? {
+            ...job,
+            status: paused ? "paused" : "uploading",
+            message: paused ? "Paused by you" : "Resuming upload",
+            uploadSpeed: paused ? 0 : job.uploadSpeed,
+            downloadSpeed: paused ? 0 : job.downloadSpeed,
+        } : job));
+        void fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(jobId)}/pause`, {
+            method: "POST",
+            headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
+            body: JSON.stringify({paused}),
+            cache: "no-store",
+        }).then(async (response) => {
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || `Could not ${paused ? "pause" : "resume"} upload (${response.status})`);
+            return data;
+        }).catch((error) => {
+            console.error("Could not change upload pause state:", error);
+            if (transfer?.cancelToken) {
+                // Roll back the optimistic local flag when the API rejects the
+                // pause/resume request, and wake any chunk lanes that need to recover.
+                transfer.cancelToken.paused = previousPaused;
+                if (!previousPaused) {
+                    const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+                    waiters.forEach((resolve) => resolve());
+                }
+            }
+            setUploadJobs((current) => current.map((job) => job.jobId === jobId ? {
+                ...job,
+                status: previousPaused ? "paused" : "uploading",
+                message: error.message || "Could not change pause state",
+            } : job));
+        });
+    };
+
     /** Stop the current transfer and prevent later items in the batch from starting. */
     const cancelUploadJob = (jobId) => {
         const transfer = window.__storeLimitlessUploadTransfers?.get(jobId);
         if (transfer) {
             transfer.cancelToken.cancelled = true;
+            transfer.cancelToken.paused = false;
+            const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+            waiters.forEach((resolve) => resolve());
             for (const xhr of transfer.xhrs || []) xhr.abort();
         }
         setUploadJobs((current) => current.map((job) => job.jobId === jobId ? {
@@ -419,6 +497,9 @@ export default function useUploadJobs(refreshDirectory) {
     const clearAllUploadJobs = () => {
         for (const transfer of window.__storeLimitlessUploadTransfers?.values?.() || []) {
             transfer.cancelToken.cancelled = true;
+            transfer.cancelToken.paused = false;
+            const waiters = transfer.cancelToken.pauseWaiters?.splice?.(0) || [];
+            waiters.forEach((resolve) => resolve());
             for (const xhr of transfer.xhrs || []) xhr.abort();
         }
         setUploadJobs([]);
@@ -434,5 +515,5 @@ export default function useUploadJobs(refreshDirectory) {
         }).catch((error) => console.error("Could not clear upload tray:", error));
     };
 
-    return {uploadJobs, dismissUploadJob, cancelUploadJob, clearAllUploadJobs};
+    return {uploadJobs, dismissUploadJob, cancelUploadJob, pauseUploadJob: (jobId) => setUploadPaused(jobId, true), resumeUploadJob: (jobId) => setUploadPaused(jobId, false), clearAllUploadJobs};
 }

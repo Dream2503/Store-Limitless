@@ -61,6 +61,7 @@ try:
                 links        TEXT[]      NOT NULL,
                 deleted_at   TIMESTAMPTZ,
                 username     TEXT        NOT NULL,
+                public_slug  TEXT        NOT NULL DEFAULT replace(gen_random_uuid()::text, '-', ''),
 
                 CONSTRAINT fk_files_directory
                     FOREIGN KEY (directory_id)
@@ -71,25 +72,33 @@ try:
                         REFERENCES users (username)
             );
 
-            CREATE TABLE IF NOT EXISTS public_links (
-                slug       TEXT PRIMARY KEY,
-                file_id    BIGINT      NOT NULL,
-                username   TEXT        NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            -- Move existing public share IDs onto their file rows before removing the old table.
+            ALTER TABLE files ADD COLUMN IF NOT EXISTS public_slug TEXT;
+            ALTER TABLE files
+                ALTER COLUMN public_slug SET DEFAULT replace(gen_random_uuid()::text, '-', '');
 
-                CONSTRAINT fk_public_links_file
-                    FOREIGN KEY (file_id)
-                        REFERENCES files (id)
-                        ON DELETE CASCADE,
+            DO $public_link_migration$
+            BEGIN
+                IF to_regclass('public.public_links') IS NOT NULL THEN
+                    EXECUTE '
+                        UPDATE public.files AS f
+                        SET public_slug = pl.slug
+                        FROM public.public_links AS pl
+                        WHERE pl.file_id = f.id
+                          AND pl.username = f.username
+                    ';
+                END IF;
+            END
+            $public_link_migration$;
 
-                CONSTRAINT fk_public_links_user
-                    FOREIGN KEY (username)
-                        REFERENCES users (username)
-                        ON DELETE CASCADE,
+            -- Every old file without a previously-issued link receives one now.
+            UPDATE files
+            SET public_slug = replace(gen_random_uuid()::text, '-', '')
+            WHERE public_slug IS NULL OR public_slug = '';
 
-                CONSTRAINT unique_public_link_per_file
-                    UNIQUE (file_id, username)
-            );
+            ALTER TABLE files ALTER COLUMN public_slug SET NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug ON files (public_slug);
+            DROP TABLE IF EXISTS public_links;
 
             """
         )

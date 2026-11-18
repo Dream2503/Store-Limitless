@@ -15,6 +15,7 @@ from uuid import uuid4
 import aiofiles
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from starlette.requests import ClientDisconnect
 
 from backend.database.models import Directory, File, User
 from backend.database.redis_server import Redis
@@ -237,12 +238,17 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, object] = Body(..
 
     status = str(payload.get("status") or metadata.get("status") or "queued")
 
-    if status not in {"queued", "uploading", "completed", "error", "cancelled"}:
+    if status not in {"queued", "uploading", "paused", "completed", "error", "cancelled"}:
         raise HTTPException(status_code=422, detail="Invalid upload task status")
+
+    # Browser progress events can arrive after the user pauses. Preserve the
+    # authoritative pause state while still accepting byte and item progress.
+    if metadata.get("paused") and status == "uploading":
+        status = "paused"
 
     updates: dict[str, object] = {"status": status}
 
-    if "message" in payload:
+    if "message" in payload and not (metadata.get("paused") and status == "paused"):
         updates["message"] = str(payload.get("message") or "")[:500]
 
     if "torrent_files" in payload:
@@ -386,6 +392,69 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, object] = Body(..
 
     updated = await update_upload_batch(batch_id, user.username, **updates)
     return JSONResponse({"batch_id": batch_id, "status": str(updated.get("status") or "queued")})
+
+
+@router.post("/upload-batches/{batch_id}/pause")
+async def pause_upload_batch(
+    batch_id: str,
+    payload: dict[str, object] = Body(...),
+    user: User = Depends(get_current_user),
+) -> JSONResponse:
+    """Pause/resume a browser-managed upload batch."""
+
+    metadata = await get_upload_batch_metadata(batch_id)
+    if metadata is None or metadata.get("username") != user.username:
+        raise HTTPException(status_code=404, detail="Upload task not found")
+
+    if metadata.get("status") in {"completed", "error", "cancelled"}:
+        return JSONResponse({"batch_id": batch_id, "status": str(metadata.get("status"))})
+
+    paused = bool(payload.get("paused"))
+    # Link/torrent jobs run entirely in backend generators. They cannot be
+    # safely suspended at an arbitrary byte boundary, so don't pretend otherwise.
+    if paused and metadata.get("kind") == "link":
+        raise HTTPException(
+            status_code=409,
+            detail="Pause is currently supported for browser file uploads only. Link and torrent imports cannot be paused safely yet.",
+        )
+
+    current_job_id = str(metadata.get("current_job_id") or "")
+    if paused and not current_job_id:
+        raise HTTPException(status_code=409, detail="Upload has not started yet; wait until file transfer begins before pausing.")
+
+    if current_job_id:
+        # The child job drives both sides of this pipeline: browser chunks arrive
+        # through wait_for_all_chunks while provider parts are sent by upload_growing_file.
+        # Publish the pause flag here so both workers observe the same state.
+        job_metadata = await get_upload_job_metadata(current_job_id)
+        if job_metadata and job_metadata.get("username") == user.username:
+            job_metadata["paused"] = paused
+            await Redis.set_json(upload_job_key(current_job_id), job_metadata)
+
+            try:
+                progress: Progress = cast("Progress", await Redis.get(current_job_id, "Progress"))
+                if paused:
+                    metadata["paused_progress_message"] = str(progress.message or "")
+                    metadata["paused_upload_speed"] = float(progress.upload_speed or 0)
+                    metadata["paused_download_speed"] = float(progress.download_speed or 0)
+                    progress.message = "Paused by you"
+                    progress.upload_speed = 0
+                    progress.download_speed = 0
+                    await Redis.set(current_job_id, progress)
+                elif progress.message == "Paused by you":
+                    progress.message = str(metadata.get("paused_progress_message") or "Receiving and uploading")
+                    progress.upload_speed = float(metadata.get("paused_upload_speed") or 0)
+                    progress.download_speed = float(metadata.get("paused_download_speed") or 0)
+                    await Redis.set(current_job_id, progress)
+            except KeyError:
+                pass
+
+    metadata["paused"] = paused
+    metadata["status"] = "paused" if paused else ("uploading" if metadata.get("current_job_id") else "queued")
+    metadata["message"] = "Paused by you" if paused else "Resuming upload"
+    metadata["paused_at"] = time() if paused else None
+    await Redis.set_json(upload_batch_key(batch_id), metadata)
+    return JSONResponse({"batch_id": batch_id, "status": str(metadata["status"]), "paused": paused})
 
 
 @router.post("/upload-batches/{batch_id}/cancel")
@@ -718,6 +787,9 @@ async def upload_chunk(
     if metadata.get("failed"):
         raise HTTPException(status_code=409, detail="Upload has already failed")
 
+    if metadata.get("paused"):
+        raise HTTPException(status_code=409, detail="Upload is paused")
+
     session_key: str = upload_session_key(job_id)
     state: object = await Redis.get_json(session_key)
 
@@ -796,19 +868,27 @@ async def upload_chunk(
 
     position: int = offset
 
-    async with aiofiles.open(file_path, "r+b") as buffer:
-        await buffer.seek(offset)
+    try:
+        async with aiofiles.open(file_path, "r+b") as buffer:
+            await buffer.seek(offset)
 
-        async for chunk in request.stream():
-            if not chunk:
-                continue
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
 
-            if position + len(chunk) > total:
-                raise HTTPException(status_code=413, detail="Chunk exceeds declared file size")
+                if position + len(chunk) > total:
+                    raise HTTPException(status_code=413, detail="Chunk exceeds declared file size")
 
-            await buffer.write(chunk)
-            await buffer.flush()
-            position += len(chunk)
+                await buffer.write(chunk)
+                await buffer.flush()
+                position += len(chunk)
+    except ClientDisconnect:
+        # The browser intentionally aborts in-flight XHRs when Pause is pressed.
+        # A partially written range is not recorded as complete, so resume safely
+        # retransmits this chunk from its original offset.
+        latest_metadata = await get_upload_job_metadata(job_id)
+        detail = "Upload is paused." if latest_metadata and latest_metadata.get("paused") else "Chunk transfer was interrupted."
+        return JSONResponse({"job_id": job_id, "detail": detail, "interrupted": True}, status_code=409)
 
     latest_metadata = await get_upload_job_metadata(job_id)
 
@@ -820,6 +900,9 @@ async def upload_chunk(
 
     if latest_metadata.get("failed"):
         raise HTTPException(status_code=409, detail="Upload has already failed")
+
+    if latest_metadata.get("paused"):
+        raise HTTPException(status_code=409, detail="Upload is paused")
 
     contiguous: int = await record_written_range(job_id, offset, position)
     return JSONResponse({"job_id": job_id, "contiguous": contiguous})

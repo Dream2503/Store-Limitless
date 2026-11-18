@@ -7,6 +7,7 @@ from asyncio import CancelledError, Task, gather, sleep
 from pathlib import Path
 from time import time
 from collections.abc import Iterable
+from contextlib import aclosing
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -169,8 +170,9 @@ async def list_user_upload_jobs(username: str) -> list[dict[str, object]]:
             "kind": str(metadata.get("kind") or "link"),
             "directory": str(metadata.get("directory") or "/home"),
             "data_center": str(metadata.get("data_center") or ""),
-            "status": status,
-            "message": message or "Uploading",
+            "status": "paused" if metadata.get("paused") else status,
+            "paused": bool(metadata.get("paused")),
+            "message": "Paused by you" if metadata.get("paused") else (message or "Uploading"),
             "transfer": transfer,
             "total": total,
             "download_transfer": max(0, int(getattr(progress, "download_transfer", 0) or 0)),
@@ -230,6 +232,13 @@ async def wait_for_all_chunks(job_id: str, file: File) -> None:
 
         if job_metadata and bool(job_metadata.get("failed")):
             raise RuntimeError("Upload failed: browser transfer stopped")
+
+        while job_metadata and bool(job_metadata.get("paused")) and not bool(job_metadata.get("cancelled")):
+            await sleep(0.25)
+            job_metadata = await get_upload_job_metadata(job_id)
+
+        if job_metadata and bool(job_metadata.get("cancelled")):
+            raise RuntimeError("Upload cancelled")
 
         state: object | None = await Redis.get_json(upload_session_key(job_id))
 
@@ -326,6 +335,7 @@ async def register_upload_batch(batch_id: str, *, username: str, name: str, kind
         "status": "queued",
         "message": "Queued",
         "cancelled": False,
+        "paused": False,
         "created_at": time(),
     }
     await Redis.set_json(upload_batch_key(batch_id), metadata)
@@ -528,7 +538,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
         # The browser normally publishes current_job_id, but a frontend hot reload
         # can interrupt that PATCH after the backend has already registered the child.
         # Recover it from the batch's persisted child list instead of relying on UI memory.
-        if metadata.get("kind") == "link" and metadata.get("status") in {"queued", "uploading"}:
+        if metadata.get("kind") == "link" and metadata.get("status") in {"queued", "uploading", "paused"}:
             current_child_id = str(metadata.get("current_job_id") or "")
             child_ids = [str(value) for value in metadata.get("child_job_ids", []) if str(value)]
             candidates = ([current_child_id] if current_child_id else []) + [
@@ -640,7 +650,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                         and child_metadata.get("username") == username
                         and str(child_metadata.get("batch_id") or "") == batch_id
                         and child_status in {"error", "cancelled"}
-                        and metadata.get("status") in {"queued", "uploading"}
+                        and metadata.get("status") in {"queued", "uploading", "paused"}
                 ):
                     metadata["status"] = child_status
                     metadata["message"] = progress_message or (
@@ -870,6 +880,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
             "current_job_id": current_job_id,
             "current_name": current_name,
             "status": status,
+            "paused": bool(metadata.get("paused")),
             "progress": progress,
             "transfer": current_transfer,
             "total": current_total,
@@ -904,20 +915,35 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
         session_state: object | None = await Redis.get_json(upload_session_key(job_id))
         download_total = int(session_state.get("total") or 0) if isinstance(session_state, dict) else 0
 
-        async for progress in file_upload(
+        async def pause_requested() -> bool:
+            """Read the child job's authoritative pause flag for the provider scheduler."""
+
+            latest_metadata = await get_upload_job_metadata(job_id)
+            if latest_metadata and latest_metadata.get("cancelled"):
+                raise CancelledError
+            return bool(latest_metadata and latest_metadata.get("paused"))
+
+        async with aclosing(file_upload(
                 file,
                 file_path,
                 producer_task,
                 intermediate=True,
                 track_download=True,
                 download_total=download_total,
-        ):
-            latest_metadata = await get_upload_job_metadata(job_id)
+                pause_check=pause_requested,
+        )) as upload_stream:
+            async for progress in upload_stream:
+                latest_metadata = await get_upload_job_metadata(job_id)
 
-            if latest_metadata and latest_metadata.get("cancelled"):
-                raise RuntimeError("Upload cancelled")
+                if latest_metadata and latest_metadata.get("cancelled"):
+                    raise RuntimeError("Upload cancelled")
 
-            await Redis.set(job_id, progress)
+                if latest_metadata and latest_metadata.get("paused"):
+                    progress.message = "Paused by you"
+                    progress.upload_speed = 0
+                    progress.download_speed = 0
+
+                await Redis.set(job_id, progress)
 
         if producer_task.done() and not producer_task.cancelled():
             producer_error: BaseException | None = producer_task.exception()
@@ -973,17 +999,23 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
 
     except Exception as error:
         metadata = await get_upload_job_metadata(job_id)
-        write_log(
-            "ERROR",
-            Database,
-            "UPLOAD CHUNKS",
-            file.username,
-            f"Chunk upload worker failed job_id={job_id} error={type(error).__name__}: "
-            f"{sanitize_sensitive_urls(str(error))[:300]}",
-        )
 
-        if not (metadata and (metadata.get("failed") or metadata.get("cancelled"))):
-            await Redis.set(job_id, Progress(file.name, f"Upload failed: {sanitize_sensitive_urls(str(error))[:250]}", 0))
+        if metadata and metadata.get("cancelled"):
+            # Cancellation closes the async upload stream and its provider-part
+            # tasks. Do not report expected shutdown as a failed upload.
+            write_log("INFO", Database, "UPLOAD CHUNKS", file.username, f"Upload worker stopped after cancellation job_id={job_id}")
+        else:
+            write_log(
+                "ERROR",
+                Database,
+                "UPLOAD CHUNKS",
+                file.username,
+                f"Chunk upload worker failed job_id={job_id} error={type(error).__name__}: "
+                f"{sanitize_sensitive_urls(str(error))[:300]}",
+            )
+
+            if not (metadata and metadata.get("failed")):
+                await Redis.set(job_id, Progress(file.name, f"Upload failed: {sanitize_sensitive_urls(str(error))[:250]}", 0))
 
     finally:
         if not producer_task.done():

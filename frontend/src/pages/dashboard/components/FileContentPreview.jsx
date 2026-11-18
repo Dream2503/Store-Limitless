@@ -593,6 +593,14 @@ function formatMediaTime(seconds) {
 }
 
 /**
+ * Clamp image zoom to a useful range shared by all image interactions.
+ * @param {number} value
+ */
+function clampPreviewZoom(value) {
+    return Math.max(0.25, Math.min(5, value));
+}
+
+/**
  * Image preview with wheel zoom, touch pinch zoom, and a small themed zoom toolbar.
  * The image is sized in layout (rather than only transformed) so the viewer can scroll
  * to every edge after zooming in.
@@ -605,8 +613,6 @@ function ImageFilePreview({src, fileName, onError}) {
     const [zoom, setZoom] = useState(1);
     const [naturalSize, setNaturalSize] = useState(null);
     const [viewportSize, setViewportSize] = useState({width: 0, height: 0});
-
-    const clampZoom = (value) => Math.max(0.25, Math.min(5, value));
 
     useEffect(() => {
         setLoaded(false);
@@ -637,7 +643,7 @@ function ImageFilePreview({src, fileName, onError}) {
     const handleWheel = useCallback((event) => {
         event.preventDefault();
         const factor = Math.exp(-event.deltaY * 0.0015);
-        setZoom((current) => clampZoom(current * factor));
+        setZoom((current) => clampPreviewZoom(current * factor));
     }, []);
 
     const handlePointerDown = useCallback((event) => {
@@ -668,7 +674,7 @@ function ImageFilePreview({src, fileName, onError}) {
         const [{x: x1, y: y1}, {x: x2, y: y2}] = Array.from(pointers.values());
         const distance = Math.max(1, Math.hypot(x2 - x1, y2 - y1));
         const nextZoom = pinchRef.current.zoom * (distance / pinchRef.current.distance);
-        setZoom(clampZoom(nextZoom));
+        setZoom(clampPreviewZoom(nextZoom));
     }, []);
 
     const finishPointer = useCallback((event) => {
@@ -700,7 +706,7 @@ function ImageFilePreview({src, fileName, onError}) {
         aria-label="Image viewer. Scroll to zoom, or pinch on a touch screen."
     >
         <div className="flex h-max min-h-full w-max min-w-full items-center justify-center p-3 sm:p-6">
-            {!loaded && <div className="fixed inset-0 z-10 pointer-events-none flex items-center justify-center">
+            {!loaded && <div className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center">
                 <PreviewMessage message="Loading image…"/>
             </div>}
             <img
@@ -724,7 +730,7 @@ function ImageFilePreview({src, fileName, onError}) {
         </div>
 
         {loaded && <div className="absolute right-3 top-3 z-20 flex items-center gap-1 rounded-lg border border-[#304236] bg-[#121a15]/95 p-1 text-[#e7eee9] shadow-lg backdrop-blur">
-            <button type="button" onClick={() => setZoom((current) => clampZoom(current / 1.2))}
+            <button type="button" onClick={() => setZoom((current) => clampPreviewZoom(current / 1.2))}
                     disabled={zoom <= 0.25} aria-label="Zoom out" title="Zoom out"
                     className="flex h-8 w-8 items-center justify-center rounded-md text-[#c5d0c8] transition-colors hover:bg-white/10 hover:text-white disabled:opacity-35">
                 <span className="material-symbols-outlined text-[19px]" aria-hidden="true">remove</span>
@@ -733,7 +739,7 @@ function ImageFilePreview({src, fileName, onError}) {
                     className="min-w-12 rounded-md px-1 text-xs tabular-nums hover:bg-white/10">
                 {Math.round(zoom * 100)}%
             </button>
-            <button type="button" onClick={() => setZoom((current) => clampZoom(current * 1.2))}
+            <button type="button" onClick={() => setZoom((current) => clampPreviewZoom(current * 1.2))}
                     disabled={zoom >= 5} aria-label="Zoom in" title="Zoom in"
                     className="flex h-8 w-8 items-center justify-center rounded-md text-[#c5d0c8] transition-colors hover:bg-white/10 hover:text-white disabled:opacity-35">
                 <span className="material-symbols-outlined text-[19px]" aria-hidden="true">add</span>

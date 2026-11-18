@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from backend.database.models import Directory, File, User
 from backend.database.redis_server import Redis
-from backend.server.jwt_handler import create_access_token, get_current_user
+from backend.server.jwt_handler import OAuth2_scheme, create_access_token, get_current_user, verify_token
 from backend.server.security import hash_password, verify_password
 
 router: APIRouter = APIRouter()
@@ -50,6 +52,23 @@ async def login(username: str, password: str) -> tuple[dict[str, str], dict[str,
             "last_name": user.last_name,
         }, await user.home
     )
+
+
+@router.post("/logout")
+async def logout(token: str = Depends(OAuth2_scheme)) -> JSONResponse:
+    """Revoke session-bound private stream and download links for this login."""
+
+    username = verify_token(token)
+    if username is None:
+        return JSONResponse({"message": "Session already expired"})
+
+    session_hash = sha256(token.encode("utf-8")).hexdigest()
+    await Redis.set_json(
+        f"auth:revoked:{session_hash}",
+        {"username": username, "revoked": True},
+        ex=86400,
+    )
+    return JSONResponse({"message": "Signed out"})
 
 
 @router.get("/metadata")

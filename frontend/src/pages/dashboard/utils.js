@@ -1,4 +1,4 @@
-import {FILE_ICONS} from "./constants.js";
+import {API_URL, FILE_ICONS} from "./constants.js";
 
 /** Generate a unique identifier with compatibility for browsers lacking crypto.randomUUID(). */
 export function createUniqueId() {
@@ -58,6 +58,34 @@ export function formatFileSize(bytes) {
     const units = ["B", "KB", "MB", "GB", "TB", "PB"];
     const index = Math.min(Math.floor(Math.log(value) / Math.log(1000)), units.length - 1);
     return `${(value / (1000 ** index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+/** Browser event emitted whenever the authenticated session ends. */
+export const AUTH_SESSION_START_EVENT = "storelimitless:session-started";
+export const AUTH_SESSION_END_EVENT = "storelimitless:session-ended";
+
+/** Revoke server-issued private links, clear the browser session, and cancel private work. */
+export function endAuthSession() {
+    const token = localStorage.getItem("token");
+    if (token && typeof fetch === "function") {
+        // Start revocation before clearing the bearer token. keepalive lets the small
+        // request finish even if the browser navigates immediately after sign-out.
+        void fetch(`${API_URL}/auth/logout`, {
+            method: "POST",
+            headers: {Authorization: `Bearer ${token}`},
+            cache: "no-store",
+            keepalive: true,
+        }).then((response) => {
+            if (!response.ok) {
+                throw new Error(`Session revocation failed (HTTP ${response.status}).`);
+            }
+        }).catch((error) => console.warn("Could not revoke the signed-out session on the server:", error));
+    }
+
+    localStorage.removeItem("token");
+    if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event(AUTH_SESSION_END_EVENT));
+    }
 }
 
 /** Read the current bearer token from browser storage. */

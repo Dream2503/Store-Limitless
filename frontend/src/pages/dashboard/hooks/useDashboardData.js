@@ -1,6 +1,6 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {API_URL} from "../constants.js";
-import {getToken} from "../utils.js";
+import {endAuthSession, getToken} from "../utils.js";
 
 const HOME_PATH = "/home";
 
@@ -101,7 +101,7 @@ export default function useDashboardData(currentFolder, navigate) {
         } catch (error) {
             if (error.status === 401) {
                 clearDashboardTreeCache(token);
-                localStorage.removeItem("token");
+                endAuthSession();
                 navigateRef.current("/");
                 return;
             }
@@ -189,7 +189,7 @@ export default function useDashboardData(currentFolder, navigate) {
                 if (requestVersion === treeVersionRef.current) {
                     if (error.status === 401) {
                         clearDashboardTreeCache(token);
-                        localStorage.removeItem("token");
+                        endAuthSession();
                         navigateRef.current("/");
                         return;
                     }

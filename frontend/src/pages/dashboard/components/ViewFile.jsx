@@ -2,7 +2,7 @@ import {useCallback, useEffect, useRef, useState} from "react";
 import {useLocation, useNavigate} from "react-router-dom";
 import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
 import UploadJobsTray from "./UploadJobsTray.jsx";
-import {createUniqueId, getFileKind} from "../utils.js";
+import {AUTH_SESSION_END_EVENT, createUniqueId, endAuthSession, getFileKind, getToken} from "../utils.js";
 import {listResumableDownloadChunks, removeResumableDownloadChunks, removeResumableDownloadChunksFrom, saveResumableDownloadChunk} from "../utils/resumableDownloads.js";
 import {API_URL} from "../../../api.js";
 
@@ -689,7 +689,7 @@ export default function ViewFile({active = true} = {}) {
     const privateFile = privateFileMetadata?.routeId === String(fileId) ? privateFileMetadata : null;
     const name = searchParams.get("name") || publicFile?.name || privateFile?.name || "Untitled";
     const kind = searchParams.get("kind") || getFileKind(publicFile?.name || privateFile?.name || name);
-    const downloadTrayJobs = downloadError || downloadState.status !== "idle" ? [{
+    const downloadTrayJobs = (fileId || publicToken) && (downloadError || downloadState.status !== "idle") ? [{
         id: downloadTrayJobId,
         name,
         status: downloadError && downloadState.status === "idle" ? "error" : downloadState.status,
@@ -731,7 +731,7 @@ export default function ViewFile({active = true} = {}) {
                 );
                 const data = await response.json().catch(() => ({}));
                 if (response.status === 401) {
-                    localStorage.removeItem("token");
+                    endAuthSession();
                     navigate("/");
                     return;
                 }
@@ -804,7 +804,9 @@ export default function ViewFile({active = true} = {}) {
         }
 
         if (!fileId) {
-            setDownloadError("No file was selected.");
+            // Persistent pages can be mounted in the background after login.
+            // An inactive viewer without a route target is not a failed download.
+            if (active) setDownloadError("No file was selected.");
             setDownloadPending(false);
             return () => {
                 cancelled = true;
@@ -823,13 +825,13 @@ export default function ViewFile({active = true} = {}) {
         setDownloadPending(true);
         (async () => {
             try {
-                const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(fileId)}/public-link`, {
+                const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(fileId)}/download-link`, {
                     method: "POST",
                     headers: {Authorization: `Bearer ${sessionToken}`},
                 });
                 const data = await response.json().catch(() => ({}));
                 if (response.status === 401) {
-                    localStorage.removeItem("token");
+                    endAuthSession();
                     throw new Error("Your session has expired. Sign in again to download this file.");
                 }
                 if (!response.ok) throw new Error(data.detail || "Could not prepare the download.");
@@ -845,7 +847,7 @@ export default function ViewFile({active = true} = {}) {
         return () => {
             cancelled = true;
         };
-    }, [fileId, navigate, publicFile, publicFileError, publicToken]);
+    }, [active, fileId, navigate, publicFile, publicFileError, publicToken]);
 
     useEffect(() => {
         downloadMountedRef.current = true;
@@ -861,6 +863,37 @@ export default function ViewFile({active = true} = {}) {
         };
     }, []);
 
+    useEffect(() => {
+        const handleSessionEnded = () => {
+            downloadDismissedRef.current = true;
+            downloadControllerRef.current?.abort();
+            downloadControllerRef.current = null;
+            const session = downloadSessionRef.current;
+            if (session.tempName && typeof navigator.storage?.getDirectory === "function") {
+                const tempName = session.tempName;
+                navigator.storage.getDirectory().then((root) => root.removeEntry(tempName)).catch(() => {});
+            }
+            session.tempName = "";
+            session.total = 0;
+            session.etag = "";
+            session.transferred = 0;
+            removeResumableDownloadChunks(session.id).catch(() => {});
+            setDownloadState({status: "idle", transferred: 0, total: 0, message: ""});
+            setDownloadError("");
+            if (!publicToken) {
+                setDownloadUrl("");
+                setDownloadPending(false);
+                setPrivateFileMetadata(null);
+                setPrivateFilePending(false);
+                setPrivateFileError("Sign in to download this file.");
+                setSource(null);
+            }
+        };
+
+        window.addEventListener(AUTH_SESSION_END_EVENT, handleSessionEnded);
+        return () => window.removeEventListener(AUTH_SESSION_END_EVENT, handleSessionEnded);
+    }, [publicToken]);
+
     /**
      * Stage the file in StoreLimitless temporary storage before triggering the browser save.
      * This deliberately avoids a direct link to the download endpoint.
@@ -868,6 +901,13 @@ export default function ViewFile({active = true} = {}) {
      */
     const startStagedDownload = useCallback(async () => {
         if (!downloadUrl || downloadControllerRef.current) return;
+        const sessionToken = publicToken ? null : getToken();
+        if (!publicToken && !sessionToken) {
+            setDownloadUrl("");
+            setDownloadPending(false);
+            setDownloadError("Sign in to download this file.");
+            return;
+        }
         downloadDismissedRef.current = false;
         const controller = new AbortController();
         downloadControllerRef.current = controller;
@@ -879,9 +919,15 @@ export default function ViewFile({active = true} = {}) {
         const updateState = (next) => {
             if (downloadMountedRef.current && !downloadDismissedRef.current) setDownloadState(next);
         };
+        const ensureSession = () => {
+            if (controller.signal.aborted || (!publicToken && (!sessionToken || getToken() !== sessionToken))) {
+                throw new DOMException("The session ended", "AbortError");
+            }
+        };
 
         updateState({status: "downloading", transferred: session.transferred || 0, total: session.total || 0, message: "Preparing StoreLimitless download"});
         try {
+            ensureSession();
             if (typeof navigator.storage?.getDirectory !== "function") {
                 // Stage verified ranges in IndexedDB when OPFS is unavailable. Keep
                 // completed chunks across Pause so Resume continues from the last range.
@@ -932,7 +978,7 @@ export default function ViewFile({active = true} = {}) {
                 });
 
                 while (offset < total) {
-                    if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
+                    ensureSession();
                     const end = Math.min(offset + chunkSize, total) - 1;
                     let chunk = null;
                     let lastError = null;
@@ -1018,6 +1064,7 @@ export default function ViewFile({active = true} = {}) {
                 anchor.href = objectUrl;
                 anchor.download = name || "download";
                 anchor.rel = "noreferrer";
+                ensureSession();
                 document.body.appendChild(anchor);
                 anchor.click();
                 anchor.remove();
@@ -1082,7 +1129,7 @@ export default function ViewFile({active = true} = {}) {
             });
             const chunkSize = 8 * 1024 * 1024;
             while (offset < total) {
-                if (controller.signal.aborted) throw new DOMException("Download cancelled", "AbortError");
+                ensureSession();
                 const end = Math.min(offset + chunkSize, total) - 1;
                 let chunk = null;
                 let lastError = null;
@@ -1154,6 +1201,7 @@ export default function ViewFile({active = true} = {}) {
             anchor.href = objectUrl;
             anchor.download = name || stagedFile.name || "download";
             anchor.rel = "noreferrer";
+            ensureSession();
             document.body.appendChild(anchor);
             anchor.click();
             anchor.remove();
@@ -1186,8 +1234,21 @@ export default function ViewFile({active = true} = {}) {
             }
         } finally {
             if (downloadControllerRef.current === controller) downloadControllerRef.current = null;
+            // An in-flight IndexedDB/OPFS write can settle after the logout listener ran.
+            // Clean again here so late writes cannot leave private bytes for the next session.
+            if (!publicToken && getToken() !== sessionToken) {
+                const stagedName = tempName || session.tempName;
+                if (stagedName && typeof navigator.storage?.getDirectory === "function") {
+                    navigator.storage.getDirectory().then((root) => root.removeEntry(stagedName)).catch(() => {});
+                }
+                session.tempName = "";
+                session.total = 0;
+                session.etag = "";
+                session.transferred = 0;
+                removeResumableDownloadChunks(session.id).catch(() => {});
+            }
         }
-    }, [downloadUrl, name, publicFile?.size]);
+    }, [downloadUrl, name, publicFile?.size, publicToken]);
 
     /** @type {[VideoSource | null, import("react").Dispatch<import("react").SetStateAction<VideoSource | null>>]} */
     const [source, setSource] = useState(null);
@@ -1290,11 +1351,11 @@ export default function ViewFile({active = true} = {}) {
 
         (async () => {
             try {
-                const response = await fetch(`${API_URL}/auth/file/${fileId}/public-link`, {
+                const response = await fetch(`${API_URL}/auth/file/${fileId}/private-stream-link`, {
                     method: "POST", headers: {Authorization: `Bearer ${token}`},
                 });
                 if (response.status === 401) {
-                    localStorage.removeItem("token");
+                    endAuthSession();
                     navigate("/");
                     return;
                 }

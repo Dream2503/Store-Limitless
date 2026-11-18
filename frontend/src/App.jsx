@@ -6,6 +6,7 @@ import DashboardPage from "./pages/Dashboard.jsx";
 import UploadPage from "./pages/dashboard/components/UploadModal.jsx";
 import ViewFile from "./pages/dashboard/components/ViewFile.jsx";
 import UploadTrayPage from "./pages/dashboard/components/UploadTrayPage.jsx";
+import {AUTH_SESSION_END_EVENT} from "./pages/dashboard/utils.js";
 
 
 /**
@@ -143,16 +144,50 @@ function LegacyDashboardRedirect() {
 function PersistentRoutePages() {
     const location = useLocation();
     const isDashboardRoute = location.pathname === "/home" || location.pathname.startsWith("/home/");
-    const isViewRoute = /^\/view\/[^/]+\/?$/.test(location.pathname);
-    const [keepDashboardMounted, setKeepDashboardMounted] = useState(isDashboardRoute);
-    const [keepViewMounted, setKeepViewMounted] = useState(isViewRoute);
-    const shouldMountDashboard = keepDashboardMounted || isDashboardRoute;
-    const shouldMountView = keepViewMounted || isViewRoute;
+    const viewRouteMatch = location.pathname.match(/^\/view\/([^/]+)\/?$/);
+    const isViewRoute = Boolean(viewRouteMatch);
+    const isPublicViewRoute = isViewRoute && (
+        new URLSearchParams(location.search).has("public_token")
+        || !/^\d+$/.test(decodeURIComponent(viewRouteMatch[1]))
+    );
+    const [hasSession, setHasSession] = useState(() => Boolean(localStorage.getItem("token")));
+    const [keepDashboardMounted, setKeepDashboardMounted] = useState(() => Boolean(localStorage.getItem("token")) && isDashboardRoute);
+    const [keepViewMounted, setKeepViewMounted] = useState(() => (
+        Boolean(localStorage.getItem("token")) && isViewRoute
+    ) || isPublicViewRoute);
+    const shouldMountDashboard = hasSession && (keepDashboardMounted || isDashboardRoute);
+    const shouldMountView = isPublicViewRoute || (hasSession && (keepViewMounted || isViewRoute));
 
     useEffect(() => {
-        if (isDashboardRoute) setKeepDashboardMounted(true);
-        if (isViewRoute) setKeepViewMounted(true);
-    }, [isDashboardRoute, isViewRoute]);
+        const syncSession = () => {
+            const sessionActive = Boolean(localStorage.getItem("token"));
+            setHasSession(sessionActive);
+            if (!sessionActive) {
+                // A new login must not revive a viewer that belonged to the previous session.
+                setKeepDashboardMounted(false);
+                setKeepViewMounted(false);
+            }
+        };
+        const handleStorage = (event) => {
+            if (event.key === "token" && !event.newValue) {
+                window.dispatchEvent(new Event(AUTH_SESSION_END_EVENT));
+            }
+            syncSession();
+        };
+
+        window.addEventListener(AUTH_SESSION_END_EVENT, syncSession);
+        window.addEventListener("storage", handleStorage);
+        return () => {
+            window.removeEventListener(AUTH_SESSION_END_EVENT, syncSession);
+            window.removeEventListener("storage", handleStorage);
+        };
+    }, []);
+
+    useEffect(() => {
+        setHasSession(Boolean(localStorage.getItem("token")));
+        if (hasSession && isDashboardRoute) setKeepDashboardMounted(true);
+        if (isViewRoute && (hasSession || isPublicViewRoute)) setKeepViewMounted(true);
+    }, [hasSession, isDashboardRoute, isViewRoute, isPublicViewRoute, location.pathname, location.search]);
 
     return (<>
         {shouldMountDashboard && <DashboardPage active={isDashboardRoute}/>}
@@ -161,9 +196,11 @@ function PersistentRoutePages() {
             <Route path="/" element={<Landing/>}/>
             <Route path="/login" element={<Auth initialMode="login"/>}/>
             <Route path="/signup" element={<Auth initialMode="signup"/>}/>
-            <Route path="/upload-tray" element={<UploadTrayPage/>}/>
+            <Route path="/upload-tray" element={hasSession ? <UploadTrayPage/> : <Navigate to="/" replace/>}/>
             <Route path="/dashboard" element={<LegacyDashboardRedirect/>}/>
-            <Route path="/upload" element={<UploadPage/>}/>
+            <Route path="/upload" element={hasSession ? <UploadPage/> : <Navigate to="/" replace/>}/>
+            <Route path="/home/*" element={hasSession ? null : <Navigate to="/" replace/>}/>
+            <Route path="/view/:fileId" element={!hasSession && !isPublicViewRoute ? <Navigate to="/" replace/> : null}/>
         </Routes>
     </>);
 }

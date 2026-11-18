@@ -218,16 +218,42 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
     return StreamingResponse(_stream_while_connected(stream, request), status_code=206 if partial else 200, headers=headers, media_type=content_type)
 
 
+async def _ensure_private_link_session_active(payload: dict[str, object], request: Request) -> None:
+    """Reject session-bound URLs after logout while preserving intentional public shares."""
+
+    session_hash = payload.get("session_hash")
+    if session_hash is None:
+        return
+
+    try:
+        revoked = await Redis.get_json(f"auth:revoked:{session_hash}")
+    except Exception as error:
+        # Private links fail closed if revocation state cannot be checked.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not validate the download session. Retry shortly.",
+            headers=_public_cors_headers(request),
+        ) from error
+
+    if revoked is not None:
+        raise HTTPException(
+            status_code=401,
+            detail="The login session that created this link has ended.",
+            headers=_public_cors_headers(request),
+        )
+
+
 async def _owned_public_file(token: str, request: Request) -> File:
     """Resolve a signed token to its original owner's file record."""
 
     try:
-        payload: dict[str, str | int] = verify_public_stream_token(token)
+        payload: dict[str, object] = verify_public_stream_token(token)
 
     except ValueError as error:
         raise HTTPException(status_code=404, detail="Invalid public download link", headers=_public_cors_headers(request)) from error
 
-    file = await File.get(cast(str, payload["username"]), fid=int(payload["file_id"]))
+    await _ensure_private_link_session_active(payload, request)
+    file = await File.get(cast(str, payload["username"]), fid=int(cast(int, payload["file_id"])))
 
     if file is None or file.username != payload["username"]:
         raise HTTPException(status_code=404, detail="File not found", headers=_public_cors_headers(request))
@@ -303,6 +329,8 @@ async def public_zip_download(
         payload = verify_public_zip_token(token)
     except ValueError as error:
         raise HTTPException(status_code=404, detail="Invalid or expired ZIP download link", headers=_public_cors_headers(request)) from error
+
+    await _ensure_private_link_session_active(payload, request)
 
     username = cast(str, payload["username"])
     file_ids = cast(list[int], payload.get("file_ids", []))

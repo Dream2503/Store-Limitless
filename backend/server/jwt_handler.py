@@ -1,6 +1,7 @@
 """Create and validate bearer tokens and resolve authenticated users."""
 
 from datetime import datetime, timedelta, UTC
+from secrets import token_urlsafe
 
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
@@ -17,7 +18,11 @@ def create_access_token(data: dict[str, str], expires_delta: timedelta | None = 
     """Encode a signed access token with an expiration time."""
 
     to_encode: dict[str, str | datetime] = data.copy()
-    to_encode.update({"exp": datetime.now(UTC) + (expires_delta or timedelta(hours=24))})
+    to_encode.update({
+        "exp": datetime.now(UTC) + (expires_delta or timedelta(hours=24)),
+        # Ensure two logins for the same account never share a revocation identity.
+        "jti": token_urlsafe(16),
+    })
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 

@@ -11,8 +11,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend.database.models import Directory, File, User
-from backend.server.jwt_handler import get_current_user
-from backend.server.security import create_public_stream_token, create_public_zip_token
+from backend.server.jwt_handler import OAuth2_scheme, get_current_user
+from backend.server.security import create_public_stream_token, create_public_zip_token, create_session_bound_stream_token
 from backend.server.utils import perform_validation
 
 router: APIRouter = APIRouter()
@@ -26,7 +26,11 @@ class ZipDownloadRequest(BaseModel):
 
 
 @router.post("/files/zip-link")
-async def create_zip_download_link(payload: ZipDownloadRequest, user: User = Depends(get_current_user)) -> dict[str, object]:
+async def create_zip_download_link(
+        payload: ZipDownloadRequest,
+        user: User = Depends(get_current_user),
+        session_token: str = Depends(OAuth2_scheme),
+) -> dict[str, object]:
     """Validate the selected files and create a short-lived streaming ZIP URL."""
 
     file_ids = payload.file_ids
@@ -57,7 +61,7 @@ async def create_zip_download_link(payload: ZipDownloadRequest, user: User = Dep
             raise HTTPException(status_code=404, detail=f"Active folder {folder_id} was not found")
 
     return {
-        "public_token": create_public_zip_token(file_ids, user.username, folder_ids=folder_ids),
+        "public_token": create_public_zip_token(file_ids, user.username, folder_ids=folder_ids, session_token=session_token),
         "expires_in": 900,
     }
 
@@ -589,3 +593,42 @@ async def create_public_link(fid: int, user: User = Depends(get_current_user)) -
         raise HTTPException(status_code=403, detail="Access denied")
 
     return {"public_token": create_public_stream_token(file=file, username=file.username)}
+
+@router.post("/file/{fid}/private-stream-link")
+async def create_private_stream_link(
+        fid: int,
+        user: User = Depends(get_current_user),
+        session_token: str = Depends(OAuth2_scheme),
+) -> dict[str, object]:
+    """Create a stream URL bound to the current login session, not a public share."""
+
+    file: File | None = await File.get(user.username, fid=fid)
+    if file is None or file.username != user.username:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return {
+        "public_token": create_session_bound_stream_token(
+            file, user.username, session_token, token_type="private-stream",
+        ),
+        "expires_in": 86400,
+    }
+
+
+@router.post("/file/{fid}/download-link")
+async def create_private_download_link(
+        fid: int,
+        user: User = Depends(get_current_user),
+        session_token: str = Depends(OAuth2_scheme),
+) -> dict[str, object]:
+    """Create a download URL that is revoked when the issuing login session ends."""
+
+    file: File | None = await File.get(user.username, fid=fid)
+    if file is None or file.username != user.username:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return {
+        "public_token": create_session_bound_stream_token(
+            file, user.username, session_token, token_type="private-download",
+        ),
+        "expires_in": 86400,
+    }

@@ -1,5 +1,6 @@
 import {useEffect, useState} from "react";
 import {API_URL} from "../../../api.js";
+import {endAuthSession} from "../utils.js";
 
 /** @param {{message: string}} props */
 function PreviewMessage({message}) {
@@ -21,11 +22,11 @@ async function getPreviewUrl(fileId, publicToken) {
 
     const token = localStorage.getItem("token");
     if (!token) throw new Error("Your session has expired. Please sign in again.");
-    const response = await fetch(`${API_URL}/auth/file/${fileId}/public-link`, {
+    const response = await fetch(`${API_URL}/auth/file/${fileId}/private-stream-link`, {
         method: "POST", headers: {Authorization: `Bearer ${token}`},
     });
     if (response.status === 401) {
-        localStorage.removeItem("token");
+        endAuthSession();
         throw new Error("Your session has expired. Please sign in again.");
     }
     const data = await response.json();

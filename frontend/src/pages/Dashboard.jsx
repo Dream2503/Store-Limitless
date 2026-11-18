@@ -16,7 +16,7 @@ import useDashboardData, {clearDashboardTreeCache} from "./dashboard/hooks/useDa
 import useGlobalFileSearch from "./dashboard/hooks/useGlobalFileSearch.js";
 import useUploadJobs from "./dashboard/hooks/useUploadJobs.js";
 import {API_URL, DASHBOARD_SELECTION_STORAGE_KEY, DASHBOARD_SELECTIONS_BY_VIEW_KEY,} from "./dashboard/constants.js";
-import {createUniqueId, decodePathSegment, folderPathToRoute, getFileIcon, getFileKind, getToken, makeSelectionViewKey,} from "./dashboard/utils.js";
+import {AUTH_SESSION_END_EVENT, createUniqueId, decodePathSegment, endAuthSession, folderPathToRoute, getFileIcon, getFileKind, getToken, makeSelectionViewKey,} from "./dashboard/utils.js";
 
 /** @typedef {"files" | "trash"} DashboardTab */
 /** @typedef {{icon: string, color: string}} FileIconStyle */
@@ -119,6 +119,7 @@ export default function DashboardPage({active = true} = {}) {
     const [downloadJobs, setDownloadJobs] = useState([]);
     const downloadJobsRef = useRef([]);
     const downloadControllersRef = useRef(new Map());
+    const clearAllTasksRef = useRef(null);
 
     useEffect(() => {
         downloadJobsRef.current = downloadJobs;
@@ -159,13 +160,19 @@ export default function DashboardPage({active = true} = {}) {
         saveResumableDownload(updated).catch((error) => console.warn("Could not persist download progress:", error));
     };
 
-    const runResumableDownload = async (job) => {
-        if (downloadControllersRef.current.has(job.id)) return;
+    const runResumableDownload = async (job, sessionToken = getToken()) => {
+        if (!sessionToken || getToken() !== sessionToken || downloadControllersRef.current.has(job.id)) return;
         const controller = new AbortController();
         downloadControllersRef.current.set(job.id, controller);
+        const ensureSession = () => {
+            if (controller.signal.aborted || getToken() !== sessionToken) {
+                throw new DOMException("The session ended", "AbortError");
+            }
+        };
         updateDownloadJob(job.id, {status: "downloading", message: job.tempName ? "Downloading to temporary storage" : "Downloading"});
 
         try {
+            ensureSession();
             if (job.blobFallback) {
                 // Browsers without OPFS/save-file-picker support still get durable,
                 // resumable downloads. Persist each complete HTTP byte range in
@@ -221,7 +228,7 @@ export default function DashboardPage({active = true} = {}) {
                 });
 
                 while (transferred < latestTotal) {
-                    if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
+                    ensureSession();
 
                     const end = Math.min(transferred + rangeSize, latestTotal) - 1;
                     let rangeBytes = null;
@@ -313,6 +320,7 @@ export default function DashboardPage({active = true} = {}) {
                 anchor.href = objectUrl;
                 anchor.download = job.name || "download";
                 anchor.rel = "noreferrer";
+                ensureSession();
                 document.body.appendChild(anchor);
                 anchor.click();
                 anchor.remove();
@@ -460,6 +468,7 @@ export default function DashboardPage({active = true} = {}) {
                 anchor.href = objectUrl;
                 anchor.download = job.name || completedFile.name || "StoreLimitless-files.zip";
                 anchor.rel = "noreferrer";
+                ensureSession();
                 document.body.appendChild(anchor);
                 anchor.click();
                 anchor.remove();
@@ -492,7 +501,7 @@ export default function DashboardPage({active = true} = {}) {
             updateDownloadJob(job.id, {total: latestTotal, etag: latestEtag, transferred: offset, message: staged ? "Downloading to temporary storage" : "Downloading"});
 
             while (offset < latestTotal) {
-                if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
+                ensureSession();
                 const end = Math.min(offset + 8 * 1024 * 1024, latestTotal) - 1;
                 let chunk = null;
                 let lastError = null;
@@ -538,6 +547,7 @@ export default function DashboardPage({active = true} = {}) {
                 anchor.href = objectUrl;
                 anchor.download = job.name || completedFile.name || "download";
                 anchor.rel = "noreferrer";
+                ensureSession();
                 document.body.appendChild(anchor);
                 anchor.click();
                 anchor.remove();
@@ -547,6 +557,12 @@ export default function DashboardPage({active = true} = {}) {
             updateDownloadJob(job.id, {status: "completed", transferred: latestTotal, total: latestTotal, message: staged ? "Complete · browser download started" : "Download complete"});
         } catch (error) {
             if (error?.name === "AbortError" || controller.signal.aborted) {
+                if (getToken() !== sessionToken) {
+                    removeStagedFile(job);
+                    removeResumableDownloadChunks(job.id).catch(() => {});
+                    removeResumableDownload(job.id).catch(() => {});
+                    return;
+                }
                 let transferred = downloadJobsRef.current.find((item) => item.id === job.id)?.transferred || 0;
                 if (job.streamOnly && job.tempName && typeof navigator.storage?.getDirectory === "function") {
                     try {
@@ -569,12 +585,20 @@ export default function DashboardPage({active = true} = {}) {
             }
         } finally {
             downloadControllersRef.current.delete(job.id);
+            // Retry cleanup after all in-flight writes have unwound. The logout
+            // listener may have tried removing an OPFS file while a writer held it.
+            if (getToken() !== sessionToken) {
+                removeStagedFile(job);
+                removeResumableDownloadChunks(job.id).catch(() => {});
+                removeResumableDownload(job.id).catch(() => {});
+            }
         }
     };
     const pauseDownload = (jobId) => downloadControllersRef.current.get(jobId)?.abort();
     const resumeDownload = (jobId) => {
         const job = downloadJobsRef.current.find((item) => item.id === jobId);
-        if (job) runResumableDownload(job);
+        const token = getToken();
+        if (job && token) runResumableDownload(job, token);
     };
     const removeStagedFile = (job) => {
         if (!job?.tempName || typeof navigator.storage?.getDirectory !== "function") return;
@@ -621,6 +645,13 @@ export default function DashboardPage({active = true} = {}) {
         downloadJobsRef.current = [];
         setDownloadJobs([]);
     };
+    clearAllTasksRef.current = clearAllTasks;
+
+    useEffect(() => {
+        const handleSessionEnded = () => clearAllTasksRef.current?.();
+        window.addEventListener(AUTH_SESSION_END_EVENT, handleSessionEnded);
+        return () => window.removeEventListener(AUTH_SESSION_END_EVENT, handleSessionEnded);
+    }, []);
     const [showFolderModal, setShowFolderModal] = useState(false);
     const [showUploadModal, setShowUploadModal] = useState(false);
     const [shareDialog, setShareDialog] = useState(null);
@@ -782,13 +813,15 @@ export default function DashboardPage({active = true} = {}) {
         // then trigger the user's actual browser download only after every byte is verified.
         if (typeof navigator.storage?.getDirectory === "function") {
             try {
-                const linkResponse = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(fileId))}/public-link`, {
+                const linkResponse = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(fileId))}/download-link`, {
                     method: "POST", headers: {Authorization: `Bearer ${token}`},
                 });
+                if (getToken() !== token) return;
                 const linkData = await linkResponse.json().catch(() => ({}));
+                if (getToken() !== token) return;
                 if (!linkResponse.ok) {
                     if (linkResponse.status === 401) {
-                        localStorage.removeItem("token");
+                        endAuthSession();
                         navigate("/");
                         return;
                     }
@@ -798,20 +831,32 @@ export default function DashboardPage({active = true} = {}) {
 
                 const url = `${API_URL}/public/download/${encodeURIComponent(linkData.public_token)}`;
                 const head = await fetch(url, {method: "HEAD"});
+                if (getToken() !== token) return;
                 if (!head.ok) throw new Error(`Could not prepare download (${head.status}).`);
                 const total = Number(head.headers.get("content-length") || files.find((item) => String(item.id) === String(fileId))?.size || 0);
                 const estimate = await navigator.storage.estimate().catch(() => ({}));
+                if (getToken() !== token) return;
                 if (total > 0 && Number.isFinite(estimate.quota) && Number.isFinite(estimate.usage) && estimate.quota - estimate.usage < total) {
                     throw new Error("There is not enough browser temporary storage to stage this file. Free up disk space and try again.");
                 }
                 await navigator.storage.persist().catch(() => false);
+                if (getToken() !== token) return;
 
                 const tempName = `storelimitless-${createUniqueId()}.download`;
                 const root = await navigator.storage.getDirectory();
+                if (getToken() !== token) return;
                 const tempHandle = await root.getFileHandle(tempName, {create: true});
+                if (getToken() !== token) {
+                    await root.removeEntry(tempName).catch(() => {});
+                    return;
+                }
                 const writer = await tempHandle.createWritable();
                 await writer.truncate(0);
                 await writer.close();
+                if (getToken() !== token) {
+                    await root.removeEntry(tempName).catch(() => {});
+                    return;
+                }
 
                 const file = files.find((item) => String(item.id) === String(fileId));
                 const job = {
@@ -827,11 +872,21 @@ export default function DashboardPage({active = true} = {}) {
                     message: "Queued",
                     createdAt: Date.now(),
                 };
+                if (getToken() !== token) {
+                    removeStagedFile(job);
+                    return;
+                }
                 const next = [job, ...downloadJobsRef.current];
                 downloadJobsRef.current = next;
                 setDownloadJobs(next);
                 await saveResumableDownload(job);
-                runResumableDownload(job);
+                if (getToken() !== token) {
+                    removeStagedFile(job);
+                    removeResumableDownload(job.id).catch(() => {});
+                    removeResumableDownloadChunks(job.id).catch(() => {});
+                    return;
+                }
+                runResumableDownload(job, token);
                 return;
             } catch (error) {
                 console.error("Could not stage download in browser storage:", error);
@@ -847,6 +902,7 @@ export default function DashboardPage({active = true} = {}) {
             try {
                 const file = files.find((item) => String(item.id) === String(fileId));
                 handle = await window.showSaveFilePicker({suggestedName: file?.name || "download"});
+                if (getToken() !== token) return;
             } catch (error) {
                 if (error?.name === "AbortError") return;
                 console.warn("Save picker unavailable; falling back to browser download:", error);
@@ -854,13 +910,15 @@ export default function DashboardPage({active = true} = {}) {
 
             if (handle) {
                 try {
-                    const response = await fetch(`${API_URL}/auth/file/${fileId}/public-link`, {
+                    const response = await fetch(`${API_URL}/auth/file/${fileId}/download-link`, {
                         method: "POST", headers: {Authorization: `Bearer ${token}`},
                     });
+                    if (getToken() !== token) return;
                     const data = await response.json().catch(() => ({}));
+                    if (getToken() !== token) return;
                     if (!response.ok) {
                         if (response.status === 401) {
-                            localStorage.removeItem("token");
+                            endAuthSession();
                             navigate("/");
                             return;
                         }
@@ -869,11 +927,13 @@ export default function DashboardPage({active = true} = {}) {
                     if (!data.public_token) throw new Error("The server did not return a download token.");
                     const url = `${API_URL}/public/download/${data.public_token}`;
                     const head = await fetch(url, {method: "HEAD"});
+                    if (getToken() !== token) return;
                     if (!head.ok) throw new Error(`Could not prepare download (${head.status}).`);
                     const total = Number(head.headers.get("content-length") || file?.size || 0);
                     const writable = await handle.createWritable();
                     await writable.truncate(0);
                     await writable.close();
+                    if (getToken() !== token) return;
                     const job = {
                         id: createUniqueId(),
                         fileId: String(fileId),
@@ -887,11 +947,21 @@ export default function DashboardPage({active = true} = {}) {
                         message: "Queued",
                         createdAt: Date.now(),
                     };
+                    if (getToken() !== token) {
+                        removeStagedFile(job);
+                        return;
+                    }
                     const next = [job, ...downloadJobsRef.current];
                     downloadJobsRef.current = next;
                     setDownloadJobs(next);
                     await saveResumableDownload(job);
-                    runResumableDownload(job);
+                    if (getToken() !== token) {
+                        removeStagedFile(job);
+                        removeResumableDownload(job.id).catch(() => {});
+                        removeResumableDownloadChunks(job.id).catch(() => {});
+                        return;
+                    }
+                    runResumableDownload(job, token);
                     return;
                 } catch (error) {
                     console.error("Could not start resumable download:", error);
@@ -904,13 +974,15 @@ export default function DashboardPage({active = true} = {}) {
         // Last-resort fallback for browsers without OPFS or a save-file picker.
         // Keep the transfer in the Downloads tray and delay the browser save until it is complete.
         try {
-            const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(fileId))}/public-link`, {
+            const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(fileId))}/download-link`, {
                 method: "POST", headers: {Authorization: `Bearer ${token}`},
             });
+            if (getToken() !== token) return;
             const data = await response.json().catch(() => ({}));
+            if (getToken() !== token) return;
             if (!response.ok) {
                 if (response.status === 401) {
-                    localStorage.removeItem("token");
+                    endAuthSession();
                     navigate("/");
                     return;
                 }
@@ -931,11 +1003,21 @@ export default function DashboardPage({active = true} = {}) {
                 message: "Queued · browser storage staging is unavailable",
                 createdAt: Date.now(),
             };
+            if (getToken() !== token) {
+                removeStagedFile(job);
+                return;
+            }
             const next = [job, ...downloadJobsRef.current];
             downloadJobsRef.current = next;
             setDownloadJobs(next);
             await saveResumableDownload(job);
-            runResumableDownload(job);
+            if (getToken() !== token) {
+                removeStagedFile(job);
+                removeResumableDownload(job.id).catch(() => {});
+                removeResumableDownloadChunks(job.id).catch(() => {});
+                return;
+            }
+            runResumableDownload(job, token);
         } catch (error) {
             console.error("Could not queue download:", error);
             alert(error.message || "Failed to queue the download.");
@@ -967,7 +1049,7 @@ export default function DashboardPage({active = true} = {}) {
 
             if (!response.ok) {
                 if (response.status === 401) {
-                    localStorage.removeItem("token");
+                    endAuthSession();
                     setShareDialog(null);
                     navigate("/");
                     return;
@@ -1066,10 +1148,12 @@ export default function DashboardPage({active = true} = {}) {
                 headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
                 body: JSON.stringify({file_ids: uniqueFileIds, folder_ids: uniqueFolderIds}),
             });
+            if (getToken() !== token) return;
             const data = await response.json().catch(() => ({}));
+            if (getToken() !== token) return;
             if (!response.ok) {
                 if (response.status === 401) {
-                    localStorage.removeItem("token");
+                    endAuthSession();
                     navigate("/");
                     return;
                 }
@@ -1082,16 +1166,26 @@ export default function DashboardPage({active = true} = {}) {
             }
             if (typeof navigator.storage.persist === "function") {
                 await navigator.storage.persist().catch(() => false);
+                if (getToken() !== token) return;
             }
 
             const filenameQuery = new URLSearchParams({filename: downloadName}).toString();
             const url = `${API_URL}/public/download-zip/${encodeURIComponent(data.public_token)}?${filenameQuery}`;
             const root = await navigator.storage.getDirectory();
+            if (getToken() !== token) return;
             const tempName = `storelimitless-zip-${createUniqueId()}.download`;
             const tempHandle = await root.getFileHandle(tempName, {create: true});
+            if (getToken() !== token) {
+                await root.removeEntry(tempName).catch(() => {});
+                return;
+            }
             const writer = await tempHandle.createWritable();
             await writer.truncate(0);
             await writer.close();
+            if (getToken() !== token) {
+                await root.removeEntry(tempName).catch(() => {});
+                return;
+            }
 
             const job = {
                 id: createUniqueId(),
@@ -1106,11 +1200,21 @@ export default function DashboardPage({active = true} = {}) {
                 message: "Queued",
                 createdAt: Date.now(),
             };
+            if (getToken() !== token) {
+                removeStagedFile(job);
+                return;
+            }
             const next = [job, ...downloadJobsRef.current];
             downloadJobsRef.current = next;
             setDownloadJobs(next);
             await saveResumableDownload(job);
-            runResumableDownload(job);
+            if (getToken() !== token) {
+                removeStagedFile(job);
+                removeResumableDownload(job.id).catch(() => {});
+                removeResumableDownloadChunks(job.id).catch(() => {});
+                return;
+            }
+            runResumableDownload(job, token);
         } catch (error) {
             console.error("ZIP download failed:", error);
             alert(error.message || "Failed to download the selected items as a ZIP.");
@@ -1435,7 +1539,8 @@ export default function DashboardPage({active = true} = {}) {
      */
     const handleLogout = () => {
         clearDashboardTreeCache(getToken());
-        localStorage.removeItem("token");
+        clearAllTasks();
+        endAuthSession();
         navigate("/");
     };
 

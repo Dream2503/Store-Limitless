@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from asyncio import AbstractEventLoop
 from datetime import datetime, timezone
-from mimetypes import guess_type
 from os import stat_result
 from pathlib import Path
 from stat import S_IFDIR, S_IFREG
@@ -19,7 +18,7 @@ from backend.ftp.filesystem.upload import FTPUploadFile
 from backend.ftp.filesystem.utils import FilesystemUtils
 from core.config import TRANSFER_PATH
 from core.data_center import Database
-from core.utils import write_log
+from core.utils import get_file_mime_type, write_log
 
 if TYPE_CHECKING:
     from backend.ftp.handler import StoreLimitlessHandler
@@ -268,7 +267,7 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
 
             file: File = File(
                 directory_id=cast("int", directory.id),
-                name=name, type=guess_type(name)[0] or "application/octet-stream",
+                name=name, type=get_file_mime_type(name),
                 size=0,
                 modified_at=datetime.now(timezone.utc),
                 links=[],

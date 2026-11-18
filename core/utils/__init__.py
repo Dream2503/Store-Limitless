@@ -5,9 +5,10 @@ from __future__ import annotations
 import re
 from contextvars import ContextVar, Token
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
 from urllib.parse import urlsplit, urlunsplit
+from mimetypes import guess_type
+from pathlib import Path
 
 JsonObject: TypeAlias = dict[str, object]
 
@@ -89,3 +90,22 @@ def sanitize_sensitive_urls(value: str) -> str:
             return "<redacted-url>" + trailing
 
     return re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE).sub(redact, value)
+
+
+from mimetypes import guess_type
+from pathlib import Path
+
+
+MIME_TYPE_OVERRIDES: dict[str, str] = {
+    ".mkv": "video/x-matroska",
+}
+
+
+def get_file_mime_type(filename: str, fallback: str = "application/octet-stream") -> str:
+    """Return a consistent MIME type for a stored filename across all services."""
+
+    suffix: str = Path(filename).suffix.lower()
+    if suffix in MIME_TYPE_OVERRIDES:
+        return MIME_TYPE_OVERRIDES[suffix]
+
+    return guess_type(filename)[0] or fallback

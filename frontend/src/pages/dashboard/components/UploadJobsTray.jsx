@@ -930,6 +930,8 @@ export default function UploadJobsTray({
     readOnlyDownloads = false,
     fullscreen = false,
     onMinimize,
+    traySide = "right",
+    trayPosition = "bottom",
 }) {
     const navigate = useNavigate();
     const location = useLocation();
@@ -1052,13 +1054,14 @@ export default function UploadJobsTray({
             @media (prefers-reduced-motion: reduce) { .upload-tray-scrollbar::-webkit-scrollbar-thumb { transition: none; } }
         `}</style>
 
-        {trayMaximized && !fullscreen && <div className="fixed inset-0 z-[250] bg-black/60 backdrop-blur-sm" aria-hidden="true"/>}
+        {trayMaximized && !fullscreen && <div className="fixed inset-0 z-[250] bg-black/60 backdrop-blur-sm" aria-hidden="true" style={{visibility: "visible", pointerEvents: "auto"}}/>}
         <aside aria-label="Task tray"
+               style={{visibility: "visible", pointerEvents: "auto"}}
                className={`min-w-0 overflow-hidden bg-[#111713] ${fullscreen
                    ? "flex h-[100dvh] w-full flex-col"
                    : trayMaximized
                        ? "fixed inset-3 z-[260] flex flex-col rounded-xl border border-[#303b34] shadow-2xl shadow-black/60"
-                       : "fixed bottom-4 right-4 z-[120] w-[min(32rem,calc(100vw-2rem))] rounded-xl border border-[#303b34] shadow-2xl shadow-black/40"}`}>
+                       : "fixed bottom-4 right-4 left-auto z-[120] w-[min(32rem,calc(100vw-2rem))] rounded-xl border border-[#303b34] shadow-2xl shadow-black/40"}`}>
             {minimized && !fullscreen ? (
                 <button type="button" onClick={() => setMinimized(false)}
                         className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[#18221b]"

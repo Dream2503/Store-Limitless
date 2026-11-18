@@ -1,5 +1,5 @@
-import {useEffect} from "react";
-import {BrowserRouter, Navigate, Route, Routes, useSearchParams} from "react-router-dom";
+import {useEffect, useState} from "react";
+import {BrowserRouter, Navigate, Route, Routes, useLocation, useSearchParams} from "react-router-dom";
 import Auth from "./pages/Auth.jsx";
 import Landing from "./pages/Landing.jsx";
 import DashboardPage from "./pages/Dashboard.jsx";
@@ -135,21 +135,44 @@ function LegacyDashboardRedirect() {
  * Declare the client-side routes for authentication, browsing, uploading, and previews.
  * @returns {import("react").ReactElement}
  */
-function App() {
-    useEffect(() => installTopEdgeRefresh(), []);
+/**
+ * Keep download-owning pages mounted after their first visit. React Router still
+ * changes the visible route, but an active transfer is no longer aborted merely
+ * because its page component would otherwise unmount.
+ */
+function PersistentRoutePages() {
+    const location = useLocation();
+    const isDashboardRoute = location.pathname === "/home" || location.pathname.startsWith("/home/");
+    const isViewRoute = /^\/view\/[^/]+\/?$/.test(location.pathname);
+    const [keepDashboardMounted, setKeepDashboardMounted] = useState(isDashboardRoute);
+    const [keepViewMounted, setKeepViewMounted] = useState(isViewRoute);
+    const shouldMountDashboard = keepDashboardMounted || isDashboardRoute;
+    const shouldMountView = keepViewMounted || isViewRoute;
 
-    return (<BrowserRouter>
+    useEffect(() => {
+        if (isDashboardRoute) setKeepDashboardMounted(true);
+        if (isViewRoute) setKeepViewMounted(true);
+    }, [isDashboardRoute, isViewRoute]);
+
+    return (<>
+        {shouldMountDashboard && <DashboardPage active={isDashboardRoute}/>}
+        {shouldMountView && <ViewFile active={isViewRoute}/>}
         <Routes>
             <Route path="/" element={<Landing/>}/>
             <Route path="/login" element={<Auth initialMode="login"/>}/>
             <Route path="/signup" element={<Auth initialMode="signup"/>}/>
-            <Route path="/home" element={<DashboardPage/>}/>
-            <Route path="/home/*" element={<DashboardPage/>}/>
             <Route path="/upload-tray" element={<UploadTrayPage/>}/>
             <Route path="/dashboard" element={<LegacyDashboardRedirect/>}/>
             <Route path="/upload" element={<UploadPage/>}/>
-            <Route path="/view/:fileId" element={<ViewFile/>}/>
         </Routes>
+    </>);
+}
+
+function App() {
+    useEffect(() => installTopEdgeRefresh(), []);
+
+    return (<BrowserRouter>
+        <PersistentRoutePages/>
     </BrowserRouter>);
 }
 

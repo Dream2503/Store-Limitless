@@ -543,6 +543,9 @@ async def get_upload_job_status(job_id: str, user: User = Depends(get_current_us
             "message": message,
             "transfer": max(0, int(progress.transfer or 0)),
             "total": max(0, int(progress.total or metadata.get("total") or 0)),
+            "download_transfer": max(0, int(getattr(progress, "download_transfer", 0) or 0)),
+            "download_total": max(0, int(getattr(progress, "download_total", 0) or 0)),
+            "download_active": bool(getattr(progress, "download_active", False)),
         })
 
     terminal: Any = await Redis.get_json(terminal_upload_job_key(job_id))

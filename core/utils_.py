@@ -6,7 +6,7 @@ import json
 from asyncio import Lock, to_thread
 from collections import OrderedDict
 from pathlib import Path
-from shutil import rmtree, which
+from shutil import which
 from socket import AF_INET, SOCK_DGRAM, socket
 from subprocess import Popen, TimeoutExpired, run as subprocess_run
 from time import monotonic
@@ -89,18 +89,41 @@ async def evict(cache_limit: int) -> None:
             CACHE_SIZE -= size
 
 
-async def reset_cache(cache_dir: Path) -> None:
-    """Recreate the disposable chunk cache and reset its in-memory accounting."""
+async def restore_cache_index(cache_dir: Path, cache_limit: int) -> None:
+    """Restore the bounded cache index without deleting reusable on-disk chunks."""
 
     global CACHE_SIZE
 
-    async with lock():
-        if cache_dir.exists():
-            await to_thread(rmtree, cache_dir)
+    def scan_cache() -> list[tuple[float, str, int]]:
+        """Collect existing cache files in least-recently-used order."""
 
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        entries: list[tuple[float, str, int]] = []
+        for path in cache_dir.glob("*/*"):
+            try:
+                stat_result = path.stat()
+            except OSError:
+                continue
+
+            if not path.is_file() or stat_result.st_size <= 0:
+                continue
+
+            entries.append((stat_result.st_mtime, str(path), stat_result.st_size))
+
+        entries.sort(key=lambda entry: entry[0])
+        return entries
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    entries = await to_thread(scan_cache)
+
+    async with lock():
         CACHE.clear()
         CACHE_SIZE = 0
+
+        for _, path, size in entries:
+            CACHE[path] = (size, monotonic())
+            CACHE_SIZE += size
+
+        await evict(cache_limit)
 
 
 def get_local_ip() -> str:

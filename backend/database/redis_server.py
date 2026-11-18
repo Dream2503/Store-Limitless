@@ -90,6 +90,9 @@ class Redis:
 
                 progress: Progress = Progress(data["name"], data["message"], int(data["total"]))
                 progress.transfer = int(data["transfer"])
+                progress.download_transfer = int(data.get("download_transfer", 0) or 0)
+                progress.download_total = int(data.get("download_total", 0) or 0)
+                progress.download_active = str(data.get("download_active", "0")).lower() in {"1", "true", "yes"}
                 raw_torrent_items: str = data.get("torrent_items", "[]")
 
                 try:
@@ -199,6 +202,9 @@ class Redis:
                 "message": value.message,
                 "transfer": value.transfer,
                 "total": value.total,
+                "download_transfer": int(getattr(value, "download_transfer", 0) or 0),
+                "download_total": int(getattr(value, "download_total", 0) or 0),
+                "download_active": int(bool(getattr(value, "download_active", False))),
                 "torrent_items": dumps(getattr(value, "torrent_items", [])),
             })
 

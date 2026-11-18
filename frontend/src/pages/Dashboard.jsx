@@ -661,10 +661,6 @@ export default function DashboardPage() {
      */
     const handleFileClick = (file) => {
         saveCurrentSelectionSnapshot();
-        const kind = getFileKind(file.name);
-        const params = new URLSearchParams({name: file.name});
-        if (kind) params.set("kind", kind);
-
         // Save the current selection before the dashboard unmounts for the viewer.
         // Backspace, Escape, and browser Back then restore the same selection.
         try {
@@ -675,7 +671,7 @@ export default function DashboardPage() {
             console.warn("Could not preserve dashboard selection:", error);
         }
 
-        navigate(`/view/${file.id}?${params.toString()}`);
+        navigate(`/view/${file.id}`);
     };
 
 

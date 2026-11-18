@@ -75,6 +75,9 @@ async def upload_status(job_id: str, user: User = Depends(get_current_user)) -> 
         "name": name,
         "transfer": progress.transfer,
         "total": max(progress.total, int(metadata.get("total") or 0)),
+        "download_transfer": max(0, int(getattr(progress, "download_transfer", 0) or 0)),
+        "download_total": max(0, int(getattr(progress, "download_total", 0) or 0)),
+        "download_active": bool(getattr(progress, "download_active", False)),
         "torrent_items": list(getattr(progress, "torrent_items", []) or []),
         "file_id": file_id,
     })
@@ -751,7 +754,13 @@ async def public_hls_segment(
 
 
 @router.get("/hls/{token}/subtitles/{stream_index}.srt")
-async def public_hls_subtitles(token: str, stream_index: int, request: Request) -> Response:
+async def public_hls_subtitles(
+    token: str,
+    stream_index: int,
+    request: Request,
+    start_seconds: float = Query(default=0, ge=0),
+    duration_seconds: float = Query(default=120, gt=0, le=120),
+) -> Response:
     """Stream one extracted WebVTT track as FFmpeg produces cues; no sidecar file is stored."""
 
     file = await _owned_public_file(token, request)
@@ -767,12 +776,31 @@ async def public_hls_subtitles(token: str, stream_index: int, request: Request) 
     if not subtitle["selectable"]:
         raise HTTPException(status_code=415, detail="This bitmap subtitle format cannot be converted to selectable text captions.")
 
+    media_duration = float(media_info["duration"])
+    if start_seconds >= media_duration:
+        return Response(
+            content="WEBVTT\n\n",
+            media_type="text/vtt; charset=utf-8",
+            headers=_media_response_headers(request),
+        )
+
+    segment_duration = min(duration_seconds, media_duration - start_seconds)
     ffmpeg_path, _ = _media_tool_paths()
     command = [
         ffmpeg_path,
         "-hide_banner", "-loglevel", "error", "-nostdin",
+        # Keep subtitle packet timestamps aligned to the original media timeline
+        # while seeking to a bounded window. -start_at_zero removes any container
+        # start-time offset but retains the requested seek position (e.g. 120 seconds).
+        "-copyts", "-start_at_zero",
         "-rw_timeout", "300000000",
+        # Input-side seek speeds up demuxing. The output-side seek below is also
+        # required: FFmpeg's input -ss alone does not reliably discard earlier
+        # subtitle packets, which shifts cues into the wrong playback window.
+        "-ss", f"{start_seconds:.6f}",
         "-i", _media_source_url(token),
+        "-ss", f"{start_seconds:.6f}",
+        "-t", f"{segment_duration:.6f}",
         "-map", f"0:{stream_index}",
         "-vn", "-an", "-dn",
         "-c:s", "webvtt",
@@ -781,6 +809,7 @@ async def public_hls_subtitles(token: str, stream_index: int, request: Request) 
         "pipe:1",
     ]
 
+    await _MEDIA_PROCESS_LIMIT.acquire()
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -788,6 +817,7 @@ async def public_hls_subtitles(token: str, stream_index: int, request: Request) 
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError as error:
+        _MEDIA_PROCESS_LIMIT.release()
         raise HTTPException(
             status_code=503,
             detail="The subtitle processor could not be started. Check the FFmpeg installation.",
@@ -798,6 +828,7 @@ async def public_hls_subtitles(token: str, stream_index: int, request: Request) 
         if process.returncode is None:
             process.kill()
         await process.wait()
+        _MEDIA_PROCESS_LIMIT.release()
         raise HTTPException(status_code=503, detail="The subtitle processor did not expose its output stream.")
 
     started_at = monotonic()
@@ -843,6 +874,7 @@ async def public_hls_subtitles(token: str, stream_index: int, request: Request) 
             if not stderr_task.done():
                 stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
+            _MEDIA_PROCESS_LIMIT.release()
 
     return StreamingResponse(
         stream_subtitles(),

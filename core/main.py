@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
-from asyncio import CancelledError, Task, create_task, gather, get_running_loop, run, sleep, to_thread
-from os import environ, execv, kill
+from asyncio import CancelledError, Task, create_task, gather, get_running_loop, run, sleep, to_thread, wait_for
+from os import environ, execv, kill, replace
 from pathlib import Path
-from shutil import rmtree, which
+from shutil import which
 from signal import SIGTERM
 from subprocess import DEVNULL, STDOUT, Popen, run as subprocess_run
-from tempfile import gettempdir
+from tempfile import gettempdir, mkdtemp
 from threading import Thread
 from typing import cast
 from urllib.error import HTTPError, URLError
@@ -105,6 +106,74 @@ def _read_startup_log(path: Path, line_count: int = 30) -> str:
         return "No startup log was available."
 
 
+def _schedule_transfer_cleanup() -> None:
+    """Move transient staging directories aside and delete them in a detached process."""
+
+    if not TRANSFER_PATH.is_dir():
+        return
+
+    try:
+        cleanup_root = Path(mkdtemp(prefix=".transfer-cleanup-", dir=TRANSFER_PATH.parent))
+    except OSError as error:
+        print(f"Could not prepare temporary transfer cleanup: {error}")
+        return
+
+    moved_paths: list[Path] = []
+    for path in TRANSFER_PATH.iterdir():
+        # Cached chunks are reusable and are indexed on the next startup.
+        if path.name == "cached":
+            continue
+
+        try:
+            destination = cleanup_root / path.name
+            replace(path, destination)
+            moved_paths.append(destination)
+        except OSError as error:
+            print(f"Could not move temporary data '{path}' out of the transfer directory: {error}")
+
+    if not moved_paths:
+        cleanup_root.rmdir()
+        return
+
+    cleanup_script = """
+import shutil
+import sys
+from pathlib import Path
+
+for value in sys.argv[1:-1]:
+    path = Path(value)
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+shutil.rmtree(sys.argv[-1], ignore_errors=True)
+"""
+    process_options: dict[str, object] = {
+        "stdin": DEVNULL,
+        "stdout": DEVNULL,
+        "stderr": DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        process_options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        process_options["start_new_session"] = True
+
+    try:
+        Popen(
+            [sys.executable, "-c", cleanup_script, *(str(path) for path in moved_paths), str(cleanup_root)],
+            **process_options,
+        )
+    except OSError as error:
+        # Staging has already been moved out of the active directory, so a failed
+        # cleanup launch cannot slow down shutdown or interfere with the next launch.
+        print(f"Temporary transfer data was isolated but could not be cleaned up automatically: {error}")
+
+
 async def main() -> None:
     """Start all StoreLimitless services and cleanly stop them on exit."""
 
@@ -129,13 +198,15 @@ async def main() -> None:
     discord_thread: Thread | None = None
     discord_started: bool = False
     telegram_started: bool = False
+    telegram_task: Task[None] | None = None
     restart_requested: bool = False
 
     try:
         await Redis.initialize()
         await DataCenter.initialize_cache()
-        await Telegram.main()
-        telegram_started = True
+        # Connect Telegram while the API and frontend boot instead of serializing
+        # this remote handshake ahead of local web-server startup.
+        telegram_task = create_task(Telegram.main(), name="storelimitless-telegram")
 
         discord_thread = Thread(target=Discord.main, daemon=True, name="storelimitless-discord")
         ftp_server = StoreLimitlessFTPServer(get_running_loop())
@@ -179,7 +250,14 @@ async def main() -> None:
 
         # Clear a stale process left behind by a previously interrupted launch.
         _release_port(8000)
-        server = Server(Config(app, host="0.0.0.0", port=8000, log_level="warning"))
+        server = Server(Config(
+            app,
+            host="0.0.0.0",
+            port=8000,
+            log_level="warning",
+            # Long-lived video streams must not block an intentional shutdown forever.
+            timeout_graceful_shutdown=2,
+        ))
         server_task = create_task(server.serve(), name="storelimitless-api")
 
         if HOST == "CLOUD":
@@ -187,7 +265,13 @@ async def main() -> None:
 
         if HOST == "LOCAL":
             if frozen:
-                frontend_server = Server(Config(frontend_app, host="0.0.0.0", port=5173, log_level="warning"))
+                frontend_server = Server(Config(
+                    frontend_app,
+                    host="0.0.0.0",
+                    port=5173,
+                    log_level="warning",
+                    timeout_graceful_shutdown=2,
+                ))
                 frontend_task = create_task(frontend_server.serve(), name="storelimitless-frontend")
 
             else:
@@ -243,6 +327,12 @@ async def main() -> None:
         discord_started = True
         ftp_server.start()
         ftp_started = True
+
+        # Discord is already connecting; wait for Telegram in parallel rather than
+        # making its network handshake part of the local API/Vite startup critical path.
+        if telegram_task is not None:
+            await telegram_task
+            telegram_started = True
 
         try:
             while not Discord.ready:
@@ -338,28 +428,42 @@ async def main() -> None:
 
         if discord_started and discord_thread is not None:
             try:
-                await Discord.shutdown()
+                await wait_for(Discord.shutdown(), timeout=3)
 
             except Exception:
                 pass
 
-            discord_thread.join(timeout=5)
+            discord_thread.join(timeout=3)
 
-        if telegram_started:
-            await Telegram.exit()
+        if telegram_task is not None:
+            if not telegram_task.done():
+                telegram_task.cancel()
+            await gather(telegram_task, return_exceptions=True)
 
-        await Redis.close()
+        if telegram_started or getattr(Telegram, "FILE_DUMP", None) is not None:
+            try:
+                await wait_for(Telegram.exit(), timeout=3)
+
+            except Exception:
+                pass
+
+        try:
+            await wait_for(Redis.close(), timeout=2)
+        except Exception:
+            pass
 
         for process in cloudflare_processes:
-            stop_process(process)
+            stop_process(process, timeout=2)
 
         if redis_process is not None:
-            stop_process(redis_process)
+            stop_process(redis_process, timeout=2)
 
         if frontend_process is not None:
-            stop_process(frontend_process)
+            stop_process(frontend_process, timeout=2)
 
-        rmtree(TRANSFER_PATH, ignore_errors=True)
+        # Large torrent/YouTube/FTP staging folders can contain gigabytes. Move
+        # them out atomically and let a detached process delete them after exit.
+        _schedule_transfer_cleanup()
 
     if restart_requested:
         if frozen:

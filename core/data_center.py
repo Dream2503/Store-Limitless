@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from core.config import TRANSFER_PATH
-from core.utils_ import part_path, reset_cache, update_cache_entry
+from core.utils_ import part_path, restore_cache_index, update_cache_entry
 
 if TYPE_CHECKING:
     from core.utils.progress import Progress
@@ -113,9 +113,9 @@ class DataCenter:
 
     @staticmethod
     async def initialize_cache() -> None:
-        """Recreate the disposable chunk cache and reset its in-memory accounting."""
+        """Restore chunk-cache bookkeeping while preserving reusable cached parts."""
 
-        await reset_cache(DataCenter.CACHE_DIR)
+        await restore_cache_index(DataCenter.CACHE_DIR, DataCenter.CACHE_LIMIT)
 
     @staticmethod
     async def upload(chunk: bytes, filename: str, progress: Progress) -> str:

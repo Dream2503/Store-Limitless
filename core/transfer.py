@@ -20,6 +20,8 @@ async def file_upload(
         file_path: Path,
         upload_task: Task[None] | None = None,
         intermediate: bool = False,
+        track_download: bool = False,
+        download_total: int = 0,
 ) -> AsyncGenerator[Progress, None]:
     """Upload a local file, optionally leaving the final database save to the caller."""
 
@@ -34,7 +36,15 @@ async def file_upload(
         write_log("INFO", data_center, "UPLOAD", file.username, f"Found local file: {file_path.name}")
         progress: Progress = Progress(file.name, "Uploading File", 0)
 
-        async for progress_value in upload_growing_file(file, file_path, data_center, progress, upload_task):
+        async for progress_value in upload_growing_file(
+                file,
+                file_path,
+                data_center,
+                progress,
+                upload_task,
+                track_download=track_download,
+                download_total=download_total,
+        ):
             yield progress_value
 
         if not intermediate:

@@ -112,11 +112,13 @@ function Icon({name, className = "", style}) {
     return <span className={`material-symbols-outlined shrink-0 ${className}`} style={style} aria-hidden="true">{name}</span>;
 }
 
-function ProgressBar({percent, muted = false, className = "", fillClassName = FILL}) {
-    return <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}
-                className={`h-1 overflow-hidden rounded-full bg-[#29372e] ${className}`}>
-        <div className={`h-full rounded-full transition-[width] duration-500 ease-linear motion-reduce:transition-none ${muted ? "bg-[#7f8f84]" : fillClassName}`}
-             style={{width: `${percent}%`}}/>
+function ProgressBar({percent, muted = false, className = "", fillClassName = FILL, indeterminate = false}) {
+    return <div role="progressbar" aria-valuemin={0} aria-valuemax={100}
+                aria-valuenow={indeterminate ? undefined : Math.round(percent)}
+                aria-label={indeterminate ? "Progress amount unknown" : undefined}
+                className={`relative h-1 overflow-hidden rounded-full bg-[#29372e] ${className}`}>
+        <div className={`h-full rounded-full transition-[width] duration-500 ease-linear motion-reduce:transition-none ${indeterminate ? "w-1/3 animate-pulse" : ""} ${muted ? "bg-[#7f8f84]" : fillClassName}`}
+             style={indeterminate ? undefined : {width: `${percent}%`}}/>
     </div>;
 }
 
@@ -705,9 +707,22 @@ function describeJob(job) {
     const icon = isError ? "error" : isCancelled ? "cancel" : isComplete ? "check_circle" : isQueued ? "schedule" : "upload_file";
     const iconTone = tone === "muted" ? (isQueued ? TEXT.success : "text-[#779184]") : TEXT[tone];
 
+    const downloadTransfer = num(job.downloadTransfer);
+    const downloadTotal = num(job.downloadTotal);
+    const downloadActive = Boolean(job.downloadActive);
+    const downloadPercent = downloadTotal > 0
+        ? Math.max(0, Math.min(100, downloadTransfer * 100 / downloadTotal))
+        : 0;
+    const storageTransfer = num(job.transfer);
+    const storageTotal = num(job.total) || total;
+    const storagePercent = storageTotal > 0
+        ? Math.max(0, Math.min(100, storageTransfer * 100 / storageTotal))
+        : 0;
+
     return {
         isQueued, isActive, itemCount, title, statusText, statusTone: TEXT[tone], icon, iconTone, percent, transfer, total,
         hasTorrentItems, torrentDownloadTransfer, torrentUploadTransfer, torrentDownloadPercent, torrentUploadPercent,
+        downloadTransfer, downloadTotal, downloadActive, downloadPercent, storageTransfer, storageTotal, storagePercent,
     };
 }
 
@@ -715,8 +730,16 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
     const {
         isQueued, isActive, itemCount, title, statusText, statusTone, icon, iconTone, percent, transfer, total,
         hasTorrentItems, torrentDownloadTransfer, torrentUploadTransfer, torrentDownloadPercent, torrentUploadPercent,
+        downloadTransfer, downloadTotal, downloadActive, downloadPercent, storageTransfer, storageTotal, storagePercent,
     } = describeJob(job);
     const {speed, eta} = useTransferMetrics(transfer, total, `batch:${job.jobId}`);
+    const {speed: downloadSpeed, eta: downloadEta} = useTransferMetrics(
+        downloadTransfer, downloadTotal, `batch:${job.jobId}:download`
+    );
+    const {speed: storageSpeed, eta: storageEta} = useTransferMetrics(
+        storageTransfer, storageTotal, `batch:${job.jobId}:storage-upload`
+    );
+    const showConcurrentProgress = isActive && downloadActive && !hasTorrentItems;
     const torrents = job.torrentFiles || [];
     const items = Array.isArray(job.items) ? job.items : [];
     const hasPicker = torrents.length === 1 && job.status === "queued";
@@ -756,6 +779,41 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
                             fillClassName="bg-gradient-to-r from-[#3387c7] to-[#56c7db]"
                         />
                         <p className="text-[11px] tabular-nums text-[#789083]">{formatFileSize(isQueued ? 0 : torrentUploadTransfer)} / {formatFileSize(total)} uploaded</p>
+                    </div>
+                </div> : showConcurrentProgress ? <div className="mt-2.5 min-w-0 space-y-3">
+                    <div className="min-w-0 space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="font-medium text-[#a9d8bb]">Downloading</span>
+                            <span className="font-mono tabular-nums text-[#c5d8cc]">
+                                {downloadTotal > 0 ? `${downloadPercent.toFixed(1)}%` : "In progress"}
+                            </span>
+                        </div>
+                        <ProgressBar
+                            percent={downloadPercent}
+                            muted={isQueued}
+                            indeterminate={downloadTotal <= 0}
+                        />
+                        {downloadTotal > 0
+                            ? <TransferDetails transfer={downloadTransfer} total={downloadTotal} status="downloading" inline speed={downloadSpeed} eta={downloadEta}/>
+                            : <p className="min-w-0 truncate text-[11px] tabular-nums text-[#789083]">
+                                Downloaded {formatFileSize(downloadTransfer)} · {formatRate(downloadSpeed)}
+                            </p>}
+                    </div>
+                    <div className="min-w-0 space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="font-medium text-[#91c9ef]">Uploading to storage</span>
+                            <span className="font-mono tabular-nums text-[#c5d8e4]">
+                                {storageTotal > 0 ? `${storagePercent.toFixed(1)}%` : "Preparing"}
+                            </span>
+                        </div>
+                        <ProgressBar
+                            percent={storagePercent}
+                            muted={isQueued}
+                            fillClassName="bg-gradient-to-r from-[#3387c7] to-[#56c7db]"
+                        />
+                        {storageTotal > 0
+                            ? <TransferDetails transfer={storageTransfer} total={storageTotal} status="uploading" inline speed={storageSpeed} eta={storageEta}/>
+                            : <p className="text-[11px] tabular-nums text-[#789083]">Uploaded {formatFileSize(storageTransfer)}</p>}
                     </div>
                 </div> : isActive && <div className="mt-2.5 min-w-0 space-y-1">
                     <ProgressBar percent={isQueued ? 0 : percent} muted={isQueued}/>

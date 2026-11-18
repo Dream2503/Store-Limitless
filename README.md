@@ -357,8 +357,8 @@ The local part cache lives under `TRANSFER_PATH/cached`. Its current configured 
 bookkeeping. Cache files are not the canonical copy of user data.
 
 In source mode, `TRANSFER_PATH` is normally `data/transfer/`; in frozen mode it is placed under the OS-specific StoreLimitless data directory. The
-application resets the part cache during startup and removes transfer staging data during shutdown. Do not place durable user files, credentials, or
-other application data there.
+application restores the cache index on startup, retains reusable cached chunks across restarts, and moves temporary staging folders to an isolated location
+for asynchronous cleanup during shutdown. Do not place durable user files, credentials, or other application data there.
 
 ---
 
@@ -399,10 +399,10 @@ The current prompt is a service-control prompt, not a general file-management sh
 
 ### Shutdown
 
-The lifecycle code requests HTTP-server shutdown, closes FTP, shuts down the Discord and Telegram clients, closes Redis, stops processes launched for
-Redis/Vite/Cloudflare, and removes the temporary transfer directory. Avoid relying on unfinished files under `TRANSFER_PATH` (normally
-`data/transfer/`
-in source mode) surviving a shutdown.
+The lifecycle code requests HTTP-server shutdown with a short graceful timeout, closes FTP, shuts down the Discord and Telegram clients, closes Redis,
+and stops processes launched for Redis/Vite/Cloudflare. Temporary staging folders are moved out of the active transfer directory and deleted by a detached
+cleanup process, so large temporary downloads do not hold up restart. The reusable part cache remains available across restarts. Avoid relying on unfinished
+files under `TRANSFER_PATH` (normally `data/transfer/` in source mode) surviving a shutdown.
 
 ---
 
@@ -440,7 +440,7 @@ maintained separately so that the dashboard tray can discover jobs from another 
 temporary files and reports a restart-required failure rather than silently treating the incomplete file as complete.
 
 Temporary browser upload files are stored beneath `TRANSFER_PATH` in a per-user/job layout. In source mode this is under `data/transfer/`, the runtime
-scratch space cleaned up when the application shuts down.
+scratch space whose staging folders are isolated and cleaned asynchronously when the application shuts down.
 
 ### Remote-link imports
 

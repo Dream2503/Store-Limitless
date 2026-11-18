@@ -132,6 +132,9 @@ export default function useUploadJobs(refreshDirectory) {
                         progress: status === "completed" ? 100 : Math.max(0, Math.min(99, Number(batch.progress) || 0)),
                         transfer: Math.max(0, Number(batch.transfer) || 0),
                         total: Math.max(0, Number(batch.total) || 0),
+                        downloadTransfer: Math.max(0, Number(batch.download_transfer) || 0),
+                        downloadTotal: Math.max(0, Number(batch.download_total) || 0),
+                        downloadActive: Boolean(batch.download_active),
                         message: String(batch.message || status),
                         createdAt: Number(batch.created_at) || 0,
                     };

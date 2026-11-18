@@ -537,6 +537,26 @@ async def restore_directory(did: int, user: User = Depends(get_current_user)) ->
     return JSONResponse({"message": "Restored"})
 
 
+@router.get("/file/{fid}/metadata")
+async def get_file_metadata(fid: int, user: User = Depends(get_current_user)) -> dict[str, object]:
+    """Return minimal metadata for an owned file opened directly by its ID."""
+
+    file: File | None = await File.get(user.username, fid=fid)
+
+    if file is None:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if file.username != user.username:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return {
+        "id": fid,
+        "name": file.name,
+        "type": file.type,
+        "size": max(0, int(file.size or 0)),
+    }
+
+
 @router.post("/file/{fid}/public-link")
 async def create_public_link(fid: int, user: User = Depends(get_current_user)) -> dict[str, str]:
     """Create a signed public stream token for an owned file."""

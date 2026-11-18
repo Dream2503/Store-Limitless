@@ -192,8 +192,20 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             download_task = create_task(to_thread(stream_response, download_response, output, link))
 
         progress: Progress = Progress(file.name, "Downloading and uploading file", total_size)
+        progress.download_active = True
+        progress.download_total = total_size
 
-        async for progress_value in upload_growing_file(file, output, data_center, progress, download_task, total_size):
+        async for progress_value in upload_growing_file(
+                file,
+                output,
+                data_center,
+                progress,
+                download_task,
+                total_size,
+                track_download=True,
+                download_total=total_size,
+                download_from_path=True,
+        ):
             yield progress_value
 
         file.size = output.stat().st_size

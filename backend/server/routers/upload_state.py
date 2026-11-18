@@ -155,6 +155,9 @@ async def list_user_upload_jobs(username: str) -> list[dict[str, Any]]:
             "message": message or "Uploading",
             "transfer": transfer,
             "total": total,
+            "download_transfer": max(0, int(getattr(progress, "download_transfer", 0) or 0)),
+            "download_total": max(0, int(getattr(progress, "download_total", 0) or 0)),
+            "download_active": bool(getattr(progress, "download_active", False)),
             "created_at": int(float(metadata.get("created_at") or 0) * 1000),
         })
 
@@ -523,6 +526,9 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
         completed_items = max(0, min(int(metadata.get("completed_items") or 0), total_items))
         current_transfer = 0
         current_total = 0
+        current_download_transfer = 0
+        current_download_total = 0
+        current_download_active = False
         current_name = str(metadata.get("current_name") or "").strip()
         current_message = str(metadata.get("message") or "")
         current_job_id = str(metadata.get("current_job_id") or "")
@@ -548,6 +554,9 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                 child_progress: Progress = cast(Progress, await Redis.get(current_job_id, "Progress"))
                 current_transfer = max(0, int(child_progress.transfer or 0))
                 current_total = max(0, int(child_progress.total or 0))
+                current_download_transfer = max(0, int(getattr(child_progress, "download_transfer", 0) or 0))
+                current_download_total = max(0, int(getattr(child_progress, "download_total", 0) or 0))
+                current_download_active = bool(getattr(child_progress, "download_active", False))
                 progress_name = str(child_progress.name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
                 progress_name_lower = progress_name.casefold()
                 progress_message = str(child_progress.message or "").strip()
@@ -712,6 +721,9 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
             "progress": progress,
             "transfer": current_transfer,
             "total": current_total,
+            "download_transfer": current_download_transfer,
+            "download_total": current_download_total,
+            "download_active": current_download_active,
             "message": current_message or status.title(),
             "created_at": int(float(metadata.get("created_at") or 0) * 1000),
         })
@@ -724,7 +736,17 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
     """Transfer received chunks and commit the database row only after a cancellation-safe final check."""
 
     try:
-        async for progress in file_upload(file, file_path, producer_task, intermediate=True):
+        session_state: Any = await Redis.get_json(upload_session_key(job_id))
+        download_total = int(session_state.get("total") or 0) if isinstance(session_state, dict) else 0
+
+        async for progress in file_upload(
+                file,
+                file_path,
+                producer_task,
+                intermediate=True,
+                track_download=True,
+                download_total=download_total,
+        ):
             latest_metadata = await get_upload_job_metadata(job_id)
 
             if latest_metadata and latest_metadata.get("cancelled"):
@@ -760,6 +782,9 @@ async def run_chunk_upload_job(job_id: str, file: File, file_path: Path, produce
             await file.save()
             complete = Progress(file.name, f"Upload Complete of id={file.id}", max(file.size, 0))
             complete.transfer = max(file.size, 0)
+            complete.download_transfer = max(file.size, 0)
+            complete.download_total = download_total or max(file.size, 0)
+            complete.download_active = True
             await Redis.set(job_id, complete)
 
     except Exception as error:

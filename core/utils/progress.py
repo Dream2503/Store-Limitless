@@ -24,6 +24,11 @@ class Progress:
         self.message: str = message
         self.transfer: int = 0
         self.total: int = total
+        # Some imports receive bytes while storing completed chunks at the same time.
+        # These fields track that incoming/download side independently of upload progress.
+        self.download_transfer: int = 0
+        self.download_total: int = 0
+        self.download_active: bool = False
         self.torrent_items: list[dict[str, Any]] = []
 
     @property
@@ -58,6 +63,9 @@ async def upload_growing_file(
         producer: Task[Any] | None = None,
         total_size: int = 0,
         start_part: int = 1,
+        track_download: bool = False,
+        download_total: int = 0,
+        download_from_path: bool = False,
 ) -> AsyncGenerator[Progress, None]:
     """Upload completed chunks as a file grows, bounded by the selected provider's own parallelism."""
 
@@ -69,6 +77,28 @@ async def upload_growing_file(
     upload_tasks: set[Task[tuple[int, str]]] = set()
     results: dict[int, str] = {}
     part: int = start_part
+
+    if track_download:
+        progress.download_active = True
+        progress.download_total = max(0, int(download_total))
+
+    def update_download_progress() -> None:
+        """Publish bytes received from the source independently of storage upload bytes."""
+
+        if not track_download:
+            return
+
+        if download_from_path:
+            try:
+                received = path.stat().st_size
+            except FileNotFoundError:
+                received = 0
+        else:
+            # For browser uploads, wait_for_all_chunks updates file.size to the
+            # contiguous byte count received from the browser.
+            received = max(0, int(file.size or 0))
+
+        progress.download_transfer = min(received, progress.download_total) if progress.download_total > 0 else received
 
     async def upload_part(index: int, size: int) -> tuple[int, str]:
         """Read exactly one chunk off the event loop and retry temporary provider I/O errors."""
@@ -127,6 +157,7 @@ async def upload_growing_file(
 
             await collect_done()
             update_progress(size)
+            update_download_progress()
             yield progress
             await sleep(0.1)
 
@@ -152,6 +183,7 @@ async def upload_growing_file(
             while len(upload_tasks) >= max(1, int(data_center.MAX_PARALLEL_UPLOADS)):
                 await collect_done()
                 update_progress(size)
+                update_download_progress()
                 yield progress
                 await sleep(0.1)
 
@@ -163,6 +195,7 @@ async def upload_growing_file(
             while len(upload_tasks) >= max(1, int(data_center.MAX_PARALLEL_UPLOADS)):
                 await collect_done()
                 update_progress(size)
+                update_download_progress()
                 yield progress
                 await sleep(0.1)
 
@@ -172,10 +205,15 @@ async def upload_growing_file(
         while upload_tasks:
             await collect_done()
             update_progress(size)
+            update_download_progress()
             yield progress
             await sleep(0.1)
 
         update_progress(size)
+        update_download_progress()
+        if track_download and download_from_path and progress.download_total <= 0:
+            progress.download_total = size
+            progress.download_transfer = size
         yield progress
         file.size = size
         file.links = [results[index] for index in sorted(results)]

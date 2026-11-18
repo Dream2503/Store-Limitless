@@ -45,7 +45,7 @@ export function getFileKind(filename) {
     const ext = filename?.split(".").pop()?.toLowerCase();
     if (["mp4", "mkv", "webm", "mov", "m4v"].includes(ext)) return "video";
     if (["jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "webp", "bmp", "dib", "tif", "tiff", "avif", "heic", "heif", "svg", "ico"].includes(ext)) return "image";
-    if (["mp3", "wav", "ogg", "m4a", "flac"].includes(ext)) return "audio";
+    if (["mp3", "mp2", "mpa", "mpga", "m2a", "aac", "m4a", "m4b", "m4p", "m4r", "wav", "wave", "bwf", "rf64", "ogg", "oga", "opus", "spx", "weba", "flac", "fla", "aif", "aiff", "aifc", "au", "snd", "amr", "3ga", "caf", "wma", "ac3", "eac3", "dts", "ape", "mpc", "wv", "tta", "mka", "ra", "ram", "voc", "dss"].includes(ext)) return "audio";
     if (ext === "pdf") return "pdf";
     if (["md", "markdown", "mdown", "mkd"].includes(ext)) return "markdown";
     if (["txt", "text", "log", "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "env", "html", "htm", "css", "scss", "sass", "js", "jsx", "mjs", "cjs", "ts", "tsx", "py", "pyw", "ipynb", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx", "rs", "go", "java", "kt", "kts", "swift", "rb", "php", "sh", "bash", "zsh", "fish", "sql", "r", "lua", "pl", "pm", "ex", "exs", "erl", "hrl", "hs", "lhs", "scala", "sc", "dart", "vue", "svelte", "graphql", "gql", "proto", "make", "cmake", "dockerfile", "gitignore", "editorconfig", "diff", "patch", "properties", "gradle",].includes(ext)) return "text";

@@ -363,7 +363,19 @@ export function MediaPreview({fileId, navigate, type, publicToken, fileName}) {
     </div>;
 
     if (type === "pdf") return <iframe title="PDF preview" src={streamUrl} className="h-full w-full bg-[#222]"/>;
-    return <div className="flex h-full items-center justify-center px-6">
-        <audio controls src={streamUrl} className="w-full max-w-2xl"/>
+    return <div className="flex h-full flex-col items-center justify-center gap-4 bg-[#111111] px-6 py-8">
+        <div className="flex w-full max-w-2xl flex-col items-center gap-3 rounded-xl border border-[#2e2e2e] bg-[#171717] px-5 py-8 sm:px-8">
+            <span className="material-symbols-outlined text-5xl text-[#70b8ff]" aria-hidden="true">graphic_eq</span>
+            <p className="max-w-full break-all text-center text-sm font-medium text-[#e7eee9]">{fileName || "Audio preview"}</p>
+            <audio
+                controls
+                preload="metadata"
+                src={streamUrl}
+                onError={() => setError("This audio file could not be played. Your browser may not support its audio codec or container format.")}
+                className="w-full"
+                aria-label={`Audio player for ${fileName || "audio file"}`}
+            />
+            <p className="text-center text-xs text-[#898989]">Playback depends on the audio codec supported by your browser.</p>
+        </div>
     </div>;
 }

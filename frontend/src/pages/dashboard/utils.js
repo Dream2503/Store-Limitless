@@ -51,13 +51,25 @@ export function getFileKind(filename) {
     return null;
 }
 
-/** Format byte counts using decimal units to match Linux Files (base 1000). */
+/**
+ * Format a byte count using binary units (base 1024).
+ * 1 KB = 1024 B, 1 MB = 1024 KB, and so on.
+ * @param {number | string} bytes
+ * @returns {string}
+ */
 export function formatFileSize(bytes) {
     const value = Number(bytes);
     if (!Number.isFinite(value) || value <= 0) return "0 B";
-    const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-    const index = Math.min(Math.floor(Math.log(value) / Math.log(1000)), units.length - 1);
-    return `${(value / (1000 ** index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+
+    const units = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+    const unitIndex = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+    const scaledValue = value / (1024 ** unitIndex);
+    const decimals = unitIndex === 0 ? 0 : 2;
+
+    return `${scaledValue.toLocaleString(undefined, {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: decimals,
+    })} ${units[unitIndex]}`;
 }
 
 /** Browser events emitted when an authenticated session starts or ends. */

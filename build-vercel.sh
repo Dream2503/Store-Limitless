@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build and deploy both StoreLimitless Vercel applications:
-#   drive-bot      -> React/Vite frontend
-#   drive-bot-nema -> Next.js API proxy
+#   store-limitless-frontend -> React/Vite frontend
+#   store-limitless          -> Next.js API proxy
 
 set -Eeuo pipefail
 
@@ -46,10 +46,57 @@ BACKEND_ENV_FILE="$BACKEND_DIR/.env.production.local"
 FRONTEND_DOMAIN="${VERCEL_FRONTEND_DOMAIN:-storelimitless.vercel.app}"
 BACKEND_DOMAIN="${VERCEL_BACKEND_DOMAIN:-cdn-storelimitless.vercel.app}"
 BACKEND_API_URL="https://${BACKEND_DOMAIN}"
-FRONTEND_PROJECT="${VERCEL_FRONTEND_PROJECT:-drive-bot}"
-BACKEND_PROJECT="${VERCEL_BACKEND_PROJECT:-drive-bot-nema}"
-VERCEL_SCOPE="${VERCEL_SCOPE:-}"
+FRONTEND_PROJECT="${VERCEL_FRONTEND_PROJECT:-store-limitless-frontend}"
+BACKEND_PROJECT="${VERCEL_BACKEND_PROJECT:-store-limitless}"
+VERCEL_SCOPE="${VERCEL_SCOPE:-store-limitless1}"
 EXPECTED_VERCEL_USER="${VERCEL_EXPECTED_USER:-}"
+GITHUB_RELEASE_TAG="${GITHUB_RELEASE_TAG:-v0.1.0}"
+RELEASE_ROOT="$REPO_ROOT/releases"
+LINUX_RELEASE_DIR="$RELEASE_ROOT/linux"
+WINDOWS_RELEASE_DIR="$RELEASE_ROOT/windows"
+
+release_asset_paths() {
+    printf '%s\n' \
+        "$LINUX_RELEASE_DIR/StoreLimitlessServer.LOCAL._0.1.0" \
+        "$LINUX_RELEASE_DIR/StoreLimitlessServer.CLOUD._0.1.0" \
+        "$WINDOWS_RELEASE_DIR/StoreLimitlessServer.LOCAL_0.1.0.exe" \
+        "$WINDOWS_RELEASE_DIR/StoreLimitlessServer.CLOUD._0.1.0.exe"
+}
+
+validate_release_assets() {
+    local asset
+    local count=0
+
+    command -v gh >/dev/null 2>&1 || fail "GitHub CLI (gh) is required. Install it and run 'gh auth login'."
+    gh auth status >/dev/null 2>&1 || fail "GitHub CLI is not authenticated. Run 'gh auth login' with access to Dream2503/Store-Limitless."
+
+    while IFS= read -r asset; do
+        [[ -n "$asset" ]] || continue
+        [[ -f "$asset" ]] || fail "Missing release asset: $asset. Build all four executables first with ./build.sh 1 1."
+        [[ -s "$asset" ]] || fail "Release asset is empty: $asset"
+        count=$((count + 1))
+    done < <(release_asset_paths)
+
+    [[ "$count" -eq 4 ]] || fail "Expected exactly four release assets; found $count."
+}
+
+upload_release_assets() {
+    local asset
+    local -a assets=()
+
+    validate_release_assets
+    while IFS= read -r asset; do
+        [[ -n "$asset" ]] && assets+=("$asset")
+    done < <(release_asset_paths)
+
+    log "Uploading four executables to GitHub release '$GITHUB_RELEASE_TAG'"
+    gh release upload "$GITHUB_RELEASE_TAG" "${assets[@]}" --repo Dream2503/Store-Limitless --clobber
+    for asset in "${assets[@]}"; do
+        printf '  Uploaded: %s\n' "${asset##*/}"
+    done
+}
+
+
 
 [[ -f "$FRONTEND_DIR/package.json" ]] || fail "frontend/package.json was not found under $REPO_ROOT"
 [[ -f "$FRONTEND_DIR/package-lock.json" ]] || fail "frontend/package-lock.json is required for a reproducible frontend install"
@@ -57,6 +104,9 @@ EXPECTED_VERCEL_USER="${VERCEL_EXPECTED_USER:-}"
 [[ -f "$BACKEND_DIR/package.json" ]] || fail "backend/storelimitlessbackend/package.json was not found"
 [[ -f "$BACKEND_DIR/package-lock.json" ]] || fail "backend/storelimitlessbackend/package-lock.json is required for a reproducible API proxy install"
 [[ -f "$BACKEND_DIR/vercel.json" ]] || fail "backend/storelimitlessbackend/vercel.json was not found"
+
+# Check all four binaries and GitHub authentication before spending time deploying.
+validate_release_assets
 
 for tool in node npm git; do
     command -v "$tool" >/dev/null 2>&1 || fail "Required tool '$tool' is not installed or not on PATH"
@@ -75,6 +125,49 @@ run_vercel_in() {
     local working_dir="$1"
     shift
     (cd "$working_dir" && vercel_cli "$@")
+}
+
+
+# Vercel's Root Directory setting is repository-relative. Running build/deploy
+# from inside that configured subdirectory makes the CLI append it twice.
+# Expose the selected app's .vercel context at the monorepo root temporarily,
+# then invoke the CLI from the repository root so Root Directory resolves once.
+run_vercel_from_repo_root() {
+    local project_dir="$1"
+    shift
+
+    local root_vercel_dir="$REPO_ROOT/.vercel"
+    local backup_dir=""
+    local status=0
+
+    [[ -d "$project_dir/.vercel" ]] || fail "Missing Vercel project context: $project_dir/.vercel"
+
+    if [[ -e "$root_vercel_dir" || -L "$root_vercel_dir" ]]; then
+        backup_dir="$(mktemp -d "$REPO_ROOT/.vercel-context-backup.XXXXXX")"
+        mv "$root_vercel_dir" "$backup_dir/original"
+    fi
+
+    if ! ln -s "$project_dir/.vercel" "$root_vercel_dir"; then
+        if [[ -n "$backup_dir" ]]; then
+            mv "$backup_dir/original" "$root_vercel_dir"
+            rmdir "$backup_dir"
+        fi
+        fail "Could not prepare the Vercel project context at the repository root."
+    fi
+
+    if (cd "$REPO_ROOT" && vercel_cli "$@"); then
+        status=0
+    else
+        status=$?
+    fi
+
+    rm -f "$root_vercel_dir"
+    if [[ -n "$backup_dir" ]]; then
+        mv "$backup_dir/original" "$root_vercel_dir"
+        rmdir "$backup_dir"
+    fi
+
+    return "$status"
 }
 
 project_name_from_link() {
@@ -147,36 +240,41 @@ extract_deployment_url() {
 }
 
 DEPLOYMENT_URL_RESULT=""
-deploy_prebuilt_project() {
+deploy_project() {
     local working_dir="$1"
     local project_name="$2"
     local label="$3"
-    local deploy_args=(deploy --prebuilt --prod --yes)
+    local deployment_mode="$4"
+    local deploy_args=(deploy --prod --yes)
     local deployment_output deployment_url
+
+    case "$deployment_mode" in
+        source)
+            # Archive the monorepo upload as one .tgz to stay below Vercel's
+            # 15,000 individual-file upload limit.
+            # The production build still runs remotely with encrypted env vars.
+            deploy_args+=(--archive=tgz)
+            ;;
+        prebuilt)
+            deploy_args+=(--prebuilt)
+            ;;
+        *)
+            fail "Unsupported deployment mode '$deployment_mode' for $label."
+            ;;
+    esac
+
     if [[ -n "$VERCEL_SCOPE" ]]; then deploy_args+=(--scope "$VERCEL_SCOPE"); fi
 
-    log "Deploying the $label project '$project_name' to Vercel production"
-    if ! deployment_output="$(run_vercel_in "$working_dir" "${deploy_args[@]}" 2>&1)"; then
+    log "Deploying the $label project '$project_name' ($deployment_mode)"
+    if ! deployment_output="$(run_vercel_from_repo_root "$working_dir" "${deploy_args[@]}" 2>&1)"; then
         printf '%s\n' "$deployment_output" >&2
-        fail "$label deployment failed. The other project will not be deployed after this failure."
+        fail "$label deployment failed. The other project and GitHub release upload will be skipped."
     fi
     printf '%s\n' "$deployment_output"
 
     deployment_url="$(extract_deployment_url "$deployment_output")"
     [[ -n "$deployment_url" ]] || fail "Could not extract the $label deployment URL from Vercel CLI output."
     DEPLOYMENT_URL_RESULT="$deployment_url"
-}
-
-assign_production_domain() {
-    local working_dir="$1"
-    local deployment_url="$2"
-    local domain="$3"
-    local label="$4"
-    local alias_args=(alias set "$deployment_url" "$domain")
-    if [[ -n "$VERCEL_SCOPE" ]]; then alias_args+=(--scope "$VERCEL_SCOPE"); fi
-
-    log "Assigning $label production domain '$domain'"
-    run_vercel_in "$working_dir" "${alias_args[@]}"
 }
 
 log "Checking tools and Vercel authentication"
@@ -219,12 +317,9 @@ if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 # Link each project from its own app directory. This prevents the Vercel CLI
-# from using drive-bot's project ID while building or deploying drive-bot-nema.
+# from using the frontend project's ID while building or deploying the API proxy.
 ensure_project_link "$BACKEND_DIR" "$BACKEND_PROJECT_JSON" "$BACKEND_PROJECT" "API proxy"
 ensure_project_link "$FRONTEND_DIR" "$FRONTEND_PROJECT_JSON" "$FRONTEND_PROJECT" "frontend"
-
-log "Installing locked API proxy dependencies"
-(cd "$BACKEND_DIR" && npm ci)
 
 log "Installing locked frontend dependencies"
 (cd "$FRONTEND_DIR" && npm ci)
@@ -232,9 +327,19 @@ log "Installing locked frontend dependencies"
 pull_production_environment "$BACKEND_DIR" "$BACKEND_ENV_FILE" "API proxy"
 pull_production_environment "$FRONTEND_DIR" "$FRONTEND_ENV_FILE" "frontend"
 
-log "Building the Next.js API proxy for Vercel production"
-run_vercel_in "$BACKEND_DIR" build --prod
-[[ -f "$BACKEND_VERCEL_DIR/output/config.json" ]] || fail "Vercel did not produce backend .vercel/output/config.json; API proxy deployment stopped"
+require_backend_env_value() {
+    local variable_name="$1"
+    if ! grep -Eq "^${variable_name}=.+$" "$BACKEND_ENV_FILE"; then
+        fail "The API proxy production environment is missing ${variable_name}. Add it to the '$BACKEND_PROJECT' Vercel project's Production environment, then rerun this script."
+    fi
+}
+
+require_backend_env_value "UPSTASH_REDIS_REST_URL"
+require_backend_env_value "UPSTASH_REDIS_REST_TOKEN"
+require_backend_env_value "STORELIMITLESS_PROXY_TOKEN"
+
+# The API proxy is built remotely by Vercel during its source deployment.
+# This avoids local [SENSITIVE] placeholders for encrypted production secrets.
 
 log "Building the Vite frontend locally"
 # The browser continues using the stable proxy for metadata/control requests.
@@ -260,15 +365,21 @@ JSON
 [[ -f "$FRONTEND_VERCEL_DIR/output/config.json" ]] || fail "Failed to create frontend Vercel output configuration"
 [[ -f "$FRONTEND_VERCEL_DIR/output/static/index.html" ]] || fail "Frontend Vercel output is missing index.html"
 
+# Build and deploy through the monorepo root. Each project Root Directory is
+# repository-relative, so the CLI must not start inside the configured app path.
 # Deploy the API proxy first so /api/current-upstream exists before the new
 # frontend starts calling it for direct file uploads.
-deploy_prebuilt_project "$BACKEND_DIR" "$BACKEND_PROJECT" "API proxy"
+deploy_project "$BACKEND_DIR" "$BACKEND_PROJECT" "API proxy" "source"
 BACKEND_DEPLOYMENT_URL="$DEPLOYMENT_URL_RESULT"
-assign_production_domain "$BACKEND_DIR" "$BACKEND_DEPLOYMENT_URL" "$BACKEND_DOMAIN" "API proxy"
+# cdn-storelimitless.vercel.app is attached to the API proxy project; Vercel updates it on production deploy.
 
-deploy_prebuilt_project "$FRONTEND_DIR" "$FRONTEND_PROJECT" "frontend"
+deploy_project "$FRONTEND_DIR" "$FRONTEND_PROJECT" "frontend" "prebuilt"
 FRONTEND_DEPLOYMENT_URL="$DEPLOYMENT_URL_RESULT"
-assign_production_domain "$FRONTEND_DIR" "$FRONTEND_DEPLOYMENT_URL" "$FRONTEND_DOMAIN" "frontend"
+# storelimitless.vercel.app is attached to the frontend project; Vercel updates it on production deploy.
+
+# Release binaries are built separately by ./build.sh 1 1. Only publish once
+# both production deployments have succeeded.
+upload_release_assets
 
 cat <<MESSAGE
 
@@ -278,5 +389,7 @@ Both StoreLimitless Vercel deployments completed:
 
 The API proxy was deployed first, followed by the frontend.
 The Cloudflare Quick Tunnel registration flow and its runtime URL remain unchanged.
+GitHub release: https://github.com/Dream2503/Store-Limitless/releases/tag/$GITHUB_RELEASE_TAG
+Uploaded: four Linux/Windows LOCAL/CLOUD executables.
 No git commit or git push was performed.
 MESSAGE

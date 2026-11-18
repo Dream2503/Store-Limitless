@@ -579,20 +579,336 @@ function PDFDocumentViewer({streamUrl, fileName}) {
 }
 
 /**
- * Render an image, in-app PDF, or audio preview from a signed stream URL.
- * Image formats are displayed as contained media so the full photo remains visible.
- * @param {{fileId: string, navigate: Function, type: "image" | "pdf" | "audio", fileName?: string}} props
+ * Format media playback time without showing invalid or infinite duration values.
+ * @param {number} seconds
  */
-export function MediaPreview({fileId, navigate, type, publicToken, fileName}) {
+function formatMediaTime(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+    const minutes = Math.floor(seconds / 60);
+    const remainder = Math.floor(seconds % 60).toString().padStart(2, "0");
+    const hours = Math.floor(minutes / 60);
+    return hours > 0
+        ? `${hours}:${(minutes % 60).toString().padStart(2, "0")}:${remainder}`
+        : `${minutes}:${remainder}`;
+}
+
+/**
+ * Image preview with wheel zoom, touch pinch zoom, and a small themed zoom toolbar.
+ * The image is sized in layout (rather than only transformed) so the viewer can scroll
+ * to every edge after zooming in.
+ */
+function ImageFilePreview({src, fileName, onError}) {
+    const viewportRef = useRef(null);
+    const pointersRef = useRef(new Map());
+    const pinchRef = useRef(null);
+    const [loaded, setLoaded] = useState(false);
+    const [zoom, setZoom] = useState(1);
+    const [naturalSize, setNaturalSize] = useState(null);
+    const [viewportSize, setViewportSize] = useState({width: 0, height: 0});
+
+    const clampZoom = (value) => Math.max(0.25, Math.min(5, value));
+
+    useEffect(() => {
+        setLoaded(false);
+        setZoom(1);
+        setNaturalSize(null);
+        pointersRef.current.clear();
+        pinchRef.current = null;
+    }, [src]);
+
+    useEffect(() => {
+        const element = viewportRef.current;
+        if (!element) return undefined;
+        const updateSize = () => setViewportSize({
+            width: element.clientWidth,
+            height: element.clientHeight,
+        });
+        updateSize();
+
+        if (typeof ResizeObserver !== "undefined") {
+            const observer = new ResizeObserver(updateSize);
+            observer.observe(element);
+            return () => observer.disconnect();
+        }
+        window.addEventListener("resize", updateSize);
+        return () => window.removeEventListener("resize", updateSize);
+    }, []);
+
+    const handleWheel = useCallback((event) => {
+        event.preventDefault();
+        const factor = Math.exp(-event.deltaY * 0.0015);
+        setZoom((current) => clampZoom(current * factor));
+    }, []);
+
+    const handlePointerDown = useCallback((event) => {
+        if (event.pointerType !== "touch") return;
+        const pointers = pointersRef.current;
+        pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+        try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+            // Pointer capture is not available in every embedded browser.
+        }
+        if (pointers.size === 2) {
+            const [{x: x1, y: y1}, {x: x2, y: y2}] = Array.from(pointers.values());
+            pinchRef.current = {
+                distance: Math.max(1, Math.hypot(x2 - x1, y2 - y1)),
+                zoom,
+            };
+        }
+    }, [zoom]);
+
+    const handlePointerMove = useCallback((event) => {
+        if (event.pointerType !== "touch") return;
+        const pointers = pointersRef.current;
+        if (!pointers.has(event.pointerId)) return;
+        pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+        if (pointers.size < 2 || !pinchRef.current) return;
+
+        const [{x: x1, y: y1}, {x: x2, y: y2}] = Array.from(pointers.values());
+        const distance = Math.max(1, Math.hypot(x2 - x1, y2 - y1));
+        const nextZoom = pinchRef.current.zoom * (distance / pinchRef.current.distance);
+        setZoom(clampZoom(nextZoom));
+    }, []);
+
+    const finishPointer = useCallback((event) => {
+        if (event.pointerType !== "touch") return;
+        const pointers = pointersRef.current;
+        pointers.delete(event.pointerId);
+        if (pointers.size < 2) pinchRef.current = null;
+    }, []);
+
+    const fitScale = naturalSize && viewportSize.width > 0 && viewportSize.height > 0
+        ? Math.min(
+            1,
+            Math.max(1, viewportSize.width - 48) / naturalSize.width,
+            Math.max(1, viewportSize.height - 48) / naturalSize.height,
+        )
+        : 1;
+    const imageWidth = naturalSize ? Math.max(1, naturalSize.width * fitScale * zoom) : undefined;
+    const imageHeight = naturalSize ? Math.max(1, naturalSize.height * fitScale * zoom) : undefined;
+
+    return <div
+        ref={viewportRef}
+        className="relative flex h-full min-h-0 w-full overflow-auto bg-[#0d100e]"
+        onWheel={handleWheel}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={finishPointer}
+        onPointerCancel={finishPointer}
+        style={{touchAction: "pan-x pan-y", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch"}}
+        aria-label="Image viewer. Scroll to zoom, or pinch on a touch screen."
+    >
+        <div className="flex h-max min-h-full w-max min-w-full items-center justify-center p-3 sm:p-6">
+            {!loaded && <div className="fixed inset-0 z-10 pointer-events-none flex items-center justify-center">
+                <PreviewMessage message="Loading image…"/>
+            </div>}
+            <img
+                src={src}
+                alt={fileName || "Image preview"}
+                draggable={false}
+                onLoad={(event) => {
+                    setNaturalSize({width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight});
+                    setLoaded(true);
+                }}
+                onError={onError}
+                style={{
+                    width: imageWidth ? `${imageWidth}px` : "auto",
+                    height: imageHeight ? `${imageHeight}px` : "auto",
+                    maxWidth: "none",
+                    maxHeight: "none",
+                    opacity: loaded ? 1 : 0,
+                }}
+                className="block shrink-0 select-none object-contain"
+            />
+        </div>
+
+        {loaded && <div className="absolute right-3 top-3 z-20 flex items-center gap-1 rounded-lg border border-[#304236] bg-[#121a15]/95 p-1 text-[#e7eee9] shadow-lg backdrop-blur">
+            <button type="button" onClick={() => setZoom((current) => clampZoom(current / 1.2))}
+                    disabled={zoom <= 0.25} aria-label="Zoom out" title="Zoom out"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-[#c5d0c8] transition-colors hover:bg-white/10 hover:text-white disabled:opacity-35">
+                <span className="material-symbols-outlined text-[19px]" aria-hidden="true">remove</span>
+            </button>
+            <button type="button" onClick={() => setZoom(1)} aria-label="Reset image zoom" title="Reset zoom"
+                    className="min-w-12 rounded-md px-1 text-xs tabular-nums hover:bg-white/10">
+                {Math.round(zoom * 100)}%
+            </button>
+            <button type="button" onClick={() => setZoom((current) => clampZoom(current * 1.2))}
+                    disabled={zoom >= 5} aria-label="Zoom in" title="Zoom in"
+                    className="flex h-8 w-8 items-center justify-center rounded-md text-[#c5d0c8] transition-colors hover:bg-white/10 hover:text-white disabled:opacity-35">
+                <span className="material-symbols-outlined text-[19px]" aria-hidden="true">add</span>
+            </button>
+        </div>}
+    </div>;
+}
+
+/**
+ * A custom StoreLimitless-themed audio player with keyboard-friendly controls.
+ * The native audio element is retained for decoding and streaming, but its browser UI
+ * is replaced by consistent in-app controls.
+ */
+function AudioFilePlayer({src, fileName, onError}) {
+    const audioRef = useRef(null);
+    const [playing, setPlaying] = useState(false);
+    const [currentTime, setCurrentTime] = useState(0);
+    const [duration, setDuration] = useState(0);
+    const [volume, setVolume] = useState(1);
+    const [muted, setMuted] = useState(false);
+    const [playbackRate, setPlaybackRate] = useState(1);
+
+    const progress = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
+
+    const togglePlayback = useCallback(() => {
+        const audio = audioRef.current;
+        if (!audio) return;
+        if (audio.paused) {
+            void audio.play().catch(() => {});
+        } else {
+            audio.pause();
+        }
+    }, []);
+
+    const handleSeek = useCallback((event) => {
+        const audio = audioRef.current;
+        if (!audio || !Number.isFinite(audio.duration)) return;
+        const nextTime = Number(event.target.value);
+        audio.currentTime = Math.max(0, Math.min(audio.duration, nextTime));
+        setCurrentTime(audio.currentTime);
+    }, []);
+
+    const handleVolume = useCallback((event) => {
+        const nextVolume = Math.max(0, Math.min(1, Number(event.target.value)));
+        setVolume(nextVolume);
+        setMuted(nextVolume === 0);
+        if (audioRef.current) {
+            audioRef.current.volume = nextVolume;
+            audioRef.current.muted = nextVolume === 0;
+        }
+    }, []);
+
+    const toggleMute = useCallback(() => {
+        const audio = audioRef.current;
+        const nextMuted = audio ? !audio.muted : !muted;
+        if (audio) audio.muted = nextMuted;
+        setMuted(nextMuted);
+    }, [muted]);
+
+    const changePlaybackRate = useCallback((event) => {
+        const nextRate = Number(event.target.value);
+        setPlaybackRate(nextRate);
+        if (audioRef.current) audioRef.current.playbackRate = nextRate;
+    }, []);
+
+    return <div className="w-full max-w-3xl overflow-hidden rounded-2xl border border-[#29392f] bg-[#151c17] shadow-[0_16px_48px_rgba(0,0,0,0.3)]">
+        <div className="flex items-center gap-4 border-b border-[#29392f] bg-gradient-to-r from-[#17231b] to-[#151c17] px-5 py-5 sm:px-7">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-[#3ecf8e]/25 bg-[#3ecf8e]/10 text-[#3ecf8e]">
+                <span className="material-symbols-outlined text-[30px]" aria-hidden="true">graphic_eq</span>
+            </div>
+            <div className="min-w-0 flex-1">
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#70a88b]">Audio preview</p>
+                <h2 className="break-all text-sm font-semibold leading-5 text-[#f3f7f4]">{fileName || "Audio file"}</h2>
+                <p className="mt-1 text-xs text-[#89988e]">StoreLimitless media player</p>
+            </div>
+        </div>
+
+        <div className="px-5 py-5 sm:px-7">
+            <audio
+                ref={audioRef}
+                src={src}
+                preload="metadata"
+                onLoadedMetadata={(event) => {
+                    const audio = event.currentTarget;
+                    setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+                    audio.volume = volume;
+                    audio.muted = muted;
+                    audio.playbackRate = playbackRate;
+                }}
+                onDurationChange={(event) => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+                onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime || 0)}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                onEnded={() => setPlaying(false)}
+                onVolumeChange={(event) => {
+                    setVolume(event.currentTarget.volume);
+                    setMuted(event.currentTarget.muted);
+                }}
+                onError={onError}
+                className="sr-only"
+                aria-label={`Audio playback for ${fileName || "audio file"}`}
+            />
+
+            <div className="mb-2 flex items-center justify-between text-[11px] tabular-nums text-[#9ba99f]">
+                <span>{formatMediaTime(currentTime)}</span>
+                <span>{duration ? formatMediaTime(duration) : "--:--"}</span>
+            </div>
+            <input
+                type="range"
+                min="0"
+                max={duration || 0}
+                step="0.01"
+                value={Math.min(currentTime, duration || 0)}
+                onChange={handleSeek}
+                disabled={!duration}
+                aria-label="Audio progress"
+                style={{background: `linear-gradient(to right, #3ecf8e ${progress}%, #344238 ${progress}%)`}}
+                className="mb-5 h-1.5 w-full cursor-pointer appearance-none rounded-full accent-[#3ecf8e] disabled:cursor-wait"
+            />
+
+            <div className="flex flex-wrap items-center gap-3">
+                <button type="button" onClick={togglePlayback} aria-label={playing ? "Pause audio" : "Play audio"}
+                        className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[#168452] text-white shadow-[0_4px_18px_rgba(62,207,142,0.18)] transition-colors hover:bg-[#1b9a61] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3ecf8e]">
+                    <span className="material-symbols-outlined text-[26px]" aria-hidden="true">{playing ? "pause" : "play_arrow"}</span>
+                </button>
+                <span className="min-w-0 flex-1 text-xs font-medium text-[#c2cec6]">{playing ? "Now playing" : currentTime > 0 && currentTime < duration ? "Playback paused" : "Ready to play"}</span>
+
+                <div className="flex items-center gap-2">
+                    <button type="button" onClick={toggleMute} aria-label={muted || volume === 0 ? "Unmute audio" : "Mute audio"}
+                            className="flex h-9 w-9 items-center justify-center rounded-lg text-[#aebbb2] transition-colors hover:bg-white/5 hover:text-white">
+                        <span className="material-symbols-outlined text-[20px]" aria-hidden="true">{muted || volume === 0 ? "volume_off" : "volume_up"}</span>
+                    </button>
+                    <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={muted ? 0 : volume}
+                        onChange={handleVolume}
+                        aria-label="Audio volume"
+                        className="w-20 cursor-pointer accent-[#3ecf8e]"
+                    />
+                </div>
+
+                <label className="flex items-center gap-2 text-[11px] text-[#9ba99f]">
+                    <span>Speed</span>
+                    <select value={playbackRate} onChange={changePlaybackRate}
+                            className="h-8 rounded-md border border-[#35473b] bg-[#101712] px-2 text-xs text-[#e7eee9] outline-none focus:border-[#3ecf8e]">
+                        {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
+                    </select>
+                </label>
+            </div>
+        </div>
+        <div className="border-t border-[#29392f] bg-[#111813] px-5 py-2.5 text-center text-[11px] text-[#849188] sm:px-7">
+            Playback depends on the audio codec supported by your browser.
+        </div>
+    </div>;
+}
+
+/**
+ * Render an image, in-app PDF, or audio preview from a signed stream URL.
+ * Inactive persistent viewer instances release their preview resources and obtain a
+ * fresh URL when reopened. This prevents a hidden PDF canvas from becoming stale.
+ * @param {{fileId: string, navigate: Function, type: "image" | "pdf" | "audio", fileName?: string, active?: boolean}} props
+ */
+export function MediaPreview({fileId, navigate, type, publicToken, fileName, active = true}) {
     const [streamUrl, setStreamUrl] = useState("");
     const [error, setError] = useState("");
-    const [imageLoaded, setImageLoaded] = useState(false);
 
     useEffect(() => {
         let cancelled = false;
         setStreamUrl("");
         setError("");
-        setImageLoaded(false);
+
+        if (!active) return () => { cancelled = true; };
 
         (async () => {
             try {
@@ -610,39 +926,25 @@ export function MediaPreview({fileId, navigate, type, publicToken, fileName}) {
         return () => {
             cancelled = true;
         };
-    }, [fileId, navigate, publicToken]);
+    }, [active, fileId, navigate, publicToken]);
 
+    if (!active) return null;
     if (error) return <PreviewMessage message={error}/>;
     if (!streamUrl) return <PreviewMessage message="Preparing preview…"/>;
 
-    if (type === "image") return <div className="relative flex h-full min-h-0 w-full items-center justify-center overflow-auto bg-[#111111] p-3 sm:p-6">
-        {!imageLoaded && <div className="absolute inset-0">
-            <PreviewMessage message="Loading image…"/>
-        </div>}
-        <img
-            src={streamUrl}
-            alt={fileName || "Image preview"}
-            draggable={false}
-            onLoad={() => setImageLoaded(true)}
-            onError={() => setError("This image could not be displayed. Your browser may not support this image format.")}
-            className={`max-h-full max-w-full object-contain transition-opacity duration-150 ${imageLoaded ? "opacity-100" : "opacity-0"}`}
-        />
-    </div>;
+    if (type === "image") return <ImageFilePreview
+        src={streamUrl}
+        fileName={fileName}
+        onError={() => setError("This image could not be displayed. Your browser may not support this image format.")}
+    />;
 
     if (type === "pdf") return <PDFDocumentViewer streamUrl={streamUrl} fileName={fileName}/>;
-    return <div className="flex h-full flex-col items-center justify-center gap-4 bg-[#111111] px-6 py-8">
-        <div className="flex w-full max-w-2xl flex-col items-center gap-3 rounded-xl border border-[#2e2e2e] bg-[#171717] px-5 py-8 sm:px-8">
-            <span className="material-symbols-outlined text-5xl text-[#70b8ff]" aria-hidden="true">graphic_eq</span>
-            <p className="max-w-full break-all text-center text-sm font-medium text-[#e7eee9]">{fileName || "Audio preview"}</p>
-            <audio
-                controls
-                preload="metadata"
-                src={streamUrl}
-                onError={() => setError("This audio file could not be played. Your browser may not support its audio codec or container format.")}
-                className="w-full"
-                aria-label={`Audio player for ${fileName || "audio file"}`}
-            />
-            <p className="text-center text-xs text-[#898989]">Playback depends on the audio codec supported by your browser.</p>
-        </div>
+
+    return <div className="flex h-full min-h-0 w-full items-center justify-center bg-[#0d100e] px-4 py-8 sm:px-6">
+        <AudioFilePlayer
+            src={streamUrl}
+            fileName={fileName}
+            onError={() => setError("This audio file could not be played. Your browser may not support its audio codec or container format.")}
+        />
     </div>;
 }

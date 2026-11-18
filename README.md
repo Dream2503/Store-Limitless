@@ -356,9 +356,9 @@ reference accordingly.
 The local part cache lives under `TRANSFER_PATH/cached`. Its current configured limit is **256 MiB**, and it uses least-recently-used eviction
 bookkeeping. Cache files are not the canonical copy of user data.
 
-In source mode, `TRANSFER_PATH` is normally `data/transfer/`; in frozen mode it is placed under the OS-specific StoreLimitless data directory. The
-application restores the cache index on startup, retains reusable cached chunks across restarts, and moves temporary staging folders to an isolated location
-for asynchronous cleanup during shutdown. Do not place durable user files, credentials, or other application data there.
+In source mode, `TRANSFER_PATH` is normally `data/transfer/`; in frozen mode it is placed under the OS-specific StoreLimitless data directory. On
+shutdown, all contents beneath this path, including temporary staging and the disposable part cache, are moved to an isolated location for asynchronous
+cleanup. Transfer contents are intentionally not preserved across restarts. Do not place durable user files, credentials, or other application data there.
 
 ---
 
@@ -400,9 +400,9 @@ The current prompt is a service-control prompt, not a general file-management sh
 ### Shutdown
 
 The lifecycle code requests HTTP-server shutdown with a short graceful timeout, closes FTP, shuts down the Discord and Telegram clients, closes Redis,
-and stops processes launched for Redis/Vite/Cloudflare. Temporary staging folders are moved out of the active transfer directory and deleted by a detached
-cleanup process, so large temporary downloads do not hold up restart. The reusable part cache remains available across restarts. Avoid relying on unfinished
-files under `TRANSFER_PATH` (normally `data/transfer/` in source mode) surviving a shutdown.
+and stops processes launched for Redis/Vite/Cloudflare. All contents under the transfer directory, including staging folders and cached chunks, are moved
+out of the active directory and deleted by a detached cleanup process so large temporary downloads do not hold up restart. The transfer directory itself is
+recreated as needed; do not rely on files or cached chunks under `TRANSFER_PATH` (normally `data/transfer/` in source mode) surviving a shutdown.
 
 ---
 

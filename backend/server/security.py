@@ -27,11 +27,18 @@ def verify_password(password: str, hashed_password: str) -> bool:
     return pwd_context.verify(password, hashed_password)
 
 
-def create_public_zip_token(file_ids: list[int], username: str, *, expires_in: int = 900) -> str:
-    """Create a short-lived signed token for downloading an authenticated user's ZIP archive."""
+def create_public_zip_token(
+        file_ids: list[int],
+        username: str,
+        *,
+        folder_ids: list[int] | None = None,
+        expires_in: int = 900,
+) -> str:
+    """Create a short-lived signed token for downloading selected files and folders."""
 
     payload = {
         "file_ids": list(dict.fromkeys(int(file_id) for file_id in file_ids)),
+        "folder_ids": list(dict.fromkeys(int(folder_id) for folder_id in (folder_ids or []))),
         "username": username,
         "exp": int(time()) + max(60, int(expires_in)),
         "type": "zip",
@@ -52,20 +59,26 @@ def verify_public_zip_token(token: str) -> dict[str, object]:
             raise ValueError("Invalid ZIP token signature")
 
         data = loads(urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4)))
-        file_ids = data.get("file_ids")
+        file_ids = data.get("file_ids", [])
+        folder_ids = data.get("folder_ids", [])
         username = data.get("username")
         expires_at = data.get("exp")
         if data.get("type") != "zip" or not isinstance(username, str) or not username:
             raise ValueError("Invalid ZIP token payload")
-        if not isinstance(file_ids, list) or len(file_ids) < 2 or len(file_ids) > 500:
-            raise ValueError("Invalid ZIP file list")
+        if not isinstance(file_ids, list) or not isinstance(folder_ids, list):
+            raise ValueError("Invalid ZIP selection")
+        selected_count = len(file_ids) + len(folder_ids)
+        if selected_count < 1 or selected_count > 500 or (not folder_ids and len(file_ids) < 2):
+            raise ValueError("Invalid ZIP selection size")
         if any(not isinstance(file_id, int) or isinstance(file_id, bool) or file_id <= 0 for file_id in file_ids):
             raise ValueError("Invalid ZIP file ID")
-        if len(set(file_ids)) != len(file_ids):
-            raise ValueError("Duplicate ZIP file ID")
+        if any(not isinstance(folder_id, int) or isinstance(folder_id, bool) or folder_id <= 0 for folder_id in folder_ids):
+            raise ValueError("Invalid ZIP folder ID")
+        if len(set(file_ids)) != len(file_ids) or len(set(folder_ids)) != len(folder_ids):
+            raise ValueError("Duplicate ZIP selection ID")
         if not isinstance(expires_at, int) or expires_at < int(time()):
             raise ValueError("ZIP download token has expired")
-        return {"file_ids": file_ids, "username": username, "exp": expires_at}
+        return {"file_ids": file_ids, "folder_ids": folder_ids, "username": username, "exp": expires_at}
     except (ValueError, KeyError, TypeError, JSONDecodeError) as error:
         raise ValueError("Invalid or expired ZIP download token") from error
 

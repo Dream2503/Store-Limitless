@@ -19,9 +19,10 @@ router: APIRouter = APIRouter()
 
 
 class ZipDownloadRequest(BaseModel):
-    """List of active file IDs to combine in a streamed ZIP archive."""
+    """Active file and folder IDs to combine in a streamed ZIP archive."""
 
-    file_ids: list[int] = Field(min_length=2, max_length=500)
+    file_ids: list[int] = Field(default_factory=list, max_length=500)
+    folder_ids: list[int] = Field(default_factory=list, max_length=500)
 
 
 @router.post("/files/zip-link")
@@ -29,10 +30,20 @@ async def create_zip_download_link(payload: ZipDownloadRequest, user: User = Dep
     """Validate the selected files and create a short-lived streaming ZIP URL."""
 
     file_ids = payload.file_ids
+    folder_ids = payload.folder_ids
+    selected_count = len(file_ids) + len(folder_ids)
+
+    if selected_count < 1 or selected_count > 500 or (not folder_ids and len(file_ids) < 2):
+        raise HTTPException(
+            status_code=422,
+            detail="Select one folder or at least two files, with no more than 500 selected items",
+        )
     if any(file_id <= 0 for file_id in file_ids):
         raise HTTPException(status_code=422, detail="File IDs must be positive integers")
-    if len(set(file_ids)) != len(file_ids):
-        raise HTTPException(status_code=422, detail="Duplicate file IDs are not allowed")
+    if any(folder_id <= 0 for folder_id in folder_ids):
+        raise HTTPException(status_code=422, detail="Folder IDs must be positive integers")
+    if len(set(file_ids)) != len(file_ids) or len(set(folder_ids)) != len(folder_ids):
+        raise HTTPException(status_code=422, detail="Duplicate selected IDs are not allowed")
 
     # Resolve ownership and active/trash state before minting a public download token.
     for file_id in file_ids:
@@ -40,7 +51,15 @@ async def create_zip_download_link(payload: ZipDownloadRequest, user: User = Dep
         if file is None or file.username != user.username:
             raise HTTPException(status_code=404, detail=f"Active file {file_id} was not found")
 
-    return {"public_token": create_public_zip_token(file_ids, user.username), "expires_in": 900}
+    for folder_id in folder_ids:
+        folder = await Directory.get(user.username, did=folder_id)
+        if folder is None or folder.username != user.username:
+            raise HTTPException(status_code=404, detail=f"Active folder {folder_id} was not found")
+
+    return {
+        "public_token": create_public_zip_token(file_ids, user.username, folder_ids=folder_ids),
+        "expires_in": 900,
+    }
 
 
 @router.post("/create-folder")

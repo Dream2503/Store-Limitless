@@ -19,7 +19,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from backend.database.models import File, User
+from backend.database.models import Directory, File, User
 from backend.database.redis_server import Redis
 from backend.server.jwt_handler import get_current_user
 from backend.server.security import verify_public_stream_token, verify_public_zip_token
@@ -982,18 +982,62 @@ async def public_zip_download(
         raise HTTPException(status_code=404, detail="Invalid or expired ZIP download link", headers=_public_cors_headers(request)) from error
 
     username = cast(str, payload["username"])
-    file_ids = cast(list[int], payload["file_ids"])
-    files: list[File] = []
+    file_ids = cast(list[int], payload.get("file_ids", []))
+    folder_ids = cast(list[int], payload.get("folder_ids", []))
+
+    all_directories = await Directory.get_all(username)
+    all_files = await File.get_all(username)
+    directories_by_id = {
+        int(directory.id): directory
+        for directory in all_directories
+        if directory.id is not None and directory.username == username
+    }
+    directory_path_by_id = {
+        int(directory.id): Path(directory.path)
+        for directory in all_directories
+        if directory.id is not None and directory.username == username
+    }
+
+    selected_files: list[File] = []
     for file_id in file_ids:
         file = await File.get(username, fid=file_id)
         if file is None or file.username != username:
-            raise HTTPException(status_code=404, detail="One or more selected files are no longer available", headers=_public_cors_headers(request))
-        files.append(file)
+            raise HTTPException(
+                status_code=404,
+                detail="One or more selected files are no longer available",
+                headers=_public_cors_headers(request),
+            )
+        selected_files.append(file)
 
-    # Start the HTTP response before contacting remote storage. Stream.prepare() verifies
-    # the final storage chunk, so doing it for every selected file here makes the browser
-    # wait for all those remote requests before its download even begins. Prepare each file
-    # lazily as the ZIP writer reaches it, and forward source bytes as soon as available.
+    selected_folders: list[Directory] = []
+    for folder_id in folder_ids:
+        folder = directories_by_id.get(folder_id)
+        if folder is None or folder.username != username:
+            raise HTTPException(
+                status_code=404,
+                detail="One or more selected folders are no longer available",
+                headers=_public_cors_headers(request),
+            )
+        if Path(folder.path) == Path("/home"):
+            raise HTTPException(
+                status_code=400,
+                detail="The home root cannot be downloaded as a folder",
+                headers=_public_cors_headers(request),
+            )
+        selected_folders.append(folder)
+
+    # If a selected folder contains another selected folder, only archive the parent
+    # once. This also prevents a selected file inside a selected folder being added twice.
+    selected_folders.sort(key=lambda folder: (len(Path(folder.path).parts), str(folder.path).casefold()))
+    folder_roots: list[Directory] = []
+    folder_root_paths: list[Path] = []
+    for folder in selected_folders:
+        folder_path = Path(folder.path)
+        if any(folder_path == root or folder_path.is_relative_to(root) for root in folder_root_paths):
+            continue
+        folder_roots.append(folder)
+        folder_root_paths.append(folder_path)
+
     async def stream_file(file: File):
         try:
             source = await Stream.prepare(file)
@@ -1004,11 +1048,87 @@ async def public_zip_download(
             raise OSError(f'Cannot read "{file.name}": {error}') from error
 
     entries: list[ZipStreamEntry] = []
-    for file in files:
+    used_root_names: set[str] = set()
+
+    def unique_root_name(value: str) -> str:
+        base = str(value or "").strip().strip(". ") or "folder"
+        candidate = base
+        suffix = 1
+        while candidate.casefold() in used_root_names:
+            candidate = f"{base} ({suffix})"
+            suffix += 1
+        used_root_names.add(candidate.casefold())
+        return candidate
+
+    for folder in folder_roots:
+        root_path = Path(folder.path)
+        root_name = unique_root_name(root_path.name)
+        entries.append(ZipStreamEntry(name=f"{root_name}/", source=None, size=0))
+
+        descendant_directories = sorted(
+            (
+                directory for directory in all_directories
+                if directory.id != folder.id and directory.username == username
+                and Path(directory.path).is_relative_to(root_path)
+            ),
+            key=lambda directory: (len(Path(directory.path).parts), str(directory.path).casefold()),
+        )
+        for directory in descendant_directories:
+            relative = Path(directory.path).relative_to(root_path)
+            if relative.parts:
+                entries.append(ZipStreamEntry(
+                    name=f"{root_name}/{relative.as_posix().rstrip('/')}/",
+                    source=None,
+                    size=0,
+                ))
+
+        for file in all_files:
+            parent_path = directory_path_by_id.get(int(file.directory_id))
+            if parent_path is None or file.username != username or not parent_path.is_relative_to(root_path):
+                continue
+
+            relative_parent = parent_path.relative_to(root_path)
+            file_name = Path(str(file.name).replace("\\", "/")).name or "download"
+            relative_parts = [root_name, *relative_parent.parts, file_name]
+            entry_name = "/".join(relative_parts)
+            if not file.links and int(file.size or 0) == 0:
+                entries.append(ZipStreamEntry(name=entry_name, source=None, size=0))
+            else:
+                entries.append(ZipStreamEntry(
+                    name=entry_name,
+                    source=stream_file(file),
+                    size=max(0, int(file.size or 0)),
+                ))
+
+    for file in selected_files:
+        parent_path = directory_path_by_id.get(int(file.directory_id))
+        if parent_path is not None and any(parent_path == root or parent_path.is_relative_to(root) for root in folder_root_paths):
+            continue
+
+        # Explicit file selections live at the archive root. Stored file names are
+        # leaf names; the ZIP writer additionally rejects unsafe relative paths.
+        file_name = Path(str(file.name).replace("\\", "/")).name or "download"
         if not file.links and int(file.size or 0) == 0:
-            entries.append(ZipStreamEntry(name=file.name, source=None, size=0))
+            entries.append(ZipStreamEntry(name=file_name, source=None, size=0))
         else:
-            entries.append(ZipStreamEntry(name=file.name, source=stream_file(file), size=max(0, int(file.size or 0))))
+            entries.append(ZipStreamEntry(
+                name=file_name,
+                source=stream_file(file),
+                size=max(0, int(file.size or 0)),
+            ))
+
+    if not entries:
+        raise HTTPException(
+            status_code=422,
+            detail="The selected items do not contain any active files or folders",
+            headers=_public_cors_headers(request),
+        )
+    if len(entries) > 10000:
+        raise HTTPException(
+            status_code=413,
+            detail="This selection contains too many ZIP entries (maximum 10,000)",
+            headers=_public_cors_headers(request),
+        )
 
     archive_filename = _safe_zip_download_filename(filename)
     headers = {

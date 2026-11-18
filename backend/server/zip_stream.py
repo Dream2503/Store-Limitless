@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ZipStreamEntry:
-    """One entry in a streaming ZIP archive. `source=None` represents an empty file."""
+    """One entry in a streaming ZIP archive. A trailing slash marks a directory; `source=None` emits an empty entry."""
 
     name: str
     source: AsyncIterable[bytes] | None
@@ -28,35 +28,63 @@ def _dos_date_time() -> tuple[int, int]:
     return 0, 0x21
 
 
-def _entry_name(name: str) -> bytes:
-    """Return a safe basename encoded as UTF-8 for an archive entry."""
+def _normalize_entry_name(value: str) -> str:
+    """Normalize a relative ZIP path while rejecting traversal and absolute paths."""
 
-    safe = str(name or "download").replace("\\", "/").split("/")[-1]
-    safe = safe.strip() or "download"
-    if safe in {".", ".."}:
-        safe = "download"
-    encoded = safe.encode("utf-8")
+    raw = str(value or "download").replace("\\", "/")
+    is_directory = raw.endswith("/")
+    if raw.startswith("/"):
+        raise ValueError("ZIP entry paths must be relative")
+
+    raw_parts = [part for part in raw.split("/") if part not in {"", "."}]
+    if not raw_parts or any(part == ".." for part in raw_parts):
+        raise ValueError("ZIP entry path contains an unsafe component")
+
+    safe_parts = [
+        "".join("_" if ord(character) < 32 or ord(character) == 127 else character for character in part).strip() or "download"
+        for part in raw_parts
+    ]
+    normalized = "/".join(safe_parts)
+    return normalized + "/" if is_directory else normalized
+
+
+def _entry_name(name: str) -> bytes:
+    """Return a safe relative archive path encoded as UTF-8, preserving subdirectories."""
+
+    encoded = _normalize_entry_name(name).encode("utf-8")
     if len(encoded) > 65535:
         raise ValueError("ZIP entry filename is too long")
     return encoded
 
 
 def _resolved_names(entries: Sequence[ZipStreamEntry]) -> list[bytes]:
-    """Resolve duplicate basenames exactly once for both length calculation and streaming."""
+    """Resolve duplicate relative paths exactly once for sizing and streaming."""
 
     resolved: list[bytes] = []
     used_names: set[str] = set()
 
     for entry in entries:
-        raw_name = str(entry.name or "download").replace("\\", "/").split("/")[-1].strip() or "download"
-        name = raw_name
+        normalized = _normalize_entry_name(entry.name)
+        is_directory = normalized.endswith("/")
+        path_without_suffix = normalized[:-1] if is_directory else normalized
+        parent, separator, basename = path_without_suffix.rpartition("/")
+        raw_basename = basename or "download"
+        candidate_basename = raw_basename
         duplicate_index = 1
+
+        def build_name(value: str) -> str:
+            prefix = f"{parent}/" if separator else ""
+            suffix = "/" if is_directory else ""
+            return f"{prefix}{value}{suffix}"
+
+        name = build_name(candidate_basename)
         while name.casefold() in used_names:
-            if "." in raw_name and not raw_name.startswith("."):
-                stem, extension = raw_name.rsplit(".", 1)
-                name = f"{stem} ({duplicate_index}).{extension}"
+            if "." in raw_basename and not raw_basename.startswith(".") and not is_directory:
+                stem, extension = raw_basename.rsplit(".", 1)
+                candidate_basename = f"{stem} ({duplicate_index}).{extension}"
             else:
-                name = f"{raw_name} ({duplicate_index})"
+                candidate_basename = f"{raw_basename} ({duplicate_index})"
+            name = build_name(candidate_basename)
             duplicate_index += 1
 
         used_names.add(name.casefold())

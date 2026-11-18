@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from functools import partial
 from html import unescape
 import inspect
+import math
 import os
 import re
 from mimetypes import guess_type
@@ -1733,22 +1734,80 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                 })
                 previous_at = float(item.get("_sample_at") or sample_time)
                 elapsed = max(0.0, sample_time - previous_at)
-                previous_download = int(item.get("_sample_download") or 0)
-                previous_upload = int(item.get("_sample_upload") or 0)
-                previous_download_speed = max(0.0, float(item.get("download_speed") or 0))
-                previous_upload_speed = max(0.0, float(item.get("upload_speed") or 0))
-                if elapsed > 0 and downloaded >= previous_download and item_status in {"downloading", "downloaded", "waiting_upload", "uploading", "completed"}:
-                    delta_speed = (downloaded - previous_download) / elapsed
-                    item["download_speed"] = delta_speed if previous_download_speed <= 0 else previous_download_speed * 0.7 + delta_speed * 0.3
-                elif elapsed >= 4:
-                    item["download_speed"] = 0.0
-                if elapsed > 0 and uploaded >= previous_upload and item_status in {"uploading", "completed"}:
-                    delta_speed = (uploaded - previous_upload) / elapsed
-                    item["upload_speed"] = delta_speed if previous_upload_speed <= 0 else previous_upload_speed * 0.7 + delta_speed * 0.3
-                elif elapsed >= 4:
-                    item["upload_speed"] = 0.0
-                item["download_eta"] = max(0.0, (size - downloaded) / item["download_speed"]) if size > downloaded and item["download_speed"] > 0 else None
-                item["upload_eta"] = max(0.0, (size - uploaded) / item["upload_speed"]) if size > uploaded and item["upload_speed"] > 0 else None
+                previous_download = max(0, int(item.get("_sample_download") or 0))
+                previous_upload = max(0, int(item.get("_sample_upload") or 0))
+
+                # A completed polling cycle does not imply bytes moved. If we blend a
+                # zero-byte delta on every cycle, the 0.7 smoothing factor drives a
+                # still-valid speed toward zero and produces absurdly large ETAs.
+                # Keep the last measured speed until bytes move again or 4 seconds pass.
+                try:
+                    previous_download_speed = float(item.get("download_speed") or 0)
+                except (TypeError, ValueError):
+                    previous_download_speed = 0.0
+                if not math.isfinite(previous_download_speed) or previous_download_speed < 0:
+                    previous_download_speed = 0.0
+
+                try:
+                    previous_upload_speed = float(item.get("upload_speed") or 0)
+                except (TypeError, ValueError):
+                    previous_upload_speed = 0.0
+                if not math.isfinite(previous_upload_speed) or previous_upload_speed < 0:
+                    previous_upload_speed = 0.0
+
+                try:
+                    previous_download_moved_at = float(
+                        item.get("_download_moved_at") or item.get("_sample_at") or sample_time
+                    )
+                except (TypeError, ValueError):
+                    previous_download_moved_at = sample_time
+                if not math.isfinite(previous_download_moved_at) or previous_download_moved_at > sample_time:
+                    previous_download_moved_at = sample_time
+
+                try:
+                    previous_upload_moved_at = float(
+                        item.get("_upload_moved_at") or item.get("_sample_at") or sample_time
+                    )
+                except (TypeError, ValueError):
+                    previous_upload_moved_at = sample_time
+                if not math.isfinite(previous_upload_moved_at) or previous_upload_moved_at > sample_time:
+                    previous_upload_moved_at = sample_time
+
+                if downloaded < previous_download:
+                    download_speed = 0.0
+                    download_moved_at = sample_time
+                elif elapsed > 0 and downloaded > previous_download and item_status in {"downloading", "downloaded", "waiting_upload", "uploading", "completed"}:
+                    measured_speed = (downloaded - previous_download) / elapsed
+                    download_speed = measured_speed if previous_download_speed <= 0 else previous_download_speed * 0.7 + measured_speed * 0.3
+                    download_moved_at = sample_time
+                else:
+                    download_moved_at = previous_download_moved_at
+                    download_speed = 0.0 if sample_time - download_moved_at >= 4 else previous_download_speed
+
+                if uploaded < previous_upload:
+                    upload_speed = 0.0
+                    upload_moved_at = sample_time
+                elif elapsed > 0 and uploaded > previous_upload and item_status in {"uploading", "completed"}:
+                    measured_speed = (uploaded - previous_upload) / elapsed
+                    upload_speed = measured_speed if previous_upload_speed <= 0 else previous_upload_speed * 0.7 + measured_speed * 0.3
+                    upload_moved_at = sample_time
+                else:
+                    upload_moved_at = previous_upload_moved_at
+                    upload_speed = 0.0 if sample_time - upload_moved_at >= 4 else previous_upload_speed
+
+                item["download_speed"] = download_speed if math.isfinite(download_speed) and download_speed > 0 else 0.0
+                item["upload_speed"] = upload_speed if math.isfinite(upload_speed) and upload_speed > 0 else 0.0
+
+                download_remaining = max(0, size - downloaded)
+                upload_remaining = max(0, size - uploaded)
+                download_eta = download_remaining / item["download_speed"] if download_remaining and item["download_speed"] > 0 else None
+                upload_eta = upload_remaining / item["upload_speed"] if upload_remaining and item["upload_speed"] > 0 else None
+                max_eta = 365 * 24 * 60 * 60
+                item["download_eta"] = download_eta if download_eta is not None and math.isfinite(download_eta) and download_eta <= max_eta else None
+                item["upload_eta"] = upload_eta if upload_eta is not None and math.isfinite(upload_eta) and upload_eta <= max_eta else None
+
+                item["_download_moved_at"] = download_moved_at
+                item["_upload_moved_at"] = upload_moved_at
                 item["_sample_at"] = sample_time
                 item["_sample_download"] = downloaded
                 item["_sample_upload"] = uploaded

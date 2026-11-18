@@ -1,7 +1,7 @@
 import {useEffect} from "react";
 import {createPortal} from "react-dom";
 
-export default function DashboardContextMenu({menu, onClose, onAction, multipleSelected = false, multipleFilesSelected = false}) {
+export default function DashboardContextMenu({menu, onClose, onAction, multipleSelected = false, canDownloadZip = false}) {
     useEffect(() => {
         const closeOnOutsideClick = () => onClose();
         const closeOnScroll = () => onClose();
@@ -25,13 +25,15 @@ export default function DashboardContextMenu({menu, onClose, onAction, multipleS
     } else if (menu.item?.type === "folder") {
         items = [{id: "move", label: "Move to folder", icon: "drive_file_move"}, ...(!multipleSelected ? [{
             id: "rename", label: "Rename", icon: "drive_file_rename_outline"
-        }, {id: "details", label: "Details", icon: "info"},] : []), {id: "delete", label: "Move to Trash", icon: "delete", danger: true},];
+        }, {id: "details", label: "Details", icon: "info"},] : []), ...(canDownloadZip ? [{
+            id: "download-zip", label: "Download as ZIP", icon: "folder_zip"
+        }] : []), {id: "delete", label: "Move to Trash", icon: "delete", danger: true},];
     } else {
         items = [...(!multipleSelected ? [{id: "share", label: "Share", icon: "share"}] : []), {id: "move", label: "Move to folder", icon: "drive_file_move"}, ...(!multipleSelected ? [{
             id: "rename", label: "Rename", icon: "drive_file_rename_outline"
         }, {id: "details", label: "Details", icon: "info"}, {
             id: "download", label: "Download", icon: "download"
-        }] : []), ...(multipleFilesSelected ? [{id: "download-zip", label: "Download as ZIP", icon: "folder_zip"}] : []), {
+        }] : []), ...(canDownloadZip ? [{id: "download-zip", label: "Download as ZIP", icon: "folder_zip"}] : []), {
             id: "delete", label: "Move to Trash", icon: "delete", danger: true
         },];
     }

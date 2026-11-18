@@ -135,6 +135,13 @@ export default function useUploadJobs(refreshDirectory) {
                         downloadTransfer: Math.max(0, Number(batch.download_transfer) || 0),
                         downloadTotal: Math.max(0, Number(batch.download_total) || 0),
                         downloadActive: Boolean(batch.download_active),
+                        downloadSpeed: Math.max(0, Number(batch.download_speed) || 0),
+                        uploadSpeed: Math.max(0, Number(batch.upload_speed) || 0),
+                        downloadEta: batch.download_eta == null ? null : Math.max(0, Number(batch.download_eta) || 0),
+                        uploadEta: batch.upload_eta == null ? null : Math.max(0, Number(batch.upload_eta) || 0),
+                        ingestionType: String(batch.ingestion_type || ""),
+                        fileCounts: batch.file_counts && typeof batch.file_counts === "object" ? batch.file_counts : {},
+                        lastUpdatedAt: Math.max(0, Number(batch.last_updated_at) || 0),
                         message: String(batch.message || status),
                         createdAt: Number(batch.created_at) || 0,
                     };
@@ -222,6 +229,14 @@ export default function useUploadJobs(refreshDirectory) {
                                 transfer: Math.max(0, Number(latest.transfer) || 0),
                                 total: Math.max(0, Number(latest.total) || Number(item.size) || 0),
                                 size: Math.max(0, Number(latest.total) || Number(item.size) || 0),
+                                download_transfer: Math.max(0, Number(latest.download_transfer) || 0),
+                                download_total: Math.max(0, Number(latest.download_total) || Number(item.size) || 0),
+                                download_speed: Math.max(0, Number(latest.download_speed) || 0),
+                                download_eta: latest.download_eta == null ? null : Math.max(0, Number(latest.download_eta) || 0),
+                                upload_transfer: Math.max(0, Number(latest.upload_transfer) || 0),
+                                upload_total: Math.max(0, Number(latest.upload_total) || Number(item.size) || 0),
+                                upload_speed: Math.max(0, Number(latest.upload_speed) || 0),
+                                upload_eta: latest.upload_eta == null ? null : Math.max(0, Number(latest.upload_eta) || 0),
                             };
                         });
 

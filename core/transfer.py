@@ -12,6 +12,7 @@ from backend.database.models import File, User
 from core.data_center import DataCenter
 from core.utils import sanitize_sensitive_urls, write_log
 from core.utils.download_ import download_processed_link, download_unprocessed_link
+from core.utils.download_utils import download_google_drive_folder, is_google_drive_folder_url
 from core.utils.progress import Progress, upload_growing_file
 
 
@@ -52,8 +53,7 @@ async def file_upload(
             write_log("INFO", data_center, "UPLOAD", file.username, f"Upload complete `{file_path.name}`")
             progress.message = f"Upload Complete of id={file.id}"
             yield progress
-
-        file_path.unlink(missing_ok=True)
+            file_path.unlink(missing_ok=True)
 
     except Exception as error:
         write_log("ERROR", data_center, "UPLOAD", file.username, f"Unhandled exception: {error}\n{format_exc()}")
@@ -86,6 +86,14 @@ async def link_upload(file: File, link: str, selected_torrent_files: set[int] | 
         parsed: ParseResult = urlparse(link)
         host: str = (parsed.hostname or "").lower().removeprefix("www.")
         is_torrent: bool = parsed.scheme.lower() == "magnet"
+
+        if is_google_drive_folder_url(link):
+            async for progress_value in download_google_drive_folder(file, link):
+                yield progress_value
+
+            # Folder imports create one database file row per child, not a placeholder
+            # record for the submitted folder URL.
+            return
 
         if is_torrent:
             exact_topics: list[str | bytes] = parse_qs(parsed.query).get("xt", [])

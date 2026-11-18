@@ -44,6 +44,11 @@ function isUnresolvedName(value, sourceIsYouTube) {
 
 const LINK_STAGES = {
     "processing telegram message": "Processing Telegram message",
+    "discovering folder contents": "Discovering folder contents",
+    "creating directories": "Creating directories",
+    "downloading files": "Downloading files",
+    "waiting for upload": "Waiting for upload",
+    "google drive folder import complete": "Completed",
     "starting download": "Preparing download",
     "downloading file": "Downloading file",
     "downloading and uploading file": "Downloading file",
@@ -72,11 +77,16 @@ function belongsToTorrent(item, torrent, index) {
 function getItemProgress(item, status) {
     const size = getItemSize(item);
     const done = status === "completed";
+    const currentTransfer = status === "downloading"
+        ? num(item.download_transfer ?? item.transfer)
+        : status === "uploading"
+            ? num(item.upload_transfer ?? item.transfer)
+            : num(item.transfer);
     const hasPublishedProgress = item.progress !== undefined && item.progress !== null;
     const percent = done ? 100 : hasPublishedProgress
         ? Math.max(0, Math.min(100, num(item.progress)))
-        : size ? Math.min(100, num(item.transfer) * 100 / size) : 0;
-    return {size, percent};
+        : size ? Math.min(100, currentTransfer * 100 / size) : 0;
+    return {size, percent, transfer: done || status === "downloaded" || status === "waiting_upload" ? size : currentTransfer};
 }
 
 /* -------------------------------------------------------------------------- */
@@ -95,6 +105,7 @@ const ITEM_STATUS = {
     cancelled: {icon: "cancel", label: "Cancelled", tone: "danger"},
     skipped: {icon: "cancel", label: "Skipped", tone: "danger"},
     downloading: {icon: "cloud_download", label: "Downloading", tone: "active", transferring: true},
+    waiting_upload: {icon: "cloud_done", label: "Waiting to upload", tone: "success"},
     uploading: {icon: "cloud_upload", label: "Uploading", tone: "active", transferring: true},
     downloaded: {icon: "cloud_done", label: "Downloaded", tone: "success"},
     queued: {icon: "schedule", label: "Queued", tone: "muted"},
@@ -136,58 +147,6 @@ function formatEta(seconds) {
     return `${hours}h ${minutes}m left`;
 }
 
-/**
- * Estimate throughput from successive server progress snapshots.
- *
- * Keep this hook in the persistent file row/card rather than inside conditional
- * progress-detail markup. Brief status changes and a quiet polling interval should
- * not throw away the last useful rate estimate.
- */
-function useTransferMetrics(transfer, total, metricKey) {
-    const key = String(metricKey || "upload-tray:unknown");
-    const currentTransfer = num(transfer);
-    const [speed, setSpeed] = useState(() => {
-        const cache = window.__storeLimitlessTransferMetrics;
-        return num(cache instanceof Map ? cache.get(key)?.speed : 0);
-    });
-    const previous = useRef(null);
-
-    useEffect(() => {
-        // Keep display metrics on window so remounts and frontend HMR preserve the
-        // last sample while the server continues the real transfer.
-        if (!(window.__storeLimitlessTransferMetrics instanceof Map)) {
-            window.__storeLimitlessTransferMetrics = new Map();
-        }
-
-        const cache = window.__storeLimitlessTransferMetrics;
-        const now = Date.now();
-        const prior = previous.current || cache.get(key) || {transfer: currentTransfer, at: now, speed: 0};
-        const elapsed = Math.max(0, (now - prior.at) / 1000);
-        let nextSpeed = num(prior.speed);
-
-        if (currentTransfer < prior.transfer) {
-            nextSpeed = 0;
-        } else if (elapsed >= 0.25 && currentTransfer > prior.transfer) {
-            const measuredSpeed = (currentTransfer - prior.transfer) / elapsed;
-            nextSpeed = nextSpeed > 0 ? nextSpeed * 0.7 + measuredSpeed * 0.3 : measuredSpeed;
-        } else if (elapsed >= 4 && currentTransfer <= prior.transfer) {
-            nextSpeed = 0;
-        }
-
-        const sample = {transfer: currentTransfer, at: now, speed: nextSpeed};
-        previous.current = sample;
-        // Keep the HMR cache bounded on accounts with a large amount of upload history.
-        cache.delete(key);
-        cache.set(key, sample);
-        if (cache.size > 500) cache.delete(cache.keys().next().value);
-        setSpeed(nextSpeed);
-    }, [currentTransfer, key]);
-
-    const remaining = Math.max(0, num(total) - currentTransfer);
-    const eta = speed > 0 && remaining > 0 ? remaining / speed : null;
-    return {speed, eta, remaining};
-}
-
 function TransferDetails({transfer, total, status, compact = false, inline = false, speed = 0, eta = null}) {
     if (num(total) <= 0) return null;
 
@@ -211,13 +170,29 @@ function TransferDetails({transfer, total, status, compact = false, inline = fal
 }
 
 /** A single file/item line, shared by torrent panels and plain multi-item batches. */
-function ItemRow({item, status, metricKey}) {
+function ItemRow({
+    item,
+    status,
+    defaultDownloadSpeed = 0,
+    defaultUploadSpeed = 0,
+    defaultDownloadEta = null,
+    defaultUploadEta = null,
+}) {
     const meta = ITEM_STATUS[status] || ITEM_STATUS.queued;
-    const {size, percent} = getItemProgress(item, status);
-    const transfer = status === "completed" || status === "downloaded" ? size : num(item.transfer);
+    const {size, percent, transfer} = getItemProgress(item, status);
     const name = getFileName(item);
-    const {speed, eta} = useTransferMetrics(transfer, size, metricKey || `item:${normalizePath(item?.path || name)}`);
-    const showPercent = meta.transferring && size > 0;
+    const downloading = status === "downloading";
+    const speed = downloading
+        ? item.download_speed == null ? num(defaultDownloadSpeed) : num(item.download_speed)
+        : status === "uploading"
+            ? item.upload_speed == null ? num(defaultUploadSpeed) : num(item.upload_speed)
+            : 0;
+    const eta = downloading
+        ? item.download_eta == null ? defaultDownloadEta : num(item.download_eta)
+        : status === "uploading"
+            ? item.upload_eta == null ? defaultUploadEta : num(item.upload_eta)
+            : null;
+    const showPercent = Boolean(meta.transferring);
 
     return <div className="min-w-0 rounded-md px-2 py-2 transition-colors hover:bg-white/[0.03]">
         <div className="flex min-w-0 items-center gap-2">
@@ -227,10 +202,16 @@ function ItemRow({item, status, metricKey}) {
             <span className={`shrink-0 text-[12px] tabular-nums ${TEXT[meta.tone]}`}>{meta.label}</span>
         </div>
         {showPercent && <div className="ml-[23px] mt-1.5 min-w-0 space-y-1">
-            <ProgressBar percent={percent}/>
+            <ProgressBar percent={percent} indeterminate={size <= 0}/>
             <div className="flex min-w-0 items-center justify-between gap-2">
-                <TransferDetails transfer={transfer} total={size} status={status} inline speed={speed} eta={eta}/>
-                <span className="shrink-0 text-[11px] font-mono tabular-nums text-[#8ca296]">{percent.toFixed(0)}%</span>
+                {size > 0
+                    ? <TransferDetails transfer={transfer} total={size} status={status} inline speed={speed} eta={eta}/>
+                    : <span className="min-w-0 truncate font-mono text-[11px] text-[#789083]">
+                        {formatFileSize(transfer)} transferred · {formatRate(speed)}
+                    </span>}
+                <span className="shrink-0 text-[11px] font-mono tabular-nums text-[#8ca296]">
+                    {size > 0 ? `${percent.toFixed(0)}%` : "…"}
+                </span>
             </div>
         </div>}
     </div>;
@@ -608,8 +589,11 @@ function describeJob(job) {
      * Torrent tasks use the same aggregation so their parent counter agrees with
      * the nested per-file progress panels.
      */
-    const hasTorrentItems = torrents.length > 0 && items.length > 0;
-    const hasDetailedItems = items.length > 0 && items.some((item) => num(item.size) > 0 || num(item.total) > 0);
+    const hasTorrentItems = items.length > 0 && (
+        torrents.length > 0 || job.ingestionType === "google_drive_folder"
+    );
+    const allItemSizesKnown = items.length > 0 && items.every((item) => (num(item.size) || num(item.total)) > 0);
+    const hasDetailedItems = allItemSizesKnown;
     const itemTotal = hasDetailedItems ? items.reduce((sum, item) => sum + (num(item.size) || num(item.total)), 0) : 0;
 
     // Each torrent file is uploaded as soon as it finishes downloading. During
@@ -629,7 +613,7 @@ function describeJob(job) {
         }
         return sum + (size > 0 ? Math.min(size, transferred) : transferred);
     }, 0) : 0;
-    const total = itemTotal > 0 ? itemTotal : num(job.total);
+    const total = hasTorrentItems ? (allItemSizesKnown ? itemTotal : 0) : itemTotal > 0 ? itemTotal : num(job.total);
     const transfer = itemTotal > 0 ? Math.min(itemTotal, itemTransfer) : num(job.transfer);
 
     // Torrent files move through two independent phases. Once a file is uploading,
@@ -638,21 +622,21 @@ function describeJob(job) {
     const torrentDownloadTransfer = hasTorrentItems ? items.reduce((sum, item) => {
         const size = num(item.size) || num(item.total);
         const status = String(item.status || "queued");
-        const downloaded = ["downloaded", "uploading", "completed"].includes(status)
+        const downloaded = ["downloaded", "waiting_upload", "uploading", "completed"].includes(status)
             ? size
-            : status === "downloading" ? num(item.transfer) : 0;
+            : status === "downloading" ? num(item.download_transfer ?? item.transfer) : 0;
         return sum + (size > 0 ? Math.min(size, downloaded) : downloaded);
     }, 0) : 0;
     const torrentUploadTransfer = hasTorrentItems ? items.reduce((sum, item) => {
         const size = num(item.size) || num(item.total);
         const status = String(item.status || "queued");
-        const uploaded = status === "completed" ? size : status === "uploading" ? num(item.transfer) : 0;
+        const uploaded = status === "completed" ? size : status === "uploading" ? num(item.upload_transfer ?? item.transfer) : 0;
         return sum + (size > 0 ? Math.min(size, uploaded) : uploaded);
     }, 0) : 0;
     const torrentDownloadPercent = isComplete ? 100 : total > 0
         ? Math.max(0, Math.min(100, torrentDownloadTransfer * 100 / total))
         : itemCount > 0
-            ? items.filter((item) => ["downloaded", "uploading", "completed"].includes(String(item.status || ""))).length * 100 / itemCount
+            ? items.filter((item) => ["downloaded", "waiting_upload", "uploading", "completed"].includes(String(item.status || ""))).length * 100 / itemCount
             : 0;
     const torrentUploadPercent = isComplete ? 100 : total > 0
         ? Math.max(0, Math.min(100, torrentUploadTransfer * 100 / total))
@@ -685,7 +669,7 @@ function describeJob(job) {
     // "Downloaded" means the torrent file is fully present locally. It may still
     // be uploading to storage, so count downloaded, uploading, and completed rows.
     const downloadedFromItems = hasTorrentItems
-        ? items.filter((item) => ["downloaded", "uploading", "completed"].includes(item.status)).length
+        ? items.filter((item) => ["downloaded", "waiting_upload", "uploading", "completed"].includes(item.status)).length
         : Number(job.completedItems) || 0;
     const downloadedCount = Math.min(itemCount, downloadedFromItems);
     const finished = Math.min(itemCount, hasTorrentItems
@@ -708,13 +692,13 @@ function describeJob(job) {
     const iconTone = tone === "muted" ? (isQueued ? TEXT.success : "text-[#779184]") : TEXT[tone];
 
     const downloadTransfer = num(job.downloadTransfer);
-    const downloadTotal = num(job.downloadTotal);
-    const downloadActive = Boolean(job.downloadActive);
+    const downloadTotal = hasTorrentItems ? (allItemSizesKnown ? num(job.downloadTotal) : 0) : num(job.downloadTotal);
+    const downloadActive = Boolean(job.downloadActive) || job.ingestionType === "google_drive_folder";
     const downloadPercent = downloadTotal > 0
         ? Math.max(0, Math.min(100, downloadTransfer * 100 / downloadTotal))
         : 0;
     const storageTransfer = num(job.transfer);
-    const storageTotal = num(job.total) || total;
+    const storageTotal = hasTorrentItems ? (allItemSizesKnown ? (num(job.total) || total) : 0) : num(job.total) || total;
     const storagePercent = storageTotal > 0
         ? Math.max(0, Math.min(100, storageTransfer * 100 / storageTotal))
         : 0;
@@ -723,6 +707,9 @@ function describeJob(job) {
         isQueued, isActive, itemCount, title, statusText, statusTone: TEXT[tone], icon, iconTone, percent, transfer, total,
         hasTorrentItems, torrentDownloadTransfer, torrentUploadTransfer, torrentDownloadPercent, torrentUploadPercent,
         downloadTransfer, downloadTotal, downloadActive, downloadPercent, storageTransfer, storageTotal, storagePercent,
+        downloadSpeed: num(job.downloadSpeed), uploadSpeed: num(job.uploadSpeed),
+        downloadEta: job.downloadEta == null ? null : num(job.downloadEta),
+        uploadEta: job.uploadEta == null ? null : num(job.uploadEta),
     };
 }
 
@@ -731,14 +718,11 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
         isQueued, isActive, itemCount, title, statusText, statusTone, icon, iconTone, percent, transfer, total,
         hasTorrentItems, torrentDownloadTransfer, torrentUploadTransfer, torrentDownloadPercent, torrentUploadPercent,
         downloadTransfer, downloadTotal, downloadActive, downloadPercent, storageTransfer, storageTotal, storagePercent,
+        downloadSpeed, uploadSpeed, downloadEta, uploadEta,
     } = describeJob(job);
-    const {speed, eta} = useTransferMetrics(transfer, total, `batch:${job.jobId}`);
-    const {speed: downloadSpeed, eta: downloadEta} = useTransferMetrics(
-        downloadTransfer, downloadTotal, `batch:${job.jobId}:download`
-    );
-    const {speed: storageSpeed, eta: storageEta} = useTransferMetrics(
-        storageTransfer, storageTotal, `batch:${job.jobId}:storage-upload`
-    );
+    const isDownloadingStage = /download/i.test(String(job.message || ""));
+    const singleSpeed = isDownloadingStage ? downloadSpeed : uploadSpeed;
+    const singleEta = isDownloadingStage ? downloadEta : uploadEta;
     const showConcurrentProgress = isActive && downloadActive && !hasTorrentItems;
     const torrents = job.torrentFiles || [];
     const items = Array.isArray(job.items) ? job.items : [];
@@ -766,7 +750,11 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
                             <span className="font-mono tabular-nums text-[#c5d8cc]">{(isQueued ? 0 : torrentDownloadPercent).toFixed(1)}%</span>
                         </div>
                         <ProgressBar percent={isQueued ? 0 : torrentDownloadPercent} muted={isQueued}/>
-                        <p className="text-[11px] tabular-nums text-[#789083]">{formatFileSize(isQueued ? 0 : torrentDownloadTransfer)} / {formatFileSize(total)} downloaded</p>
+                        <p className="text-[11px] tabular-nums text-[#789083]">
+                            {total > 0
+                                ? `${formatFileSize(isQueued ? 0 : torrentDownloadTransfer)} / ${formatFileSize(total)} downloaded`
+                                : `${downloadedCount} of ${itemCount} files downloaded`}
+                        </p>
                     </div>
                     <div className="space-y-1">
                         <div className="flex items-center justify-between gap-2 text-[11px]">
@@ -778,7 +766,11 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
                             muted={isQueued}
                             fillClassName="bg-gradient-to-r from-[#3387c7] to-[#56c7db]"
                         />
-                        <p className="text-[11px] tabular-nums text-[#789083]">{formatFileSize(isQueued ? 0 : torrentUploadTransfer)} / {formatFileSize(total)} uploaded</p>
+                        <p className="text-[11px] tabular-nums text-[#789083]">
+                            {total > 0
+                                ? `${formatFileSize(isQueued ? 0 : torrentUploadTransfer)} / ${formatFileSize(total)} uploaded`
+                                : `${finished} of ${itemCount} files uploaded`}
+                        </p>
                     </div>
                 </div> : showConcurrentProgress ? <div className="mt-2.5 min-w-0 space-y-3">
                     <div className="min-w-0 space-y-1">
@@ -809,18 +801,19 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
                         <ProgressBar
                             percent={storagePercent}
                             muted={isQueued}
+                            indeterminate={storageTotal <= 0}
                             fillClassName="bg-gradient-to-r from-[#3387c7] to-[#56c7db]"
                         />
                         {storageTotal > 0
-                            ? <TransferDetails transfer={storageTransfer} total={storageTotal} status="uploading" inline speed={storageSpeed} eta={storageEta}/>
-                            : <p className="text-[11px] tabular-nums text-[#789083]">Uploaded {formatFileSize(storageTransfer)}</p>}
+                            ? <TransferDetails transfer={storageTransfer} total={storageTotal} status="uploading" inline speed={uploadSpeed} eta={uploadEta}/>
+                            : <p className="text-[11px] tabular-nums text-[#789083]">Uploaded {formatFileSize(storageTransfer)} · {formatRate(uploadSpeed)}</p>}
                     </div>
                 </div> : isActive && <div className="mt-2.5 min-w-0 space-y-1">
                     <ProgressBar percent={isQueued ? 0 : percent} muted={isQueued}/>
                     <div className="flex min-w-0 items-center justify-between gap-2">
                         {!isQueued && <TransferDetails transfer={transfer} total={total}
                                                        status={job.status === "completed" ? "completed" : (/download/i.test(String(job.message || "")) ? "downloading" : "uploading")}
-                                                       inline speed={speed} eta={eta}/>}
+                                                       inline speed={singleSpeed} eta={singleEta}/>}
                         <span className="shrink-0 text-right font-mono text-[12px] tabular-nums text-[#8ca296]">
                             {isQueued ? "Waiting" : `${percent.toFixed(1)}%`}
                         </span>
@@ -829,7 +822,15 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
 
 
                 {itemCount > 1 && items.length > 0 && <div className="mt-2.5 space-y-0.5 rounded-lg border border-[#29362e] bg-black/10 p-1.5">
-                    {items.map((item, i) => <ItemRow key={`${getFileName(item)}-${i}`} item={item} metricKey={`batch:${job.jobId}:item:${item.file_index ?? item.name}:${i}`} status={String(item.status || "queued")}/>)}
+                    {items.map((item, i) => <ItemRow
+                        key={`${getFileName(item)}-${i}`}
+                        item={item}
+                        status={String(item.status || "queued")}
+                        defaultDownloadSpeed={i === Number(job.currentIndex) ? downloadSpeed : 0}
+                        defaultUploadSpeed={i === Number(job.currentIndex) ? uploadSpeed : 0}
+                        defaultDownloadEta={i === Number(job.currentIndex) ? downloadEta : null}
+                        defaultUploadEta={i === Number(job.currentIndex) ? uploadEta : null}
+                    />)}
                 </div>}
             </div>
 

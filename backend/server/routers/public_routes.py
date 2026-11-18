@@ -56,7 +56,7 @@ async def upload_status(job_id: str, user: User = Depends(get_current_user)) -> 
         raise HTTPException(status_code=404, detail="Upload job not found")
 
     message_lower: str = progress.message.lower()
-    completed: bool = message_lower.startswith("upload complete")
+    completed: bool = message_lower.startswith("upload complete") or message_lower.startswith("google drive folder import complete")
     failed: bool = message_lower.startswith("upload failed")
     cancelled: bool = bool(metadata.get("cancelled")) or message_lower.startswith("upload cancelled")
     file_id: int | None = None
@@ -78,7 +78,18 @@ async def upload_status(job_id: str, user: User = Depends(get_current_user)) -> 
         "download_transfer": max(0, int(getattr(progress, "download_transfer", 0) or 0)),
         "download_total": max(0, int(getattr(progress, "download_total", 0) or 0)),
         "download_active": bool(getattr(progress, "download_active", False)),
-        "torrent_items": list(getattr(progress, "torrent_items", []) or []),
+        "download_speed": max(0.0, float(getattr(progress, "download_speed", 0) or 0)),
+        "upload_speed": max(0.0, float(getattr(progress, "upload_speed", 0) or 0)),
+        "download_eta": getattr(progress, "download_eta", None),
+        "upload_eta": getattr(progress, "upload_eta", None),
+        "ingestion_type": str(getattr(progress, "ingestion_type", "") or ""),
+        "file_counts": getattr(progress, "file_counts", {}) or {},
+        "last_updated_at": max(0.0, float(getattr(progress, "last_updated_at", 0) or 0)),
+        "torrent_items": [
+            {key: value for key, value in item.items() if not key.startswith("_")}
+            for item in (getattr(progress, "torrent_items", []) or [])
+            if isinstance(item, dict)
+        ],
         "file_id": file_id,
     })
 

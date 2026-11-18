@@ -241,6 +241,14 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, Any] = Body(...),
                 **({"transfer": max(0, int(item.get("transfer") or 0))} if "transfer" in item else {}),
                 **({"total": max(0, int(item.get("total") or 0))} if "total" in item else {}),
                 **({"progress": max(0.0, min(100.0, float(item.get("progress") or 0)))} if "progress" in item else {}),
+                **({"download_transfer": max(0, int(item.get("download_transfer") or 0))} if "download_transfer" in item else {}),
+                **({"download_total": max(0, int(item.get("download_total") or 0))} if "download_total" in item else {}),
+                **({"download_speed": max(0.0, float(item.get("download_speed") or 0))} if "download_speed" in item else {}),
+                **({"download_eta": None if item.get("download_eta") is None else max(0.0, float(item.get("download_eta") or 0))} if "download_eta" in item else {}),
+                **({"upload_transfer": max(0, int(item.get("upload_transfer") or 0))} if "upload_transfer" in item else {}),
+                **({"upload_total": max(0, int(item.get("upload_total") or 0))} if "upload_total" in item else {}),
+                **({"upload_speed": max(0.0, float(item.get("upload_speed") or 0))} if "upload_speed" in item else {}),
+                **({"upload_eta": None if item.get("upload_eta") is None else max(0.0, float(item.get("upload_eta") or 0))} if "upload_eta" in item else {}),
             }
             for item in items_payload if isinstance(item, dict)
         ]
@@ -546,6 +554,13 @@ async def get_upload_job_status(job_id: str, user: User = Depends(get_current_us
             "download_transfer": max(0, int(getattr(progress, "download_transfer", 0) or 0)),
             "download_total": max(0, int(getattr(progress, "download_total", 0) or 0)),
             "download_active": bool(getattr(progress, "download_active", False)),
+            "download_speed": max(0.0, float(getattr(progress, "download_speed", 0) or 0)),
+            "upload_speed": max(0.0, float(getattr(progress, "upload_speed", 0) or 0)),
+            "download_eta": getattr(progress, "download_eta", None),
+            "upload_eta": getattr(progress, "upload_eta", None),
+            "ingestion_type": str(getattr(progress, "ingestion_type", "") or ""),
+            "file_counts": getattr(progress, "file_counts", {}) or {},
+            "last_updated_at": max(0.0, float(getattr(progress, "last_updated_at", 0) or 0)),
         })
 
     terminal: Any = await Redis.get_json(terminal_upload_job_key(job_id))

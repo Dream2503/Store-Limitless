@@ -29,6 +29,13 @@ class Progress:
         self.download_transfer: int = 0
         self.download_total: int = 0
         self.download_active: bool = False
+        self.download_speed: float = 0.0
+        self.upload_speed: float = 0.0
+        self.download_eta: float | None = None
+        self.upload_eta: float | None = None
+        self.ingestion_type: str = ""
+        self.file_counts: dict[str, int] = {}
+        self.last_updated_at: float = 0.0
         self.torrent_items: list[dict[str, Any]] = []
 
     @property

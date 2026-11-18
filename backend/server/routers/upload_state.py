@@ -52,7 +52,12 @@ def resolve_upload_job_status(message: str, metadata: dict[str, Any]) -> str:
     if bool(metadata.get("cancelled")) or lowered.startswith("upload cancelled"):
         return "cancelled"
 
-    if lowered.startswith(("upload complete", "download and upload complete", "torrent download and sequential upload complete")):
+    if lowered.startswith((
+        "upload complete",
+        "download and upload complete",
+        "torrent download and sequential upload complete",
+        "google drive folder import complete",
+    )):
         return "completed"
 
     if bool(metadata.get("failed")) or lowered.startswith("upload failed"):
@@ -158,6 +163,13 @@ async def list_user_upload_jobs(username: str) -> list[dict[str, Any]]:
             "download_transfer": max(0, int(getattr(progress, "download_transfer", 0) or 0)),
             "download_total": max(0, int(getattr(progress, "download_total", 0) or 0)),
             "download_active": bool(getattr(progress, "download_active", False)),
+            "download_speed": max(0.0, float(getattr(progress, "download_speed", 0) or 0)),
+            "upload_speed": max(0.0, float(getattr(progress, "upload_speed", 0) or 0)),
+            "download_eta": getattr(progress, "download_eta", None),
+            "upload_eta": getattr(progress, "upload_eta", None),
+            "ingestion_type": str(getattr(progress, "ingestion_type", "") or ""),
+            "file_counts": getattr(progress, "file_counts", {}) or {},
+            "last_updated_at": max(0.0, float(getattr(progress, "last_updated_at", 0) or 0)),
             "created_at": int(float(metadata.get("created_at") or 0) * 1000),
         })
 
@@ -370,6 +382,11 @@ async def reconcile_completed_link_batch(batch_id: str, username: str, child_job
         for item in child_items
         if isinstance(item, dict) and item.get("file_index") is not None
     }
+    if getattr(progress, "ingestion_type", "") == "google_drive_folder" and child_items:
+        items = [
+            {key: value for key, value in item.items() if not key.startswith("_")}
+            for item in child_items if isinstance(item, dict)
+        ]
 
     # A link child only returns a terminal-success progress after the entire direct-link,
     # YouTube, or selected-torrent import has finished. Therefore every selected batch item
@@ -406,6 +423,7 @@ async def reconcile_completed_link_batch(batch_id: str, username: str, child_job
         items=items,
         total_items=total_items,
         completed_items=total_items,
+        ingestion_type=str(getattr(progress, "ingestion_type", "") or batch.get("ingestion_type") or ""),
     )
     return True
 
@@ -529,6 +547,13 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
         current_download_transfer = 0
         current_download_total = 0
         current_download_active = False
+        current_download_speed = 0.0
+        current_upload_speed = 0.0
+        current_download_eta: float | None = None
+        current_upload_eta: float | None = None
+        ingestion_type = str(metadata.get("ingestion_type") or "")
+        current_file_counts: dict[str, int] = {}
+        last_updated_at = 0.0
         current_name = str(metadata.get("current_name") or "").strip()
         current_message = str(metadata.get("message") or "")
         current_job_id = str(metadata.get("current_job_id") or "")
@@ -557,6 +582,16 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                 current_download_transfer = max(0, int(getattr(child_progress, "download_transfer", 0) or 0))
                 current_download_total = max(0, int(getattr(child_progress, "download_total", 0) or 0))
                 current_download_active = bool(getattr(child_progress, "download_active", False))
+                current_download_speed = max(0.0, float(getattr(child_progress, "download_speed", 0) or 0))
+                current_upload_speed = max(0.0, float(getattr(child_progress, "upload_speed", 0) or 0))
+                current_download_eta = getattr(child_progress, "download_eta", None)
+                current_upload_eta = getattr(child_progress, "upload_eta", None)
+                ingestion_type = str(getattr(child_progress, "ingestion_type", "") or ingestion_type)
+                current_file_counts = getattr(child_progress, "file_counts", {}) or {}
+                last_updated_at = max(0.0, float(getattr(child_progress, "last_updated_at", 0) or 0))
+                if ingestion_type and metadata.get("ingestion_type") != ingestion_type:
+                    metadata["ingestion_type"] = ingestion_type
+                    items_changed = True
                 progress_name = str(child_progress.name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
                 progress_name_lower = progress_name.casefold()
                 progress_message = str(child_progress.message or "").strip()
@@ -598,28 +633,32 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                     metadata["message"] = progress_message or (
                         "Upload cancelled" if child_status == "cancelled" else "Upload failed"
                     )
-                    active_seen = False
-                    for item in items:
-                        if item.get("status") in {"downloading", "uploading"}:
-                            if child_status == "cancelled":
+                    # Ingestion jobs publish authoritative file-level outcomes from the
+                    # server. Preserve those successes/failures instead of overwriting them
+                    # with a generic parent-level cancellation/error snapshot.
+                    if ingestion_type != "google_drive_folder":
+                        active_seen = False
+                        for item in items:
+                            if item.get("status") in {"downloading", "uploading"}:
+                                if child_status == "cancelled":
+                                    item["status"] = "cancelled"
+                                    item["message"] = "Cancelled"
+                                elif not active_seen:
+                                    item["status"] = "error"
+                                    item["message"] = metadata["message"]
+                                    active_seen = True
+                                else:
+                                    item["status"] = "skipped"
+                                    item["message"] = "Not started after failure"
+                                items_changed = True
+                            elif child_status == "cancelled" and item.get("status") == "queued":
                                 item["status"] = "cancelled"
                                 item["message"] = "Cancelled"
-                            elif not active_seen:
-                                item["status"] = "error"
-                                item["message"] = metadata["message"]
-                                active_seen = True
-                            else:
+                                items_changed = True
+                            elif child_status == "error" and item.get("status") == "queued":
                                 item["status"] = "skipped"
                                 item["message"] = "Not started after failure"
-                            items_changed = True
-                        elif child_status == "cancelled" and item.get("status") == "queued":
-                            item["status"] = "cancelled"
-                            item["message"] = "Cancelled"
-                            items_changed = True
-                        elif child_status == "error" and item.get("status") == "queued":
-                            item["status"] = "skipped"
-                            item["message"] = "Not started after failure"
-                            items_changed = True
+                                items_changed = True
                     metadata["completed_items"] = sum(1 for item in items if item.get("status") == "completed")
                     items_changed = True
 
@@ -627,7 +666,21 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                 # Rebuild the tray items from Redis on every batch poll so a frontend reload
                 # or hot-module replacement cannot strand the tray at its last browser PATCH.
                 child_items = getattr(child_progress, "torrent_items", []) or []
-                if child_items and str(metadata.get("kind") or "") == "link":
+                if ingestion_type == "google_drive_folder":
+                    folder_items = [
+                        {key: value for key, value in child_item.items() if not key.startswith("_")}
+                        for child_item in child_items if isinstance(child_item, dict)
+                    ]
+                    if folder_items and folder_items != items:
+                        items = folder_items
+                        metadata["items"] = items
+                        metadata["total_items"] = len(items)
+                        metadata["completed_items"] = sum(item.get("status") == "completed" for item in items)
+                        items_changed = True
+                    # This import creates real files under the folder tree, not a file for the URL itself.
+                    if current_name and 0 <= current_index < len(items):
+                        current_name = str(child_progress.name or current_name)
+                if child_items and str(metadata.get("kind") or "") == "link" and ingestion_type != "google_drive_folder":
                     child_by_index = {
                         int(child_item["file_index"]): child_item
                         for child_item in child_items
@@ -654,6 +707,10 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                                 or int(item.get("total") or item.get("size") or 0) != child_total
                                 or item.get("name") != child_name
                                 or item.get("message") != child_message
+                                or int(item.get("download_transfer") or 0) != int(child_item.get("download_transfer") or 0)
+                                or int(item.get("upload_transfer") or 0) != int(child_item.get("upload_transfer") or 0)
+                                or float(item.get("download_speed") or 0) != float(child_item.get("download_speed") or 0)
+                                or float(item.get("upload_speed") or 0) != float(child_item.get("upload_speed") or 0)
                         ):
                             item.update({
                                 "status": child_status,
@@ -662,6 +719,14 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                                 "size": child_total,
                                 "name": child_name,
                                 "message": child_message,
+                                "download_transfer": max(0, int(child_item.get("download_transfer") or 0)),
+                                "download_total": max(0, int(child_item.get("download_total") or child_total)),
+                                "download_speed": max(0.0, float(child_item.get("download_speed") or 0)),
+                                "download_eta": child_item.get("download_eta"),
+                                "upload_transfer": max(0, int(child_item.get("upload_transfer") or 0)),
+                                "upload_total": max(0, int(child_item.get("upload_total") or child_total)),
+                                "upload_speed": max(0.0, float(child_item.get("upload_speed") or 0)),
+                                "upload_eta": child_item.get("upload_eta"),
                             })
                             items_changed = True
 
@@ -671,7 +736,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                         items_changed = True
 
                     active_item = next(
-                        (item for item in items if item.get("status") in {"downloading", "uploading"}),
+                        (item for item in items if item.get("status") in {"downloading", "waiting_upload", "uploading"}),
                         None,
                     )
                     if active_item is not None:
@@ -682,7 +747,12 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                 pass
 
 
-        if str(metadata.get("kind") or "") == "link" and current_name and 0 <= current_index < len(items):
+        if (
+                str(metadata.get("kind") or "") == "link"
+                and ingestion_type != "google_drive_folder"
+                and current_name
+                and 0 <= current_index < len(items)
+        ):
             submitted_name = str(items[current_index].get("name") or "")
 
             if submitted_name != current_name and not current_name.lower().startswith(("http://", "https://")):
@@ -693,13 +763,47 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
             metadata["items"] = items
             await Redis.set_json(upload_batch_key(batch_id), metadata)
 
-        # The child progress above may have completed another torrent file during
-        # this poll. Re-read the reconciled count before calculating the batch bar,
-        # rather than displaying the previous poll's completed-file count.
+        # The child progress above may have completed another file during this poll.
+        # Re-read totals after rebuilding folder/torrent items rather than using stale batch metadata.
+        total_items = max(1, int(metadata.get("total_items") or len(items) or 0))
         completed_items = max(0, min(int(metadata.get("completed_items") or 0), total_items))
         current_fraction = min(1.0, current_transfer / current_total) if current_total else 0.0
         status = str(metadata.get("status") or "queued")
-        progress = 100.0 if status == "completed" else min(99.0, ((completed_items + current_fraction) / total_items) * 100.0)
+
+        if ingestion_type in {"google_drive_folder", "torrent"} and items:
+            sizes_known = all(max(0, int(item.get("size") or item.get("total") or 0)) > 0 for item in items)
+            item_count = len(items)
+            if sizes_known:
+                total_bytes = sum(max(0, int(item.get("size") or item.get("total") or 0)) for item in items)
+                downloaded_bytes = 0
+                uploaded_bytes = 0
+                for item in items:
+                    item_size = max(0, int(item.get("size") or item.get("total") or 0))
+                    item_status = str(item.get("status") or "queued")
+                    if item_status in {"waiting_upload", "uploading", "completed", "downloaded"}:
+                        downloaded_bytes += item_size
+                    elif item_status == "downloading":
+                        downloaded_bytes += min(item_size, max(0, int(item.get("download_transfer", item.get("transfer", 0)) or 0)))
+                    if item_status == "completed":
+                        uploaded_bytes += item_size
+                    elif item_status == "uploading":
+                        uploaded_bytes += min(item_size, max(0, int(item.get("upload_transfer", item.get("transfer", 0)) or 0)))
+                download_fraction = min(1.0, downloaded_bytes / total_bytes) if total_bytes else 0.0
+                upload_fraction = min(1.0, uploaded_bytes / total_bytes) if total_bytes else 0.0
+            else:
+                # When Drive does not disclose file sizes, use item counts rather than
+                # pretending that a byte-accurate percentage is known.
+                discovered = max(1, len(items))
+                statuses = [str(item.get("status") or "queued") for item in items]
+                downloaded_items = sum(value in {"downloaded", "waiting_upload", "uploading", "completed"} for value in statuses)
+                downloading_items = sum(value == "downloading" for value in statuses)
+                uploading_items = sum(value == "uploading" for value in statuses)
+                uploaded_items = sum(value == "completed" for value in statuses)
+                download_fraction = min(1.0, (downloaded_items + 0.5 * downloading_items) / discovered)
+                upload_fraction = min(1.0, (uploaded_items + 0.5 * uploading_items) / discovered)
+            progress = 100.0 if status == "completed" else min(99.0, ((download_fraction + upload_fraction) / 2) * 100.0)
+        else:
+            progress = 100.0 if status == "completed" else min(99.0, ((completed_items + current_fraction) / total_items) * 100.0)
 
         if metadata.get("cancelled"):
             status = "cancelled"
@@ -712,7 +816,9 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
             "data_center": str(metadata.get("data_center") or ""),
             "items": items,
             "torrent_files": metadata.get("torrent_files", []) if isinstance(metadata.get("torrent_files", []), list) else [],
-            "total_items": int(metadata.get("total_items") or 0),
+            "ingestion_type": ingestion_type,
+            "file_counts": current_file_counts,
+            "total_items": int(metadata.get("total_items") or len(items) or 0),
             "completed_items": completed_items,
             "current_index": current_index,
             "current_job_id": current_job_id,
@@ -724,6 +830,11 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
             "download_transfer": current_download_transfer,
             "download_total": current_download_total,
             "download_active": current_download_active,
+            "download_speed": current_download_speed,
+            "upload_speed": current_upload_speed,
+            "download_eta": current_download_eta,
+            "upload_eta": current_upload_eta,
+            "last_updated_at": last_updated_at,
             "message": current_message or status.title(),
             "created_at": int(float(metadata.get("created_at") or 0) * 1000),
         })

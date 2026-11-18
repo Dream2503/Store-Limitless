@@ -3047,6 +3047,7 @@ export default function DashboardPage({active = true} = {}) {
                 onTabSelect={handleTabChange}
                 onLogout={handleLogout}
                 onUploadClick={() => setShowUploadModal(true)}
+                onCreateFolderClick={() => setShowFolderModal(true)}
                 storageUsed={storageUsed}
             />
         </div>
@@ -3061,7 +3062,14 @@ export default function DashboardPage({active = true} = {}) {
                         setSidebarOpen(false);
                     }}
                     onLogout={handleLogout}
-                    onUploadClick={() => setShowUploadModal(true)}
+                    onUploadClick={() => {
+                        setShowUploadModal(true);
+                        setSidebarOpen(false);
+                    }}
+                    onCreateFolderClick={() => {
+                        setShowFolderModal(true);
+                        setSidebarOpen(false);
+                    }}
                     storageUsed={storageUsed}
                 />
             </div>

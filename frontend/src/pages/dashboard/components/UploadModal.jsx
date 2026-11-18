@@ -76,7 +76,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
     /** @type {[File[], import("react").Dispatch<import("react").SetStateAction<File[]>>]} */
     const [files, setFiles] = useState(() => Array.from(initialFiles || []));
     const [link, setLink] = useState("");
-    const links = link.trim() ? [link.trim()] : [];
+    // One non-empty line is one import; the current upload loop processes them in order.
+    const links = link.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
     /** @type {["file" | "link", import("react").Dispatch<import("react").SetStateAction<"file" | "link">>]} */
     const [uploadMode, setUploadMode] = useState("file");
 
@@ -371,6 +372,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             name: relativePath, size: file.size
         })) : links.map((value) => ({name: isTelegramMessageUrl(value) ? "Telegram message" : value, size: 0}));
         const queueTotal = queueItems.length;
+        // Keep the complete queue in frontend state; only the active item is shared with the server.
+        let activeQueueIndex = 0;
         setQueueProgress({current: 0, total: queueTotal});
         let batchId = "";
         let batchTransfer = null;
@@ -380,7 +383,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             const batchName = uploadMode === "link" ? "Link import" : folderRoots.length === 1 && filesWithPaths.some(({relativePath}) => relativePath.includes("/")) ? `${folderRoots[0]} (${filesWithPaths.length} file${filesWithPaths.length === 1 ? "" : "s"})` : `${filesWithPaths.length} file${filesWithPaths.length === 1 ? "" : "s"}`;
             const batchResponse = await fetch(`${API_URL}/auth/upload-batches`, {
                 method: "POST", headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"}, body: JSON.stringify({
-                    name: batchName, kind: uploadMode, directory, data_center: dataCenter, items: queueItems,
+                    name: batchName, kind: uploadMode, directory, data_center: dataCenter, items: [queueItems[0]],
                 }),
             });
             if (!batchResponse.ok) {
@@ -402,15 +405,34 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             if (!window.__storeLimitlessUploadTransfers) window.__storeLimitlessUploadTransfers = new Map();
             window.__storeLimitlessUploadTransfers.set(batchId, batchTransfer);
 
-            /** Publish queue progress to the task entry shown in the dashboard tray. */
+            /**
+             * Publish progress for the active item only. Later queue entries stay in
+             * frontend memory until the current transfer has finished.
+             */
             const publishBatch = async (updates) => {
                 if (!batchId) return;
+                const batchUpdates = {...updates};
+                if (queueItems.length > 1) {
+                    if (batchUpdates.item_index != null) batchUpdates.item_index = 0;
+                    if (batchUpdates.current_index != null) {
+                        batchUpdates.current_index = batchUpdates.status === "completed" ? 1 : 0;
+                    }
+                    if (batchUpdates.completed_items != null) {
+                        batchUpdates.completed_items = batchUpdates.item_status === "completed" || batchUpdates.status === "completed" ? 1 : 0;
+                    }
+                    if (Array.isArray(batchUpdates.items)) {
+                        batchUpdates.items = [{
+                            ...(queueItems[activeQueueIndex] || queueItems[0]),
+                            ...batchUpdates.items[0],
+                        }];
+                    }
+                }
                 const currentToken = localStorage.getItem("token");
                 if (!currentToken) throw new Error("Your session has expired.");
                 const response = await fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(batchId)}`, {
                     method: "PATCH",
                     headers: {Authorization: `Bearer ${currentToken}`, "Content-Type": "application/json"},
-                    body: JSON.stringify(updates),
+                    body: JSON.stringify(batchUpdates),
                 });
                 if (!response.ok) {
                     let detail = `Could not update upload task (${response.status})`;
@@ -423,7 +445,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     throw new Error(detail);
                 }
                 const result = await response.json().catch(() => ({}));
-                if (result.status === "cancelled" && updates.status !== "cancelled") {
+                if (result.status === "cancelled" && batchUpdates.status !== "cancelled") {
                     cancelToken.cancelled = true;
                     throw new Error("Upload task was cancelled.");
                 }
@@ -458,7 +480,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         kind: uploadMode,
                         directory,
                         data_center: dataCenter,
-                        items: queueItems,
+                        items: [queueItems[activeQueueIndex] || queueItems[0]],
                     }),
                 });
                 const payload = await response.json().catch(() => ({}));
@@ -537,13 +559,9 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             // contains every selected file/link, even though transfers run one at a time.
             if (modal) onClose?.(); else navigate(directoryToRoute(directory));
 
-            if (torrentLinks.length > 0) {
-                if (torrentLinks.length !== links.length) {
-                    throw new Error("Please submit torrent magnets separately from regular links so each import can be selected safely.");
-                }
-
-                // Inspection runs after the modal closes. The upload tray owns the task while
-                // metadata resolves, so the rest of the website remains usable.
+            if (torrentLinks.length === 1 && links.length === 1) {
+                // Keep the existing single-torrent selection flow. Multi-link queues use
+                // the frontend's sequential worker below, including torrent magnets.
                 void (async () => {
                     try {
                         await publishBatch({
@@ -615,6 +633,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         }
                     } finally {
                         window.__storeLimitlessUploadTransfers?.delete(batchId);
+                        uploadRunRef.current = false;
                     }
                 })();
                 return;
@@ -782,8 +801,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
                 for (const [index, {file: selectedFile, relativePath}] of filesWithPaths.entries()) {
                     if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
+                    activeQueueIndex = index;
                     setQueueProgress({current: index + 1, total: filesWithPaths.length});
                     await publishBatch({
+                        items: [{...queueItems[index], status: "queued", message: "Queued in browser"}],
+                        total_items: 1,
+                        current_index: 0,
+                        completed_items: 0,
                         status: "uploading",
                         current_index: index,
                         completed_items: successfulItems,
@@ -831,8 +855,13 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
             } else {
                 for (const [index, selectedLink] of links.entries()) {
                     if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
+                    activeQueueIndex = index;
                     setQueueProgress({current: index + 1, total: links.length});
                     await publishBatch({
+                        items: [{...queueItems[index], status: "queued", message: "Queued in browser"}],
+                        total_items: 1,
+                        current_index: 0,
+                        completed_items: 0,
                         status: "uploading",
                         current_index: index,
                         completed_items: successfulItems,
@@ -1293,7 +1322,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                         Import from Link
                                     </p>
                                     <p className="text-xs text-[#898989]">
-                                        Import one HTTP(S) URL, public Telegram file-message link, or torrent magnet per task.
+                                        Paste multiple URLs or torrent magnets, one per line.
                                     </p>
                                 </div>
                             </div>
@@ -1303,21 +1332,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             <span className="material-symbols-outlined absolute left-3 top-3 text-[18px] text-[#707070]">
                                 link
                             </span>
-                                <input
-                                    type="text"
-                                    inputMode="url"
+                                <textarea
+                                    rows={Math.min(6, Math.max(3, links.length))}
                                     autoComplete="off"
                                     spellCheck={false}
                                     value={link}
                                     disabled={status === "uploading"}
-                                    onPaste={(event) => {
-                                        const pasted = event.clipboardData.getData("text/plain").trim();
-                                        if (/[\r\n]/.test(pasted)) {
-                                            event.preventDefault();
-                                            setMessage("Only one link can be imported per task. Paste a single URL or torrent magnet.");
-                                            setStatus("error");
-                                        }
-                                    }}
                                     onChange={(event) => {
                                         setLink(event.target.value);
                                         setMessage("");
@@ -1328,25 +1348,19 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                                         setTorrentSelectionReady(false);
                                         setTorrentSelectionModal(false);
                                     }}
-                                    placeholder="https://example.com/file.zip, https://t.me/channel/123 or magnet:?xt=urn:btih:..."
-                                    className={["w-full h-11 rounded-md border border-[#363636]", "bg-white/[0.026] pl-10 pr-3 py-2 text-sm text-[#fafafa]", "placeholder:text-[#707070] outline-none transition-colors", "focus:border-[#707070] focus:ring-2 focus:ring-[#4d4d4d]/50", "disabled:opacity-60",].join(" ")}
+                                    placeholder={"Paste one link per line\nhttps://example.com/file.zip\nhttps://t.me/channel/123\nmagnet:?xt=urn:btih:..."}
+                                    aria-label="Links to import, one per line"
+                                    className={["w-full min-h-[88px] resize-y rounded-md border border-[#363636]", "bg-white/[0.026] pl-10 pr-3 py-2 text-sm text-[#fafafa]", "placeholder:text-[#707070] outline-none transition-colors", "focus:border-[#707070] focus:ring-2 focus:ring-[#4d4d4d]/50", "disabled:opacity-60",].join(" ")}
                                 />
                             </div>
 
                             {/* LINK DETECTED */}
-                            {links.length > 0 && (<div className="flex items-center gap-1.5 mt-3 text-[#3ecf8e]">
-                            <span className="material-symbols-outlined text-[16px]">
-                                check_circle
-                            </span>
-                                <p className="text-xs">
-                                    Link ready to import
-                                </p>
+                            {links.length > 0 && (<div className="mt-3 flex items-center gap-1.5 text-[#3ecf8e]">
+                                <span className="material-symbols-outlined text-[16px]" aria-hidden="true">check_circle</span>
+                                <p className="text-xs">{links.length} link{links.length === 1 ? "" : "s"} ready to import sequentially</p>
                             </div>)}
-                            <p className="text-xs text-[#707070] mt-3 leading-relaxed">
-                                Enter one publicly accessible HTTP(S) URL, one public Telegram file-message link, or one valid torrent magnet URI.
-                                Telegram links must point to a public post with a downloadable attachment. Private /c/ links, invite-only chats,
-                                and messages without a file attachment are rejected with a specific error. Multiple links in a single task are
-                                disabled. Torrent contents are downloaded completely before their files are uploaded, and torrent folder paths are preserved.
+                            <p className="mt-3 text-xs leading-relaxed text-[#707070]">
+                                Each non-empty line is added to the queue and imported one at a time, in order. Telegram links must point to a public post with a downloadable attachment. Private /c/ links, invite-only chats, and messages without a file attachment are rejected with a specific error. Torrent magnets can be queued together with other links; choose torrent files when prompted.
                             </p>
                         </div>
                     </div>)}
@@ -1370,7 +1384,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         <span className="material-symbols-outlined text-[16px]">
                             cloud_upload
                         </span>
-                            {uploadMode === "link" ? `${torrentSelectionReady ? "Start importing" : "Import link"}` : `Upload ${files.length} File${files.length === 1 ? "" : "s"}`}
+                            {uploadMode === "link" ? (torrentSelectionReady ? "Start importing" : `Import ${links.length} link${links.length === 1 ? "" : "s"}`) : `Upload ${files.length} File${files.length === 1 ? "" : "s"}`}
                         </>)}
                     </button>
 

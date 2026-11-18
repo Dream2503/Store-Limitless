@@ -107,7 +107,7 @@ export default function DashboardPage({active = true} = {}) {
     const navigate = useNavigate();
     const location = useLocation();
     const isDashboardRoute = location.pathname === "/home" || location.pathname.startsWith("/home/");
-    const isFilePreviewRoute = /^\\/(?:view|s)\\/[^/]+\\/?$/.test(location.pathname);
+    const isFilePreviewRoute = location.pathname.startsWith("/view/") || location.pathname.startsWith("/s/");
     // Keep the cached dashboard surface visible underneath a file preview.
     // The preview is stacked above it, so returning never depends on restoring
     // visibility after PDF.js has been torn down.

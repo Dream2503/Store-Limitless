@@ -10,7 +10,7 @@ import ItemDetailsModal from "./dashboard/components/ItemDetailsModal.jsx";
 import DashboardContextMenu from "./dashboard/components/DashboardContextMenu.jsx";
 import DashboardWorkspace from "./dashboard/components/DashboardWorkspace.jsx";
 import UploadJobsTray from "./dashboard/components/UploadJobsTray.jsx";
-import {listResumableDownloads, removeResumableDownload, saveResumableDownload} from "./dashboard/utils/resumableDownloads.js";
+import {listResumableDownloads, listResumableDownloadChunks, removeResumableDownload, removeResumableDownloadChunks, removeResumableDownloadChunksFrom, saveResumableDownload, saveResumableDownloadChunk} from "./dashboard/utils/resumableDownloads.js";
 import BulkActionConfirmModal from "./dashboard/components/BulkActionConfirmModal.jsx";
 import useDashboardData, {clearDashboardTreeCache} from "./dashboard/hooks/useDashboardData.js";
 import useGlobalFileSearch from "./dashboard/hooks/useGlobalFileSearch.js";
@@ -164,60 +164,146 @@ export default function DashboardPage() {
 
         try {
             if (job.blobFallback) {
-                const response = await fetch(job.url, {signal: controller.signal, cache: "no-store"});
-                if (!response.ok) throw new Error(`Download failed (${response.status}).`);
+                // Browsers without OPFS/save-file-picker support still get durable,
+                // resumable downloads. Persist each complete HTTP byte range in
+                // IndexedDB, then continue at the first byte that is not saved.
+                const head = await fetch(job.url, {
+                    method: "HEAD",
+                    signal: controller.signal,
+                    cache: "no-store",
+                });
+                if (!head.ok) throw new Error(`Could not verify download source (${head.status}).`);
 
-                const contentLength = response.headers.get("content-length");
-                const latestTotal = contentLength ? Number(contentLength) : Number(job.total || 0);
+                const latestTotal = Number(head.headers.get("content-length") || job.total || 0);
+                if (!Number.isSafeInteger(latestTotal) || latestTotal <= 0) {
+                    throw new Error("The server did not provide a valid file size for resumable downloading.");
+                }
+
+                const latestEtag = head.headers.get("etag") || job.etag || "";
+                const rangeSize = 8 * 1024 * 1024;
+                let savedChunks = await listResumableDownloadChunks(job.id);
+
+                // Never combine ranges from different versions of a file.
+                const sourceChanged = (Boolean(job.etag && latestEtag) && job.etag !== latestEtag)
+                    || (Number(job.total) > 0 && Number(job.total) !== latestTotal);
+                if (sourceChanged) {
+                    await removeResumableDownloadChunks(job.id);
+                    savedChunks = [];
+                }
+
+                const chunksByOffset = new Map(savedChunks.map((chunk) => [Number(chunk.offset), chunk]));
+                let transferred = 0;
+                while (transferred < latestTotal) {
+                    const savedChunk = chunksByOffset.get(transferred);
+                    if (!savedChunk) break;
+                    const savedLength = savedChunk.bytes?.byteLength ?? savedChunk.bytes?.length ?? 0;
+                    const expectedLength = Math.min(rangeSize, latestTotal - transferred);
+                    if (savedLength !== expectedLength) break;
+                    transferred += savedLength;
+                }
+
+                // Discard any non-contiguous suffix. A range is only considered
+                // complete after its entire response has been saved atomically.
+                if (savedChunks.some((chunk) => Number(chunk.offset) >= transferred)) {
+                    await removeResumableDownloadChunksFrom(job.id, transferred);
+                    savedChunks = savedChunks.filter((chunk) => Number(chunk.offset) < transferred);
+                }
+
                 updateDownloadJob(job.id, {
                     status: "downloading",
                     total: latestTotal,
-                    transferred: 0,
-                    message: "Downloading to temporary browser memory",
+                    etag: latestEtag,
+                    transferred,
+                    message: transferred ? "Resuming from saved progress" : "Downloading · resumable",
                 });
 
-                const chunks = [];
-                let transferred = 0;
-                let lastReported = 0;
-                const reader = response.body?.getReader();
+                while (transferred < latestTotal) {
+                    if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
 
-                if (reader) {
-                    try {
-                        while (true) {
-                            if (controller.signal.aborted) {
-                                await reader.cancel().catch(() => {});
-                                throw new DOMException("Download paused", "AbortError");
+                    const end = Math.min(transferred + rangeSize, latestTotal) - 1;
+                    let rangeBytes = null;
+                    let lastError = null;
+
+                    for (let attempt = 0; attempt < 5; attempt += 1) {
+                        try {
+                            const headers = {Range: `bytes=${transferred}-${end}`};
+                            if (latestEtag) headers["If-Range"] = latestEtag;
+                            const requestSignal = typeof AbortSignal.any === "function" && typeof AbortSignal.timeout === "function"
+                                ? AbortSignal.any([controller.signal, AbortSignal.timeout(180000)])
+                                : controller.signal;
+                            const response = await fetch(job.url, {
+                                headers,
+                                signal: requestSignal,
+                                cache: "no-store",
+                            });
+
+                            if (response.status === 200) {
+                                await response.body?.cancel();
+                                throw new Error("The server did not honor byte-range requests, so safe resume is unavailable.");
+                            }
+                            if (response.status !== 206) {
+                                throw new Error(`Download range failed (${response.status}).`);
                             }
 
-                            const {done, value} = await reader.read();
-                            if (done) break;
-                            if (!value?.byteLength) continue;
+                            const contentRange = response.headers.get("content-range") || "";
+                            if (contentRange !== `bytes ${transferred}-${end}/${latestTotal}`) {
+                                await response.body?.cancel();
+                                throw new Error(`Unexpected Content-Range: ${contentRange || "missing"}`);
+                            }
 
-                            chunks.push(value);
-                            transferred += value.byteLength;
-
-                            if (transferred - lastReported >= 1024 * 1024 || (latestTotal > 0 && transferred >= latestTotal)) {
-                                updateDownloadJob(job.id, {
-                                    transferred,
-                                    total: latestTotal,
-                                    message: "Downloading to temporary browser memory",
-                                });
-                                lastReported = transferred;
+                            const bytes = await response.arrayBuffer();
+                            if (bytes.byteLength !== end - transferred + 1) {
+                                throw new Error(`Incomplete range: received ${bytes.byteLength} bytes.`);
+                            }
+                            rangeBytes = bytes;
+                            break;
+                        } catch (error) {
+                            if (controller.signal.aborted || error?.name === "AbortError") throw error;
+                            lastError = error;
+                            if (attempt < 4) {
+                                await new Promise((resolve) => window.setTimeout(resolve, Math.min(1000 * (2 ** attempt), 8000)));
                             }
                         }
-                    } finally {
-                        reader.releaseLock();
                     }
-                } else {
-                    const bytes = await response.arrayBuffer();
-                    chunks.push(bytes);
-                    transferred = bytes.byteLength;
+
+                    if (!rangeBytes) throw lastError || new Error("Download range failed after repeated attempts.");
+
+                    // Save bytes before committing the new offset; if the tab closes
+                    // at any earlier point, this range will simply be requested again.
+                    await saveResumableDownloadChunk(job.id, transferred, rangeBytes);
+                    transferred += rangeBytes.byteLength;
+                    updateDownloadJob(job.id, {
+                        status: "downloading",
+                        transferred,
+                        total: latestTotal,
+                        etag: latestEtag,
+                        message: "Downloading · resumable",
+                    });
                 }
 
-                if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
+                savedChunks = await listResumableDownloadChunks(job.id);
+                const blobParts = [];
+                let verifiedOffset = 0;
+                for (const chunk of savedChunks) {
+                    if (Number(chunk.offset) !== verifiedOffset) {
+                        throw new Error("Saved download data has a gap. Resume the download to repair it.");
+                    }
+                    const expectedLength = Math.min(rangeSize, latestTotal - verifiedOffset);
+                    const bytes = chunk.bytes;
+                    const chunkLength = bytes?.byteLength ?? bytes?.length ?? 0;
+                    if (chunkLength !== expectedLength) {
+                        throw new Error("A saved download range is incomplete. Resume the download to repair it.");
+                    }
+                    blobParts.push(bytes);
+                    verifiedOffset += chunkLength;
+                    if (verifiedOffset === latestTotal) break;
+                }
+                if (verifiedOffset !== latestTotal) {
+                    throw new Error(`Incomplete download: received ${verifiedOffset} of ${latestTotal} bytes.`);
+                }
 
-                const blob = new Blob(chunks, {
-                    type: response.headers.get("content-type") || "application/octet-stream",
+                const blob = new Blob(blobParts, {
+                    type: head.headers.get("content-type") || "application/octet-stream",
                 });
                 const objectUrl = URL.createObjectURL(blob);
                 const anchor = document.createElement("a");
@@ -229,15 +315,17 @@ export default function DashboardPage() {
                 anchor.remove();
                 window.setTimeout(() => URL.revokeObjectURL(objectUrl), 5 * 60 * 1000);
 
+                await removeResumableDownloadChunks(job.id).catch((error) => {
+                    console.warn("Could not clear completed download chunks:", error);
+                });
                 updateDownloadJob(job.id, {
                     status: "completed",
-                    transferred,
-                    total: latestTotal || transferred,
-                    message: "Download staged in browser memory · browser download started",
+                    transferred: latestTotal,
+                    total: latestTotal,
+                    message: "Complete · browser download started",
                 });
                 return;
             }
-
             const staged = Boolean(job.tempName);
             const handle = staged
                 ? await (await navigator.storage.getDirectory()).getFileHandle(job.tempName, {create: true})
@@ -397,10 +485,10 @@ export default function DashboardPage() {
             if (error?.name === "AbortError" || controller.signal.aborted) {
                 updateDownloadJob(job.id, {
                     status: "paused",
-                    transferred: job.streamOnly || job.blobFallback ? 0 : (downloadJobsRef.current.find((item) => item.id === job.id)?.transferred || 0),
+                    transferred: job.streamOnly ? 0 : (downloadJobsRef.current.find((item) => item.id === job.id)?.transferred || 0),
                     message: job.streamOnly
                         ? "Paused · resuming restarts the ZIP transfer"
-                        : job.blobFallback ? "Paused · resuming restarts the transfer" : "Paused",
+                        : job.blobFallback ? "Paused · resume continues from saved progress" : "Paused",
                 });
             } else {
                 updateDownloadJob(job.id, {status: "error", message: error?.message || "Download failed"});
@@ -425,6 +513,7 @@ export default function DashboardPage() {
         downloadControllersRef.current.delete(jobId);
         const job = downloadJobsRef.current.find((item) => item.id === jobId);
         removeStagedFile(job);
+        removeResumableDownloadChunks(jobId).catch((error) => console.warn("Could not remove saved download chunks:", error));
         const next = downloadJobsRef.current.filter((item) => item.id !== jobId);
         downloadJobsRef.current = next;
         setDownloadJobs(next);
@@ -433,12 +522,30 @@ export default function DashboardPage() {
     const clearCompletedDownloads = () => {
         downloadJobsRef.current.filter((job) => job.status === "completed" || job.status === "error").forEach((job) => {
             removeStagedFile(job);
+            removeResumableDownloadChunks(job.id).catch(() => {
+            });
             removeResumableDownload(job.id).catch(() => {
             });
         });
         const next = downloadJobsRef.current.filter((job) => job.status !== "completed" && job.status !== "error");
         downloadJobsRef.current = next;
         setDownloadJobs(next);
+    };
+
+    /** Cancel active transfers and clear upload/download task history together. */
+    const clearAllTasks = () => {
+        clearAllUploadJobs();
+
+        const jobs = downloadJobsRef.current;
+        for (const job of jobs) {
+            downloadControllersRef.current.get(job.id)?.abort();
+            removeStagedFile(job);
+            removeResumableDownloadChunks(job.id).catch((error) => console.warn("Could not clear saved download chunks:", error));
+            removeResumableDownload(job.id).catch((error) => console.warn("Could not clear download task:", error));
+        }
+
+        downloadJobsRef.current = [];
+        setDownloadJobs([]);
     };
     const [showFolderModal, setShowFolderModal] = useState(false);
     const [showUploadModal, setShowUploadModal] = useState(false);
@@ -2809,6 +2916,7 @@ export default function DashboardPage() {
             cancelUploadJob={cancelUploadJob}
             dismissUploadJob={dismissUploadJob}
             clearAllUploadJobs={clearAllUploadJobs}
+            clearAllTasks={clearAllTasks}
             downloadJobs={downloadJobs}
             pauseDownload={pauseDownload}
             resumeDownload={resumeDownload}

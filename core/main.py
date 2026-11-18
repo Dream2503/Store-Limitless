@@ -70,7 +70,11 @@ async def main() -> None:
             environ["VITE_API_URL"] = api_url
             app.add_middleware(
                 CORSMiddleware,
-                allow_origins=[website_url],
+                # The stable Vercel API host redirects public byte-range downloads to
+                # the active Cloudflare tunnel. Browsers can send Origin: null on the
+                # redirected range preflight, so explicitly allow it for this token-based
+                # download flow; the other authenticated API routes still require a bearer token.
+                allow_origins=[website_url, "null"],
                 allow_credentials=True,
                 allow_methods=["*"],
                 allow_headers=["*"],

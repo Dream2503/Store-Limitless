@@ -112,10 +112,10 @@ function Icon({name, className = "", style}) {
     return <span className={`material-symbols-outlined shrink-0 ${className}`} style={style} aria-hidden="true">{name}</span>;
 }
 
-function ProgressBar({percent, muted = false, className = ""}) {
+function ProgressBar({percent, muted = false, className = "", fillClassName = FILL}) {
     return <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}
                 className={`h-1 overflow-hidden rounded-full bg-[#29372e] ${className}`}>
-        <div className={`h-full rounded-full transition-[width] duration-500 ease-linear motion-reduce:transition-none ${muted ? "bg-[#7f8f84]" : FILL}`}
+        <div className={`h-full rounded-full transition-[width] duration-500 ease-linear motion-reduce:transition-none ${muted ? "bg-[#7f8f84]" : fillClassName}`}
              style={{width: `${percent}%`}}/>
     </div>;
 }
@@ -629,6 +629,34 @@ function describeJob(job) {
     }, 0) : 0;
     const total = itemTotal > 0 ? itemTotal : num(job.total);
     const transfer = itemTotal > 0 ? Math.min(itemTotal, itemTransfer) : num(job.transfer);
+
+    // Torrent files move through two independent phases. Once a file is uploading,
+    // its torrent download is already complete, while item.transfer now reports
+    // bytes uploaded to storage. Calculate each whole-task bar from that distinction.
+    const torrentDownloadTransfer = hasTorrentItems ? items.reduce((sum, item) => {
+        const size = num(item.size) || num(item.total);
+        const status = String(item.status || "queued");
+        const downloaded = ["downloaded", "uploading", "completed"].includes(status)
+            ? size
+            : status === "downloading" ? num(item.transfer) : 0;
+        return sum + (size > 0 ? Math.min(size, downloaded) : downloaded);
+    }, 0) : 0;
+    const torrentUploadTransfer = hasTorrentItems ? items.reduce((sum, item) => {
+        const size = num(item.size) || num(item.total);
+        const status = String(item.status || "queued");
+        const uploaded = status === "completed" ? size : status === "uploading" ? num(item.transfer) : 0;
+        return sum + (size > 0 ? Math.min(size, uploaded) : uploaded);
+    }, 0) : 0;
+    const torrentDownloadPercent = isComplete ? 100 : total > 0
+        ? Math.max(0, Math.min(100, torrentDownloadTransfer * 100 / total))
+        : itemCount > 0
+            ? items.filter((item) => ["downloaded", "uploading", "completed"].includes(String(item.status || ""))).length * 100 / itemCount
+            : 0;
+    const torrentUploadPercent = isComplete ? 100 : total > 0
+        ? Math.max(0, Math.min(100, torrentUploadTransfer * 100 / total))
+        : itemCount > 0
+            ? items.filter((item) => item.status === "completed").length * 100 / itemCount
+            : 0;
     const hasExplicitItemProgress = hasDetailedItems && items.some((item) => item.progress !== undefined && item.progress !== null);
     const progressWeightedByItem = hasExplicitItemProgress ? items.reduce((sum, item) => {
         const size = num(item.size) || num(item.total);
@@ -677,11 +705,17 @@ function describeJob(job) {
     const icon = isError ? "error" : isCancelled ? "cancel" : isComplete ? "check_circle" : isQueued ? "schedule" : "upload_file";
     const iconTone = tone === "muted" ? (isQueued ? TEXT.success : "text-[#779184]") : TEXT[tone];
 
-    return {isQueued, isActive, itemCount, title, statusText, statusTone: TEXT[tone], icon, iconTone, percent, transfer, total};
+    return {
+        isQueued, isActive, itemCount, title, statusText, statusTone: TEXT[tone], icon, iconTone, percent, transfer, total,
+        hasTorrentItems, torrentDownloadTransfer, torrentUploadTransfer, torrentDownloadPercent, torrentUploadPercent,
+    };
 }
 
 function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
-    const {isQueued, isActive, itemCount, title, statusText, statusTone, icon, iconTone, percent, transfer, total} = describeJob(job);
+    const {
+        isQueued, isActive, itemCount, title, statusText, statusTone, icon, iconTone, percent, transfer, total,
+        hasTorrentItems, torrentDownloadTransfer, torrentUploadTransfer, torrentDownloadPercent, torrentUploadPercent,
+    } = describeJob(job);
     const {speed, eta} = useTransferMetrics(transfer, total, `batch:${job.jobId}`);
     const torrents = job.torrentFiles || [];
     const items = Array.isArray(job.items) ? job.items : [];
@@ -702,7 +736,28 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
                     Select files and start
                 </button>}
 
-                {isActive && <div className="mt-2.5 min-w-0 space-y-1">
+                {isActive && hasTorrentItems ? <div className="mt-2.5 min-w-0 space-y-2.5">
+                    <div className="space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="font-medium text-[#a9d8bb]">Overall download</span>
+                            <span className="font-mono tabular-nums text-[#c5d8cc]">{(isQueued ? 0 : torrentDownloadPercent).toFixed(1)}%</span>
+                        </div>
+                        <ProgressBar percent={isQueued ? 0 : torrentDownloadPercent} muted={isQueued}/>
+                        <p className="text-[11px] tabular-nums text-[#789083]">{formatFileSize(isQueued ? 0 : torrentDownloadTransfer)} / {formatFileSize(total)} downloaded</p>
+                    </div>
+                    <div className="space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="font-medium text-[#91c9ef]">Overall upload</span>
+                            <span className="font-mono tabular-nums text-[#c5d8e4]">{(isQueued ? 0 : torrentUploadPercent).toFixed(1)}%</span>
+                        </div>
+                        <ProgressBar
+                            percent={isQueued ? 0 : torrentUploadPercent}
+                            muted={isQueued}
+                            fillClassName="bg-gradient-to-r from-[#3387c7] to-[#56c7db]"
+                        />
+                        <p className="text-[11px] tabular-nums text-[#789083]">{formatFileSize(isQueued ? 0 : torrentUploadTransfer)} / {formatFileSize(total)} uploaded</p>
+                    </div>
+                </div> : isActive && <div className="mt-2.5 min-w-0 space-y-1">
                     <ProgressBar percent={isQueued ? 0 : percent} muted={isQueued}/>
                     <div className="flex min-w-0 items-center justify-between gap-2">
                         {!isQueued && <TransferDetails transfer={transfer} total={total}
@@ -740,6 +795,7 @@ export default function UploadJobsTray({
     cancelUploadJob,
     dismissUploadJob,
     clearAllUploadJobs,
+    clearAllTasks,
     downloadJobs = [],
     pauseDownload,
     resumeDownload,
@@ -761,6 +817,7 @@ export default function UploadJobsTray({
     const [selectionIndex, setSelectionIndex] = useState(0);
     const [starting, setStarting] = useState(false);
     const [error, setError] = useState("");
+    const clearTasks = clearAllTasks || clearAllUploadJobs;
     // Batches that have already prompted automatically, so the 1-second polling refresh
     // can't reopen a picker the user deliberately closed.
     const promptedRef = useRef(new Set());
@@ -924,11 +981,11 @@ export default function UploadJobsTray({
                                 aria-label="Minimize task tray">
                             <Icon name={minimized ? "expand_less" : "minimize"} className="text-[17px]"/>
                         </button>
-                        <button type="button" onClick={() => clearAllUploadJobs?.()}
+                        {!readOnlyDownloads && typeof clearTasks === "function" && <button type="button" onClick={() => clearTasks()}
                                 className="rounded-md px-2 py-1 text-[12px] text-[#b0c8b9] transition-colors hover:bg-white/5 hover:text-[#f3f7f4]"
-                                title="Cancel active uploads and clear upload history">
-                            Clear uploads
-                        </button>
+                                title="Cancel active tasks and clear task history">
+                            Clear tasks
+                        </button>}
                     </div>
                 </header>
 

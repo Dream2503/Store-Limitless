@@ -432,6 +432,52 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 return result;
             };
 
+            /**
+             * Re-register an inspection failure if the backend restarted and lost the
+             * transient Redis batch between preview and failure reporting. This keeps
+             * the failure visible in the task tray instead of repeatedly PATCHing a
+             * batch ID that no longer exists.
+             */
+            const publishInspectionFailure = async (message) => {
+                try {
+                    await publishBatch({status: "error", message});
+                    return;
+                } catch (publishError) {
+                    if (!/upload task not found/i.test(String(publishError?.message || ""))) {
+                        throw publishError;
+                    }
+                }
+
+                const previousBatchId = batchId;
+                const currentToken = localStorage.getItem("token");
+                if (!currentToken) throw new Error("Your session has expired.");
+
+                const response = await fetch(`${API_URL}/auth/upload-batches`, {
+                    method: "POST",
+                    headers: {Authorization: `Bearer ${currentToken}`, "Content-Type": "application/json"},
+                    body: JSON.stringify({
+                        name: batchName,
+                        kind: uploadMode,
+                        directory,
+                        data_center: dataCenter,
+                        items: queueItems,
+                    }),
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload.detail || `Could not restore failed torrent task (${response.status}).`);
+                }
+
+                batchId = String(payload.batch_id || "");
+                if (!batchId) throw new Error("The server did not return a replacement task ID.");
+
+                const transfers = window.__storeLimitlessUploadTransfers;
+                transfers?.delete(previousBatchId);
+                if (batchTransfer && transfers) transfers.set(batchId, batchTransfer);
+
+                await publishBatch({status: "error", message});
+            };
+
             // Coalesce frequent XMLHttpRequest progress events into small Redis patches.
             // Keep writes ordered so an older progress snapshot cannot overwrite a newer one.
             let pendingProgressUpdate = null;
@@ -507,9 +553,26 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         });
                         const previews = await Promise.all(torrentLinks.map(async ({value, index}) => {
                             const params = new URLSearchParams({link: value});
-                            const response = await fetch(`${API_URL}/auth/torrent-preview?${params.toString()}`, {
-                                headers: {Authorization: `Bearer ${token}`}, cache: "no-store",
-                            });
+                            let response;
+                            for (let attempt = 0; attempt < 3; attempt += 1) {
+                                try {
+                                    response = await fetch(`${API_URL}/auth/torrent-preview?${params.toString()}`, {
+                                        headers: {Authorization: `Bearer ${token}`}, cache: "no-store",
+                                    });
+                                } catch (error) {
+                                    if (attempt === 2) throw error;
+                                    await new Promise((resolve) => window.setTimeout(resolve, 1000 * (attempt + 1)));
+                                    continue;
+                                }
+
+                                // A transient Cloudflare/Vercel upstream 502/503 can occur
+                                // while the Colab tunnel is reconnecting. Retry those responses,
+                                // but do not repeat slow metadata discovery for validation errors.
+                                if (![502, 503].includes(response.status) || attempt === 2) break;
+                                await response.body?.cancel();
+                                await new Promise((resolve) => window.setTimeout(resolve, 1000 * (attempt + 1)));
+                            }
+
                             if (!response.ok) {
                                 let detail = `Could not inspect torrent (${response.status})`;
                                 try {
@@ -546,12 +609,11 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             })),
                         });
                     } catch (error) {
+                        const message = error instanceof Error ? error.message : "Could not inspect torrent metadata.";
                         try {
-                            await publishBatch({
-                                status: "error", message: error instanceof Error ? error.message : "Could not inspect torrent metadata.",
-                            });
+                            await publishInspectionFailure(message);
                         } catch (publishError) {
-                            console.error("Could not update failed torrent inspection task:", publishError);
+                            console.error("Could not preserve failed torrent inspection task:", publishError);
                         }
                     } finally {
                         window.__storeLimitlessUploadTransfers?.delete(batchId);

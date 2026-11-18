@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import math
 import re
+import shutil
 import unicodedata
 from hashlib import sha256
+from pathlib import Path
+from time import monotonic
 from mimetypes import guess_type
 from typing import cast, Any
 from urllib.parse import quote
@@ -192,6 +198,448 @@ async def _owned_public_file(token: str, request: Request) -> File:
         raise HTTPException(status_code=404, detail="File not found", headers=_public_cors_headers(request))
 
     return file
+
+
+# Track-aware playback is generated from the existing stored byte-range stream.
+# Segment payloads are returned from FFmpeg stdout; no HLS or media files are written to disk.
+_MEDIA_INFO_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_MEDIA_INFO_TTL: float = 300.0
+_MEDIA_SEGMENT_SECONDS: int = 6
+_MEDIA_MAX_SEGMENTS: int = 50000
+_MEDIA_MAX_OUTPUT_BYTES: int = 128 * 1024 * 1024
+_MEDIA_PROCESS_LIMIT = asyncio.Semaphore(3)
+_BITMAP_SUBTITLE_CODECS = {
+    "dvd_subtitle",
+    "dvb_subtitle",
+    "hdmv_pgs_subtitle",
+    "xsub",
+    "dvb_teletext",
+    "arib_caption",
+    "eia_608",
+    "eia_708",
+}
+
+
+def _media_tool_paths() -> tuple[str, str]:
+    """Return FFmpeg and FFprobe executables without installing software from a public request."""
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    ffprobe_path = shutil.which("ffprobe")
+
+    if ffmpeg_path and not ffprobe_path:
+        candidate = Path(ffmpeg_path).with_name(f"ffprobe{Path(ffmpeg_path).suffix}")
+        if candidate.is_file():
+            ffprobe_path = str(candidate)
+
+    if not ffmpeg_path or not ffprobe_path:
+        raise HTTPException(
+            status_code=503,
+            detail="Track-aware playback requires FFmpeg and FFprobe on the StoreLimitless server.",
+        )
+
+    return ffmpeg_path, ffprobe_path
+
+
+def _media_source_url(token: str) -> str:
+    """Return the local byte-range endpoint used by FFmpeg to read the original stored chunks."""
+
+    return f"http://127.0.0.1:8000/public/stream/{quote(token, safe='')}"
+
+
+async def _run_media_tool(command: list[str], *, timeout: float, output_limit: int) -> bytes:
+    """Run one bounded FFmpeg utility command and collect its in-memory output."""
+
+    async with _MEDIA_PROCESS_LIMIT:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as error:
+            raise HTTPException(status_code=503, detail="The media processing tools could not be started.") from error
+
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except asyncio.TimeoutError as error:
+            process.kill()
+            await process.communicate()
+            raise HTTPException(status_code=504, detail="Preparing this media track timed out. Try again.") from error
+
+        if process.returncode != 0:
+            # Do not return raw FFmpeg stderr because it can contain internal URLs or storage details.
+            raise HTTPException(
+                status_code=502,
+                detail="FFmpeg could not process this media stream or selected track.",
+            )
+
+        if len(stdout) > output_limit:
+            raise HTTPException(
+                status_code=413,
+                detail="The generated media segment or subtitle track exceeded the safe response size.",
+            )
+
+        return stdout
+
+
+def _media_track_label(stream: dict[str, Any], kind: str, ordinal: int) -> str:
+    """Build a stable, readable label for an embedded track."""
+
+    tags = stream.get("tags") or {}
+    title = str(tags.get("title") or tags.get("handler_name") or "").strip()
+    language = str(tags.get("language") or "").strip()
+    raw_label = title or (f"{language.upper()} {kind.title()} {ordinal + 1}" if language and language.lower() != "und" else f"{kind.title()} {ordinal + 1}")
+    return re.sub(r"[\x00-\x1f\x7f]", " ", raw_label).strip()[:120] or f"{kind.title()} {ordinal + 1}"
+
+
+def _hls_attribute(value: str) -> str:
+    """Escape user-controlled track labels for an HLS quoted attribute."""
+
+    clean = re.sub(r"[\x00-\x1f\x7f]", " ", value).replace("\\", "_").replace('"', "'")
+    return f'"{clean[:120]}"'
+
+
+async def _public_media_info(file: File, token: str) -> dict[str, Any]:
+    """Probe the original stored media and cache only its small stream metadata."""
+
+    cache_key = f"{file.username}:{file.id}:{_file_etag(file)}"
+    cached = _MEDIA_INFO_CACHE.get(cache_key)
+    now = monotonic()
+
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    _, ffprobe_path = _media_tool_paths()
+    output = await _run_media_tool(
+        [
+            ffprobe_path,
+            "-v", "error",
+            "-probesize", "10000000",
+            "-analyzeduration", "10000000",
+            "-show_streams",
+            "-show_format",
+            "-of", "json",
+            _media_source_url(token),
+        ],
+        timeout=90,
+        output_limit=8 * 1024 * 1024,
+    )
+
+    try:
+        probe = json.loads(output)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise HTTPException(status_code=502, detail="Could not read the media track metadata.") from error
+
+    raw_streams = probe.get("streams") or []
+    video_streams = [
+        stream for stream in raw_streams
+        if stream.get("codec_type") == "video" and not (stream.get("disposition") or {}).get("attached_pic")
+    ]
+    if not video_streams:
+        raise HTTPException(status_code=415, detail="This file does not contain a playable video track.")
+
+    format_info = probe.get("format") or {}
+    try:
+        duration = float(format_info.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+
+    if not math.isfinite(duration) or duration <= 0:
+        raise HTTPException(status_code=415, detail="This video does not expose a usable duration for track-aware playback.")
+
+    def describe(stream: dict[str, Any], kind: str, ordinal: int) -> dict[str, Any]:
+        tags = stream.get("tags") or {}
+        disposition = stream.get("disposition") or {}
+        language = str(tags.get("language") or "").strip()
+        codec = str(stream.get("codec_name") or "unknown").lower()
+        return {
+            "index": int(stream.get("index", -1)),
+            "codec": codec,
+            "label": _media_track_label(stream, kind, ordinal),
+            "language": language if language.lower() != "und" else "",
+            "default": bool(disposition.get("default")),
+            "channels": stream.get("channels"),
+            "width": stream.get("width"),
+            "height": stream.get("height"),
+        }
+
+    audio_streams = [stream for stream in raw_streams if stream.get("codec_type") == "audio"]
+    subtitle_streams = [stream for stream in raw_streams if stream.get("codec_type") == "subtitle"]
+    media_info: dict[str, Any] = {
+        "duration": duration,
+        "video": describe(video_streams[0], "video", 0),
+        "audio": [describe(stream, "audio", ordinal) for ordinal, stream in enumerate(audio_streams)],
+        "subtitles": [
+            {
+                **describe(stream, "subtitle", ordinal),
+                "selectable": str(stream.get("codec_name") or "").lower() not in _BITMAP_SUBTITLE_CODECS,
+            }
+            for ordinal, stream in enumerate(subtitle_streams)
+        ],
+    }
+
+    _MEDIA_INFO_CACHE[cache_key] = (monotonic() + _MEDIA_INFO_TTL, media_info)
+    if len(_MEDIA_INFO_CACHE) > 256:
+        for key, (expires_at, _) in list(_MEDIA_INFO_CACHE.items()):
+            if expires_at <= monotonic():
+                _MEDIA_INFO_CACHE.pop(key, None)
+        while len(_MEDIA_INFO_CACHE) > 256:
+            _MEDIA_INFO_CACHE.pop(next(iter(_MEDIA_INFO_CACHE)))
+
+    return media_info
+
+
+def _hls_media_playlist(token: str, media_info: dict[str, Any], *, kind: str, stream_index: int | None = None) -> str:
+    """Describe fixed-duration on-demand segments; each request is generated in memory."""
+
+    duration = float(media_info["duration"])
+    segment_count = math.ceil(duration / _MEDIA_SEGMENT_SECONDS)
+    if segment_count <= 0 or segment_count > _MEDIA_MAX_SEGMENTS:
+        raise HTTPException(status_code=413, detail="This video's duration is too long for track-aware playback.")
+
+    base = f"/public/hls/{quote(token, safe='')}"
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        f"#EXT-X-TARGETDURATION:{_MEDIA_SEGMENT_SECONDS}",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+        "#EXT-X-INDEPENDENT-SEGMENTS",
+    ]
+
+    for segment_index in range(segment_count):
+        if segment_index > 0:
+            # Each segment is produced by a short-lived FFmpeg process, so declare the
+            # timestamp/transport-stream counter reset explicitly to the HLS client.
+            lines.append("#EXT-X-DISCONTINUITY")
+
+        segment_duration = min(_MEDIA_SEGMENT_SECONDS, duration - segment_index * _MEDIA_SEGMENT_SECONDS)
+        url = f"{base}/segment/{kind}?index={segment_index}"
+        if kind == "audio":
+            url += f"&track={int(stream_index or 0)}"
+        lines.extend([f"#EXTINF:{segment_duration:.3f},", url])
+
+    lines.append("#EXT-X-ENDLIST")
+    return "\n".join(lines) + "\n"
+
+
+def _media_response_headers(request: Request) -> dict[str, str]:
+    """Return headers for dynamically generated media, playlists, and subtitle responses."""
+
+    return {
+        "Cache-Control": "private, no-store, no-cache, must-revalidate, no-transform",
+        "X-Content-Type-Options": "nosniff",
+        "X-Accel-Buffering": "no",
+        "Referrer-Policy": "no-referrer",
+        **_public_cors_headers(request),
+    }
+
+
+@router.get("/tracks/{token}")
+async def public_media_tracks(token: str, request: Request) -> JSONResponse:
+    """List selectable audio and text subtitle tracks embedded in the original file."""
+
+    file = await _owned_public_file(token, request)
+    media_info = await _public_media_info(file, token)
+    return JSONResponse(media_info, headers=_media_response_headers(request))
+
+
+@router.get("/hls/{token}/master.m3u8")
+async def public_hls_master(token: str, request: Request) -> Response:
+    """Create an HLS master playlist without writing a playlist or media segment to disk."""
+
+    file = await _owned_public_file(token, request)
+    media_info = await _public_media_info(file, token)
+    if not media_info.get("video"):
+        raise HTTPException(status_code=415, detail="This file has no video track.")
+
+    base = f"/public/hls/{quote(token, safe='')}"
+    audio_tracks = media_info["audio"]
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-INDEPENDENT-SEGMENTS"]
+
+    if audio_tracks:
+        default_index = next((index for index, track in enumerate(audio_tracks) if track["default"]), 0)
+        for index, track in enumerate(audio_tracks):
+            audio_playlist_url = f"{base}/audio.m3u8?track={track['index']}"
+            attributes = [
+                'TYPE=AUDIO',
+                'GROUP-ID="audio"',
+                f"NAME={_hls_attribute(track['label'])}",
+                f"DEFAULT={'YES' if index == default_index else 'NO'}",
+                f"AUTOSELECT={'YES' if index == default_index else 'NO'}",
+                f"URI={_hls_attribute(audio_playlist_url)}",
+            ]
+            if track["language"] and re.fullmatch(r"[A-Za-z0-9-]{1,35}", track["language"]):
+                attributes.insert(3, f"LANGUAGE={_hls_attribute(track['language'])}")
+            lines.append("#EXT-X-MEDIA:" + ",".join(attributes))
+        lines.extend(['#EXT-X-STREAM-INF:BANDWIDTH=8000000,AUDIO="audio"', f"{base}/video.m3u8"])
+    else:
+        lines.extend(["#EXT-X-STREAM-INF:BANDWIDTH=8000000", f"{base}/video.m3u8"])
+
+    return Response(
+        content="\n".join(lines) + "\n",
+        media_type="application/vnd.apple.mpegurl",
+        headers=_media_response_headers(request),
+    )
+
+
+@router.get("/hls/{token}/video.m3u8")
+async def public_hls_video_playlist(token: str, request: Request) -> Response:
+    """Create the video-only HLS playlist for dynamic, in-memory segments."""
+
+    file = await _owned_public_file(token, request)
+    media_info = await _public_media_info(file, token)
+    return Response(
+        content=_hls_media_playlist(token, media_info, kind="video"),
+        media_type="application/vnd.apple.mpegurl",
+        headers=_media_response_headers(request),
+    )
+
+
+@router.get("/hls/{token}/audio.m3u8")
+async def public_hls_audio_playlist(
+    token: str,
+    request: Request,
+    track: int = Query(ge=0),
+) -> Response:
+    """Create a separate audio rendition playlist for the selected embedded stream."""
+
+    file = await _owned_public_file(token, request)
+    media_info = await _public_media_info(file, token)
+    if not any(int(item["index"]) == track for item in media_info["audio"]):
+        raise HTTPException(status_code=404, detail="Audio track not found.")
+
+    return Response(
+        content=_hls_media_playlist(token, media_info, kind="audio", stream_index=track),
+        media_type="application/vnd.apple.mpegurl",
+        headers=_media_response_headers(request),
+    )
+
+
+@router.get("/hls/{token}/segment/{kind}")
+async def public_hls_segment(
+    token: str,
+    kind: str,
+    request: Request,
+    index: int = Query(ge=0),
+    track: int | None = Query(default=None, ge=0),
+) -> Response:
+    """Generate one MPEG-TS transport segment on demand and return it directly from memory."""
+
+    if kind not in {"video", "audio"}:
+        raise HTTPException(status_code=404, detail="Media segment not found.")
+
+    file = await _owned_public_file(token, request)
+    media_info = await _public_media_info(file, token)
+    duration = float(media_info["duration"])
+    segment_count = math.ceil(duration / _MEDIA_SEGMENT_SECONDS)
+    if index >= segment_count:
+        raise HTTPException(status_code=404, detail="Media segment not found.")
+
+    if kind == "video":
+        stream_index = int(media_info["video"]["index"])
+    else:
+        audio_track = next((item for item in media_info["audio"] if int(item["index"]) == track), None)
+        if audio_track is None:
+            raise HTTPException(status_code=404, detail="Audio track not found.")
+        stream_index = int(audio_track["index"])
+
+    start = index * _MEDIA_SEGMENT_SECONDS
+    segment_duration = min(_MEDIA_SEGMENT_SECONDS, duration - start)
+    ffmpeg_path, _ = _media_tool_paths()
+    command = [
+        ffmpeg_path,
+        "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-rw_timeout", "300000000",
+        "-ss", f"{start:.6f}",
+        "-i", _media_source_url(token),
+        "-t", f"{segment_duration:.6f}",
+        "-map", f"0:{stream_index}",
+        "-sn", "-dn",
+    ]
+
+    if kind == "video":
+        # A standalone encode ensures every generated segment starts on a keyframe,
+        # even when the source's keyframe positions do not line up with 6-second boundaries.
+        command.extend([
+            "-an",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-crf", "22",
+            "-pix_fmt", "yuv420p",
+            "-g", "48",
+            "-keyint_min", "48",
+            "-sc_threshold", "0",
+            "-force_key_frames", f"expr:gte(t,n_forced*{_MEDIA_SEGMENT_SECONDS})",
+            "-threads", "2",
+        ])
+    else:
+        command.extend([
+            "-vn",
+            "-c:a", "aac",
+            "-b:a", "160k",
+            "-ac", "2",
+            "-threads", "2",
+        ])
+
+    command.extend([
+        "-output_ts_offset", f"{start:.6f}",
+        "-mpegts_flags", "+resend_headers",
+        "-f", "mpegts",
+        "pipe:1",
+    ])
+
+    segment = await _run_media_tool(
+        command,
+        timeout=max(120.0, segment_duration * 30.0),
+        output_limit=_MEDIA_MAX_OUTPUT_BYTES,
+    )
+    if not segment:
+        raise HTTPException(status_code=502, detail="FFmpeg produced an empty media segment.")
+
+    return Response(content=segment, media_type="video/mp2t", headers=_media_response_headers(request))
+
+
+@router.get("/hls/{token}/subtitles/{stream_index}.vtt")
+async def public_hls_subtitles(token: str, stream_index: int, request: Request) -> Response:
+    """Extract one text subtitle track to WebVTT in memory; no sidecar file is stored."""
+
+    file = await _owned_public_file(token, request)
+    media_info = await _public_media_info(file, token)
+    subtitle = next(
+        (item for item in media_info["subtitles"] if int(item["index"]) == stream_index),
+        None,
+    )
+    if subtitle is None:
+        raise HTTPException(status_code=404, detail="Subtitle track not found.")
+    if not subtitle["selectable"]:
+        raise HTTPException(status_code=415, detail="This bitmap subtitle format cannot be converted to selectable text captions.")
+
+    ffmpeg_path, _ = _media_tool_paths()
+    output = await _run_media_tool(
+        [
+            ffmpeg_path,
+            "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-rw_timeout", "300000000",
+            "-i", _media_source_url(token),
+            "-map", f"0:{stream_index}",
+            "-vn", "-an", "-dn",
+            "-c:s", "webvtt",
+            "-f", "webvtt",
+            "pipe:1",
+        ],
+        timeout=300,
+        output_limit=32 * 1024 * 1024,
+    )
+    if not output.startswith(b"WEBVTT"):
+        raise HTTPException(status_code=502, detail="Could not extract this subtitle track.")
+
+    return Response(
+        content=output,
+        media_type="text/vtt",
+        headers=_media_response_headers(request),
+    )
 
 
 @router.get("/metadata/{token}")

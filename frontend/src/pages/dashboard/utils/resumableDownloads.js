@@ -92,3 +92,18 @@ export const removeResumableDownloadChunks = (downloadId) => withStore(
         return request;
     },
 );
+
+/** Delete a damaged or non-contiguous suffix while preserving earlier verified ranges. */
+export const removeResumableDownloadChunksFrom = (downloadId, offset) => withStore(
+    CHUNK_STORE_NAME,
+    "readwrite",
+    (store) => {
+        const request = store.index("downloadId").getAll(downloadId);
+        request.onsuccess = () => {
+            for (const chunk of request.result) {
+                if (Number(chunk.offset) >= offset) store.delete(chunk.key);
+            }
+        };
+        return request;
+    },
+);

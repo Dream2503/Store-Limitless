@@ -3,6 +3,7 @@ import {useNavigate, useParams, useSearchParams} from "react-router-dom";
 import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
 import UploadJobsTray from "./UploadJobsTray.jsx";
 import {createUniqueId, getFileKind} from "../utils.js";
+import {listResumableDownloadChunks, removeResumableDownloadChunks, removeResumableDownloadChunksFrom, saveResumableDownloadChunk} from "../utils/resumableDownloads.js";
 
 /**
  * @typedef {{name: string}} PreviewFile
@@ -485,10 +486,22 @@ export default function ViewFile() {
     const [downloadState, setDownloadState] = useState({status: "idle", transferred: 0, total: 0, message: ""});
     const downloadControllerRef = useRef(null);
     const downloadMountedRef = useRef(true);
+    const downloadDismissedRef = useRef(false);
+    const downloadSessionRef = useRef(null);
+    if (!downloadSessionRef.current) {
+        downloadSessionRef.current = {
+            id: `public-view-${createUniqueId()}`,
+            tempName: "",
+            total: 0,
+            etag: "",
+            transferred: 0,
+        };
+    }
+    const downloadTrayJobId = `view-file-download-${fileId || publicToken || "shared"}`;
     const name = searchParams.get("name") || publicFile?.name || "Untitled";
     const kind = searchParams.get("kind") || getFileKind(publicFile?.name || name);
     const downloadTrayJobs = downloadError || downloadState.status !== "idle" ? [{
-        id: `view-file-download-${fileId || publicToken || "shared"}`,
+        id: downloadTrayJobId,
         name,
         status: downloadError && downloadState.status === "idle" ? "error" : downloadState.status,
         transferred: downloadState.transferred,
@@ -595,7 +608,13 @@ export default function ViewFile() {
         downloadMountedRef.current = true;
         return () => {
             downloadMountedRef.current = false;
+            downloadDismissedRef.current = true;
             downloadControllerRef.current?.abort();
+            const session = downloadSessionRef.current;
+            if (session.tempName && typeof navigator.storage?.getDirectory === "function") {
+                navigator.storage.getDirectory().then((root) => root.removeEntry(session.tempName)).catch(() => {});
+            }
+            removeResumableDownloadChunks(session.id).catch(() => {});
         };
     }, []);
 
@@ -606,27 +625,167 @@ export default function ViewFile() {
      */
     const startStagedDownload = useCallback(async () => {
         if (!downloadUrl || downloadControllerRef.current) return;
-        if (typeof navigator.storage?.getDirectory !== "function") {
-            setDownloadState({
-                status: "error",
-                transferred: 0,
-                total: 0,
-                message: "This browser does not support staged downloads. Use a recent Chromium-based browser.",
-            });
-            return;
-        }
-
+        downloadDismissedRef.current = false;
         const controller = new AbortController();
         downloadControllerRef.current = controller;
         let root = null;
         let tempName = "";
-        let completed = false;
+        let totalForTask = 0;
+        let offsetForTask = 0;
+        const session = downloadSessionRef.current;
         const updateState = (next) => {
-            if (downloadMountedRef.current) setDownloadState(next);
+            if (downloadMountedRef.current && !downloadDismissedRef.current) setDownloadState(next);
         };
 
-        updateState({status: "downloading", transferred: 0, total: 0, message: "Preparing StoreLimitless download"});
+        updateState({status: "downloading", transferred: session.transferred || 0, total: session.total || 0, message: "Preparing StoreLimitless download"});
         try {
+            if (typeof navigator.storage?.getDirectory !== "function") {
+                // Stage verified ranges in IndexedDB when OPFS is unavailable. Keep
+                // completed chunks across Pause so Resume continues from the last range.
+                const stagedDownloadId = session.id;
+                const head = await fetch(downloadUrl, {method: "HEAD", signal: controller.signal, cache: "no-store"});
+                if (!head.ok) throw new Error(`Could not prepare download (${head.status}).`);
+
+                const sizeHeader = head.headers.get("content-length");
+                const total = sizeHeader !== null ? Number(sizeHeader) : Number(publicFile?.size);
+                if (!Number.isSafeInteger(total) || total < 0 || (sizeHeader === null && publicFile?.size == null)) {
+                    throw new Error("The server did not provide a valid file size for staging this download.");
+                }
+
+                const etag = head.headers.get("etag") || "";
+                const contentType = head.headers.get("content-type") || "application/octet-stream";
+                const chunkSize = 8 * 1024 * 1024;
+                let savedChunks = await listResumableDownloadChunks(stagedDownloadId);
+                const sourceChanged = (Boolean(session.etag && etag) && session.etag !== etag)
+                    || (Number(session.total) > 0 && Number(session.total) !== total);
+                if (sourceChanged) {
+                    await removeResumableDownloadChunks(stagedDownloadId);
+                    savedChunks = [];
+                    session.transferred = 0;
+                }
+                session.total = total;
+                session.etag = etag;
+                totalForTask = total;
+
+                const chunksByOffset = new Map(savedChunks.map((chunk) => [Number(chunk.offset), chunk]));
+                let offset = 0;
+                while (offset < total) {
+                    const savedChunk = chunksByOffset.get(offset);
+                    if (!savedChunk) break;
+                    const length = savedChunk.bytes?.byteLength ?? savedChunk.bytes?.length ?? 0;
+                    if (length !== Math.min(chunkSize, total - offset)) break;
+                    offset += length;
+                }
+                if (savedChunks.some((chunk) => Number(chunk.offset) >= offset)) {
+                    await removeResumableDownloadChunksFrom(stagedDownloadId, offset);
+                    savedChunks = savedChunks.filter((chunk) => Number(chunk.offset) < offset);
+                }
+
+                offsetForTask = offset;
+                session.transferred = offset;
+                updateState({
+                    status: "downloading", transferred: offset, total,
+                    message: offset ? "Resuming from saved progress" : "Downloading · staging in browser storage",
+                });
+
+                while (offset < total) {
+                    if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
+                    const end = Math.min(offset + chunkSize, total) - 1;
+                    let chunk = null;
+                    let lastError = null;
+                    for (let attempt = 0; attempt < 5; attempt += 1) {
+                        try {
+                            // Keep this to a single CORS-safelisted byte-range header.
+                            const headers = {Range: `bytes=${offset}-${end}`};
+                            const requestSignal = typeof AbortSignal.any === "function" && typeof AbortSignal.timeout === "function"
+                                ? AbortSignal.any([controller.signal, AbortSignal.timeout(180000)])
+                                : controller.signal;
+                            const response = await fetch(downloadUrl, {headers, signal: requestSignal, cache: "no-store"});
+                            if (response.status !== 206) {
+                                await response.body?.cancel();
+                                throw new Error(response.status === 200
+                                    ? "The server did not honor the byte-range request; refusing an unsafe staged download."
+                                    : `Download range failed (${response.status}).`);
+                            }
+                            const responseEtag = response.headers.get("etag") || "";
+                            if (etag && responseEtag && responseEtag !== etag) {
+                                await response.body?.cancel();
+                                throw new Error("The file changed during download. Retry to fetch a consistent copy.");
+                            }
+                            const expectedRange = `bytes ${offset}-${end}/${total}`;
+                            const receivedRange = response.headers.get("content-range") || "";
+                            if (receivedRange !== expectedRange) {
+                                await response.body?.cancel();
+                                throw new Error(`Unexpected Content-Range: ${receivedRange || "missing"}`);
+                            }
+                            const bytes = await response.arrayBuffer();
+                            if (bytes.byteLength !== end - offset + 1) {
+                                throw new Error(`Incomplete range: received ${bytes.byteLength} bytes.`);
+                            }
+                            chunk = bytes;
+                            break;
+                        } catch (error) {
+                            if (controller.signal.aborted || error?.name === "AbortError") throw error;
+                            lastError = error;
+                            if (attempt < 4) {
+                                await new Promise((resolve, reject) => {
+                                    let timeout;
+                                    const onAbort = () => {
+                                        window.clearTimeout(timeout);
+                                        reject(new DOMException("Download paused", "AbortError"));
+                                    };
+                                    timeout = window.setTimeout(() => {
+                                        controller.signal.removeEventListener("abort", onAbort);
+                                        resolve();
+                                    }, Math.min(1000 * (2 ** attempt), 8000));
+                                    controller.signal.addEventListener("abort", onAbort, {once: true});
+                                });
+                            }
+                        }
+                    }
+                    if (!chunk) throw lastError || new Error("Download failed after repeated attempts.");
+                    await saveResumableDownloadChunk(stagedDownloadId, offset, chunk);
+                    offset += chunk.byteLength;
+                    offsetForTask = offset;
+                    session.transferred = offset;
+                    updateState({status: "downloading", transferred: offset, total, message: "Downloading · staging in browser storage"});
+                }
+
+                savedChunks = await listResumableDownloadChunks(stagedDownloadId);
+                const blobParts = [];
+                let verifiedOffset = 0;
+                for (const savedChunk of savedChunks) {
+                    if (Number(savedChunk.offset) !== verifiedOffset) {
+                        throw new Error("The staged download has a gap. Resume the download to repair it.");
+                    }
+                    const bytes = savedChunk.bytes;
+                    const length = bytes?.byteLength ?? bytes?.length ?? 0;
+                    if (length !== Math.min(chunkSize, total - verifiedOffset)) {
+                        throw new Error("A staged download range is incomplete. Resume the download to repair it.");
+                    }
+                    blobParts.push(bytes);
+                    verifiedOffset += length;
+                    if (verifiedOffset === total) break;
+                }
+                if (verifiedOffset !== total) throw new Error(`Incomplete download: received ${verifiedOffset} of ${total} bytes.`);
+
+                const blob = new Blob(blobParts, {type: contentType});
+                const objectUrl = URL.createObjectURL(blob);
+                const anchor = document.createElement("a");
+                anchor.href = objectUrl;
+                anchor.download = name || "download";
+                anchor.rel = "noreferrer";
+                document.body.appendChild(anchor);
+                anchor.click();
+                anchor.remove();
+                window.setTimeout(() => URL.revokeObjectURL(objectUrl), 5 * 60 * 1000);
+                await removeResumableDownloadChunks(stagedDownloadId).catch((error) => {
+                    console.warn("Could not clear completed public-download chunks:", error);
+                });
+                session.transferred = total;
+                updateState({status: "completed", transferred: total, total, message: "Download complete · browser download started"});
+                return;
+            }
             const head = await fetch(downloadUrl, {method: "HEAD", signal: controller.signal, cache: "no-store"});
             if (!head.ok) throw new Error(`Could not prepare download (${head.status}).`);
 
@@ -636,6 +795,17 @@ export default function ViewFile() {
                 throw new Error("The server did not provide the file size needed to stage this download safely.");
             }
             const etag = head.headers.get("etag") || "";
+            const sourceChanged = (Boolean(session.etag && etag) && session.etag !== etag)
+                || (Number(session.total) > 0 && Number(session.total) !== total);
+            if (sourceChanged && session.tempName) {
+                root = await navigator.storage.getDirectory();
+                await root.removeEntry(session.tempName).catch(() => {});
+                session.tempName = "";
+                session.transferred = 0;
+            }
+            session.total = total;
+            session.etag = etag;
+            totalForTask = total;
             const estimate = await navigator.storage.estimate().catch(() => ({}));
             if (total > 0 && Number.isFinite(estimate.quota) && Number.isFinite(estimate.usage) && estimate.quota - estimate.usage < total) {
                 throw new Error("There is not enough browser temporary storage to stage this file. Free up disk space and try again.");
@@ -645,14 +815,28 @@ export default function ViewFile() {
             }
 
             root = await navigator.storage.getDirectory();
-            tempName = `storelimitless-view-${createUniqueId()}.download`;
+            const reusingTemp = Boolean(session.tempName);
+            tempName = session.tempName || `storelimitless-view-${createUniqueId()}.download`;
+            session.tempName = tempName;
             const handle = await root.getFileHandle(tempName, {create: true});
-            const initialWriter = await handle.createWritable();
-            await initialWriter.truncate(0);
-            await initialWriter.close();
-            updateState({status: "downloading", transferred: 0, total, message: "Downloading to StoreLimitless temporary storage"});
-
-            let offset = 0;
+            if (!reusingTemp) {
+                const initialWriter = await handle.createWritable();
+                await initialWriter.truncate(0);
+                await initialWriter.close();
+            }
+            const existingFile = await handle.getFile();
+            let offset = Math.min(existingFile.size, total);
+            if (existingFile.size > offset) {
+                const truncateWriter = await handle.createWritable({keepExistingData: true});
+                await truncateWriter.truncate(offset);
+                await truncateWriter.close();
+            }
+            offsetForTask = offset;
+            session.transferred = offset;
+            updateState({
+                status: "downloading", transferred: offset, total,
+                message: offset ? "Resuming from saved progress" : "Downloading to StoreLimitless temporary storage",
+            });
             const chunkSize = 8 * 1024 * 1024;
             while (offset < total) {
                 if (controller.signal.aborted) throw new DOMException("Download cancelled", "AbortError");
@@ -662,8 +846,9 @@ export default function ViewFile() {
 
                 for (let attempt = 0; attempt < 5; attempt += 1) {
                     try {
+                        // Range is CORS-safelisted for a single byte range. Avoid If-Range,
+                        // which triggers a preflight before the API's cross-origin redirect.
                         const headers = {Range: `bytes=${offset}-${end}`};
-                        if (etag) headers["If-Range"] = etag;
                         const requestSignal = typeof AbortSignal.any === "function" && typeof AbortSignal.timeout === "function"
                             ? AbortSignal.any([controller.signal, AbortSignal.timeout(180000)])
                             : controller.signal;
@@ -673,6 +858,11 @@ export default function ViewFile() {
                             throw new Error(response.status === 200
                                 ? "The server did not honor the byte-range request; refusing an unsafe staged download."
                                 : `Download range failed (${response.status}).`);
+                        }
+                        const responseEtag = response.headers.get("etag") || "";
+                        if (etag && responseEtag && responseEtag !== etag) {
+                            await response.body?.cancel();
+                            throw new Error("The file changed during download. Retry to fetch a consistent copy.");
                         }
                         const expectedRange = `bytes ${offset}-${end}/${total}`;
                         const receivedRange = response.headers.get("content-range") || "";
@@ -707,10 +897,10 @@ export default function ViewFile() {
                 await writer.write(chunk);
                 await writer.close();
                 offset += chunk.byteLength;
+                offsetForTask = offset;
+                session.transferred = offset;
                 updateState({
-                    status: "downloading",
-                    transferred: offset,
-                    total,
+                    status: "downloading", transferred: offset, total,
                     message: "Downloading to StoreLimitless temporary storage",
                 });
             }
@@ -724,7 +914,6 @@ export default function ViewFile() {
             document.body.appendChild(anchor);
             anchor.click();
             anchor.remove();
-            completed = true;
             window.setTimeout(() => {
                 URL.revokeObjectURL(objectUrl);
                 root?.removeEntry(tempName).catch(() => {});
@@ -736,11 +925,21 @@ export default function ViewFile() {
                 message: "StoreLimitless download complete. Browser download started.",
             });
         } catch (error) {
-            if (root && tempName && !completed) root.removeEntry(tempName).catch(() => {});
             if (controller.signal.aborted || error?.name === "AbortError") {
-                updateState({status: "paused", transferred: 0, total: 0, message: "Download cancelled"});
+                updateState({
+                    status: "paused",
+                    transferred: session.transferred || offsetForTask || 0,
+                    total: session.total || totalForTask || 0,
+                    message: "Paused · resume continues from saved progress",
+                });
             } else {
-                updateState({status: "error", transferred: 0, total: 0, message: error?.message || "Download failed"});
+                // Preserve verified progress so Retry can resume after transient errors.
+                updateState({
+                    status: "error",
+                    transferred: session.transferred || offsetForTask || 0,
+                    total: session.total || totalForTask || 0,
+                    message: error?.message || "Download failed",
+                });
             }
         } finally {
             if (downloadControllerRef.current === controller) downloadControllerRef.current = null;
@@ -933,6 +1132,47 @@ export default function ViewFile() {
                         </div>
                     </div>)}
         </main>
-        <UploadJobsTray uploadJobs={[]} downloadJobs={downloadTrayJobs} readOnlyDownloads/>
+        <UploadJobsTray
+            uploadJobs={[]}
+            downloadJobs={downloadTrayJobs}
+            pauseDownload={(jobId) => {
+                if (jobId === downloadTrayJobId) downloadControllerRef.current?.abort();
+            }}
+            resumeDownload={(jobId) => {
+                if (jobId === downloadTrayJobId && ["paused", "error"].includes(downloadState.status)) void startStagedDownload();
+            }}
+            removeDownload={(jobId) => {
+                if (jobId !== downloadTrayJobId) return;
+                downloadDismissedRef.current = true;
+                downloadControllerRef.current?.abort();
+                setDownloadError("");
+                setDownloadState({status: "idle", transferred: 0, total: 0, message: ""});
+                const session = downloadSessionRef.current;
+                if (session.tempName && typeof navigator.storage?.getDirectory === "function") {
+                    navigator.storage.getDirectory().then((root) => root.removeEntry(session.tempName)).catch(() => {});
+                }
+                session.tempName = "";
+                session.total = 0;
+                session.etag = "";
+                session.transferred = 0;
+                removeResumableDownloadChunks(session.id).catch(() => {});
+            }}
+            clearCompletedDownloads={() => {
+                if (!["completed", "error"].includes(downloadState.status) && !downloadError) return;
+                downloadDismissedRef.current = true;
+                downloadControllerRef.current?.abort();
+                setDownloadError("");
+                setDownloadState({status: "idle", transferred: 0, total: 0, message: ""});
+                const session = downloadSessionRef.current;
+                if (session.tempName && typeof navigator.storage?.getDirectory === "function") {
+                    navigator.storage.getDirectory().then((root) => root.removeEntry(session.tempName)).catch(() => {});
+                }
+                session.tempName = "";
+                session.total = 0;
+                session.etag = "";
+                session.transferred = 0;
+                removeResumableDownloadChunks(session.id).catch(() => {});
+            }}
+        />
     </div>);
 }

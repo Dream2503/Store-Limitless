@@ -1,0 +1,8 @@
+.idea
+.virtualenv
+__pycache__
+backend/database/.env
+core/.env
+core/transfer
+frontend/node_modules
+.env

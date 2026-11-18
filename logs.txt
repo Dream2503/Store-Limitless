@@ -1,0 +1,172 @@
+[2026-03-10 23:52:35] [Database] [INFO] [GET USER] [] Select query executed for username=v18.
+[2026-03-10 23:52:35] [Database] [ERROR] [GET USER] [] User not found in the database
+[2026-03-10 23:52:36] [Database] [ERROR] [SET USER] [v18] Failed to insert user: duplicate key value violates unique constraint "users_pkey"
+DETAIL:  Key (uid)=(1) already exists.
+
+[2026-03-10 23:56:47] [Database] [INFO] [GET USER] [] Select query executed for username=virat18.
+[2026-03-10 23:56:47] [Database] [ERROR] [GET USER] [] User not found in the database
+[2026-03-10 23:56:48] [Database] [ERROR] [SET USER] [virat18] Failed to insert user: duplicate key value violates unique constraint "users_pkey"
+DETAIL:  Key (uid)=(2) already exists.
+
+[2026-03-11 07:55:32,669] [WARNING] [discord.client] PyNaCl is not installed, voice will NOT be supported
+[2026-03-11 07:55:32,678] [WARNING] [discord.client] davey is not installed, voice will NOT be supported
+[2026-03-11 07:55:32] [Discord] [INFO] [MAIN] [] Starting Store Limitless Bot...
+[2026-03-11 07:55:32] [Telegram] [INFO] [MAIN] [] Starting Store Limitless Bot...
+[2026-03-11 07:55:32,909] [INFO] [discord.client] logging in using static token
+[2026-03-11 07:55:34,578] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getMe "HTTP/1.1 200 OK"
+[2026-03-11 07:55:34,789] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getMe "HTTP/1.1 200 OK"
+[2026-03-11 07:55:34,988] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getChat "HTTP/1.1 200 OK"
+[2026-03-11 07:55:34] [Telegram] [INFO] [INIT] [@StoreLimitless_bot] FILE_DUMP chat set: Store Limitless (id=-5171741313)
+[2026-03-11 07:55:34] [Telegram] [INFO] [INIT] [@StoreLimitless_bot] Bot is online. Logged in (id=8404712547)
+[2026-03-11 07:55:35,178] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/deleteWebhook "HTTP/1.1 200 OK"
+[2026-03-11 07:55:35,187] [INFO] [telegram.ext.Application] Application started
+[2026-03-11 07:55:35,459] [INFO] [discord.gateway] Shard ID None has connected to Gateway (Session ID: d21dfac8124056aae6f8c1f355e60d89).
+[2026-03-11 07:55:37] [Discord] [INFO] [INIT] [StoreLimitless#1152] FILE_DUMP channel initialized: files-dump (id=1399311590616203284).
+[2026-03-11 07:55:37] [Discord] [INFO] [INIT] [StoreLimitless#1152] Bot online and ready (id=1399287140885725245).
+[2026-03-11 07:55:45,730] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:55:56,090] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:56:06,328] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:56:16,530] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:56:26,768] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:56:37,054] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:56:47,399] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:56:57,579] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:57:28,275] [WARNING] [discord.client] PyNaCl is not installed, voice will NOT be supported
+[2026-03-11 07:57:28,275] [WARNING] [discord.client] davey is not installed, voice will NOT be supported
+[2026-03-11 07:57:28] [Telegram] [INFO] [MAIN] [] Starting Store Limitless Bot...
+[2026-03-11 07:57:28] [Discord] [INFO] [MAIN] [] Starting Store Limitless Bot...
+[2026-03-11 07:57:28,419] [INFO] [discord.client] logging in using static token
+[2026-03-11 07:57:30,298] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getMe "HTTP/1.1 200 OK"
+[2026-03-11 07:57:30,710] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getMe "HTTP/1.1 200 OK"
+[2026-03-11 07:57:30,858] [INFO] [discord.gateway] Shard ID None has connected to Gateway (Session ID: dc25fe56f32e5c4083db101b17eb5ce8).
+[2026-03-11 07:57:30,911] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getChat "HTTP/1.1 200 OK"
+[2026-03-11 07:57:30] [Telegram] [INFO] [INIT] [@StoreLimitless_bot] FILE_DUMP chat set: Store Limitless (id=-5171741313)
+[2026-03-11 07:57:30] [Telegram] [INFO] [INIT] [@StoreLimitless_bot] Bot is online. Logged in (id=8404712547)
+[2026-03-11 07:57:31,212] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/deleteWebhook "HTTP/1.1 200 OK"
+[2026-03-11 07:57:31,219] [INFO] [telegram.ext.Application] Application started
+[2026-03-11 07:57:32] [Discord] [INFO] [INIT] [StoreLimitless#1152] FILE_DUMP channel initialized: files-dump (id=1399311590616203284).
+[2026-03-11 07:57:32] [Discord] [INFO] [INIT] [StoreLimitless#1152] Bot online and ready (id=1399287140885725245).
+[2026-03-11 07:57:41,974] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:57:52,168] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:58:02,449] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:58:12,678] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:58:22,895] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:58:46,498] [WARNING] [discord.client] PyNaCl is not installed, voice will NOT be supported
+[2026-03-11 07:58:46,498] [WARNING] [discord.client] davey is not installed, voice will NOT be supported
+[2026-03-11 07:58:46] [Discord] [INFO] [MAIN] [] Starting Store Limitless Bot...
+[2026-03-11 07:58:46] [Telegram] [INFO] [MAIN] [] Starting Store Limitless Bot...
+[2026-03-11 07:58:46,598] [INFO] [discord.client] logging in using static token
+[2026-03-11 07:58:48,199] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getMe "HTTP/1.1 200 OK"
+[2026-03-11 07:58:48,389] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getMe "HTTP/1.1 200 OK"
+[2026-03-11 07:58:48,735] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getChat "HTTP/1.1 200 OK"
+[2026-03-11 07:58:48] [Telegram] [INFO] [INIT] [@StoreLimitless_bot] FILE_DUMP chat set: Store Limitless (id=-5171741313)
+[2026-03-11 07:58:48] [Telegram] [INFO] [INIT] [@StoreLimitless_bot] Bot is online. Logged in (id=8404712547)
+[2026-03-11 07:58:48,858] [INFO] [discord.gateway] Shard ID None has connected to Gateway (Session ID: 1e495a685e30490fe6398742499f0393).
+[2026-03-11 07:58:48,939] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/deleteWebhook "HTTP/1.1 200 OK"
+[2026-03-11 07:58:48,948] [INFO] [telegram.ext.Application] Application started
+[2026-03-11 07:58:50] [Discord] [INFO] [INIT] [StoreLimitless#1152] FILE_DUMP channel initialized: files-dump (id=1399311590616203284).
+[2026-03-11 07:58:50] [Discord] [INFO] [INIT] [StoreLimitless#1152] Bot online and ready (id=1399287140885725245).
+[2026-03-11 07:58:59,691] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:59:10,035] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:59:20,479] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:59:30,922] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:59:41,264] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 07:59:51,489] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:00:01,686] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:00:11,884] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:00:22,127] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:00:32,565] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:00:42,809] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:00:53,003] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:01:03,288] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:01:13,519] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:01:23,716] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:01:33,998] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:01:44,244] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:01:54,485] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:02:04,727] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:02:14,956] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:02:25,193] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:02:35,447] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:02:45,685] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:02:55,900] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:03:06,120] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:03:16,404] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:03:26,584] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:03:36,880] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:03:47,076] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:03:57,324] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:04:07,564] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:04:17,804] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:04:27,997] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:04:38,321] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:04:48,560] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:04:58,744] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:05:09,037] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:05:19,282] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:05:29,482] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:05:39,681] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:05:50,003] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:06:00,192] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:06:10,477] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:06:20,671] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:06:30,963] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:06:41,202] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:06:51,448] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:07:01,630] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:07:11,820] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:07:22,049] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:07:32,256] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:07:42,540] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:07:52,874] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:08:03,107] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:08:13,369] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:08:23,595] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:08:33,840] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:08:44,080] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:08:54,321] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:09:04,545] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:09:14,732] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:09:24,909] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:09:35,267] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:09:45,520] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:09:55,721] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:10:05,907] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:10:16,108] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:10:26,474] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:10:36,719] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:10:46,957] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:10:57,198] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:11:07,397] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:11:17,638] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:11:27,917] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:11:38,123] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:11:48,398] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:11:58,583] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:12:08,769] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:12:19,117] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:12:29,304] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:12:39,594] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:12:49,825] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:13:00,032] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:13:10,315] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:13:20,552] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:13:30,794] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:13:41,032] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:13:51,271] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:14:01,467] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:14:11,751] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:14:21,957] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:14:32,168] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:14:42,474] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:14:52,712] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:15:02,953] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:15:13,181] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:15:23,433] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:15:30,496] [INFO] [discord.gateway] Shard ID None has successfully RESUMED session 1e495a685e30490fe6398742499f0393.
+[2026-03-11 08:15:33,673] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:15:43,911] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:15:54,153] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:16:05,109] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:16:15,451] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"
+[2026-03-11 08:16:25,890] [INFO] [httpx] HTTP Request: POST https://api.telegram.org/bot8404712547:AAGxFogkRdPpwnb6niml7Oy9iopW_aCu0KQ/getUpdates "HTTP/1.1 200 OK"

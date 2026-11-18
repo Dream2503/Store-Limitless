@@ -1,0 +1,10 @@
+bcrypt==4.0.1
+discord
+fastapi[all]
+passlib[bcrypt]==1.7.4
+psycopg2-binary
+python-dotenv
+python-jose
+python-telegram-bot
+requests
+uvicorn

@@ -1,0 +1,92 @@
+[2026-03-05 14:33:44] [Discord] [INFO] [MAIN] [] Starting Store Limitless Bot...
+[2026-03-05 14:33:44] [Telegram] [INFO] [MAIN] [] Starting Store Limitless Bot...
+[2026-03-05 14:33:46] [Telegram] [INFO] [INIT] [@StoreLimitless_bot] FILE_DUMP chat set: Store Limitless (id=-5171741313)
+[2026-03-05 14:33:46] [Telegram] [INFO] [INIT] [@StoreLimitless_bot] Bot is online. Logged in (id=8404712547)
+[2026-03-05 14:33:49] [Discord] [INFO] [INIT] [StoreLimitless#1152] FILE_DUMP channel initialized: files-dump (id=1399311590616203284).
+[2026-03-05 14:33:49] [Discord] [INFO] [INIT] [StoreLimitless#1152] Bot online and ready (id=1399287140885725245).
+[2026-03-05 14:33:55] [Database] [INFO] [GET USER] [] Select query executed for uid=1.
+[2026-03-05 14:33:55] [Database] [INFO] [GET USER] [Luffy019] Successfully fetched user from database.
+[2026-03-05 14:33:55] [Database] [INFO] [GET FILE] [] Select query executed for ('fname', 'uid')=('100MB.bin', 1).
+[2026-03-05 14:33:55] [Database] [ERROR] [GET FILE] [] No file found for ('fname', 'uid')=('100MB.bin', 1).
+[2026-03-05 14:33:55] [Telegram] [INFO] [UPLOAD] [Luffy019] Found local file: 100MB.bin.
+[2026-03-05 14:33:55] [Telegram] [INFO] [UPLOAD] [Luffy019] Starting upload: `100MB.bin` (11 part(s)).
+[2026-03-05 14:33:57] [Database] [INFO] [GET USER] [] Select query executed for uid=2.
+[2026-03-05 14:33:57] [Database] [INFO] [GET USER] [dream2503] Successfully fetched user from database.
+[2026-03-05 14:33:58] [Database] [INFO] [GET FILE] [] Select query executed for ('fname', 'uid')=('100MB.bin', 2).
+[2026-03-05 14:33:58] [Database] [ERROR] [GET FILE] [] No file found for ('fname', 'uid')=('100MB.bin', 2).
+[2026-03-05 14:33:58] [Discord] [INFO] [UPLOAD] [dream2503] Found local file: 100MB.bin.
+[2026-03-05 14:33:58] [Discord] [INFO] [UPLOAD] [dream2503] Starting upload: `100MB.bin` (11 part(s)).
+[2026-03-05 14:34:44] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 1/11 (9.1%) of `100MB.bin`. (Message ID: 1479125015310893102)
+[2026-03-05 14:35:27] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 2/11 (18.2%) of `100MB.bin`. (Message ID: 1479125194260877546)
+[2026-03-05 14:36:19] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 3/11 (27.3%) of `100MB.bin`. (Message ID: 1479125413539352712)
+[2026-03-05 14:37:01] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 4/11 (36.4%) of `100MB.bin`. (Message ID: 1479125590840840313)
+[2026-03-05 14:37:43] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 5/11 (45.5%) of `100MB.bin`. (Message ID: 1479125764195618868)
+[2026-03-05 14:38:25] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 6/11 (54.5%) of `100MB.bin`. (Message ID: 1479125941035733095)
+[2026-03-05 14:39:06] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 7/11 (63.6%) of `100MB.bin`. (Message ID: 1479126114336247839)
+[2026-03-05 14:39:45] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 1/11 (9.1%) of `100MB.bin`. (Message ID: 78)
+[2026-03-05 14:39:52] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 8/11 (72.7%) of `100MB.bin`. (Message ID: 1479126305449709569)
+[2026-03-05 14:40:37] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 9/11 (81.8%) of `100MB.bin`. (Message ID: 1479126493241147514)
+[2026-03-05 14:41:21] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 10/11 (90.9%) of `100MB.bin`. (Message ID: 1479126677534806239)
+[2026-03-05 14:41:42] [Discord] [INFO] [UPLOAD] [dream2503] Uploaded part 11/11 (100.0%) of `100MB.bin`. (Message ID: 1479126766575550505)
+[2026-03-05 14:41:44] [Database] [INFO] [GET USER] [] Select query executed for uid=2.
+[2026-03-05 14:41:44] [Database] [INFO] [GET USER] [dream2503] Successfully fetched user from database.
+[2026-03-05 14:41:45] [Database] [INFO] [INSERT FILES] [] Insert query executed.
+[2026-03-05 14:41:47] [Database] [INFO] [INSERT FILES] [dream2503] File `100MB.bin` saved to database with 11 part(s).
+[2026-03-05 14:41:47] [Discord] [INFO] [UPLOAD] [dream2503] Completed upload: `100MB.bin` with 11 part(s).
+[2026-03-05 14:41:54] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 2/11 (18.2%) of `100MB.bin`. (Message ID: 79)
+[2026-03-05 14:43:46] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 3/11 (27.3%) of `100MB.bin`. (Message ID: 80)
+[2026-03-05 14:45:08] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 4/11 (36.4%) of `100MB.bin`. (Message ID: 81)
+[2026-03-05 14:46:24] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 5/11 (45.5%) of `100MB.bin`. (Message ID: 82)
+[2026-03-05 14:47:16] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 6/11 (54.5%) of `100MB.bin`. (Message ID: 83)
+[2026-03-05 14:47:57] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 7/11 (63.6%) of `100MB.bin`. (Message ID: 84)
+[2026-03-05 14:49:05] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 8/11 (72.7%) of `100MB.bin`. (Message ID: 85)
+[2026-03-05 14:50:37] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 9/11 (81.8%) of `100MB.bin`. (Message ID: 86)
+[2026-03-05 14:52:34] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 10/11 (90.9%) of `100MB.bin`. (Message ID: 87)
+[2026-03-05 14:52:58] [Telegram] [INFO] [UPLOAD] [Luffy019] Uploaded part 11/11 (100.0%) of `100MB.bin`. (Message ID: 88)
+[2026-03-05 14:52:59] [Database] [INFO] [GET USER] [] Select query executed for uid=1.
+[2026-03-05 14:52:59] [Database] [INFO] [GET USER] [Luffy019] Successfully fetched user from database.
+[2026-03-05 14:52:59] [Database] [INFO] [INSERT FILES] [] Insert query executed.
+[2026-03-05 14:52:59] [Database] [INFO] [INSERT FILES] [Luffy019] File `100MB.bin` saved to database with 11 part(s).
+[2026-03-05 14:52:59] [Telegram] [INFO] [UPLOAD] [Luffy019] Completed upload: `100MB.bin` with 11 part(s).
+[2026-03-05 14:54:03] [Database] [INFO] [GET USER] [] Select query executed for uid=1.
+[2026-03-05 14:54:03] [Database] [INFO] [GET USER] [Luffy019] Successfully fetched user from database.
+[2026-03-05 14:54:03] [Database] [INFO] [GET FILE] [] Select query executed for ('fname', 'uid')=('100MB.bin', 1).
+[2026-03-05 14:54:03] [Database] [INFO] [GET FILE] [100MB.bin] Successfully fetched file from database.
+[2026-03-05 14:54:03] [Telegram] [INFO] [DOWNLOAD] [Luffy019] File `100MB.bin` located in database (data center: Telegram).
+[2026-03-05 14:54:03] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Starting download for `100MB.bin` (11 part(s)).
+[2026-03-05 14:54:18] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 1/11 (9.1%) of `100MB.bin`.
+[2026-03-05 14:54:32] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 2/11 (18.2%) of `100MB.bin`.
+[2026-03-05 14:54:45] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 3/11 (27.3%) of `100MB.bin`.
+[2026-03-05 14:54:58] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 4/11 (36.4%) of `100MB.bin`.
+[2026-03-05 14:55:11] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 5/11 (45.5%) of `100MB.bin`.
+[2026-03-05 14:55:25] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 6/11 (54.5%) of `100MB.bin`.
+[2026-03-05 14:55:38] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 7/11 (63.6%) of `100MB.bin`.
+[2026-03-05 14:55:51] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 8/11 (72.7%) of `100MB.bin`.
+[2026-03-05 14:56:03] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 9/11 (81.8%) of `100MB.bin`.
+[2026-03-05 14:56:16] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 10/11 (90.9%) of `100MB.bin`.
+[2026-03-05 14:56:23] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded part 11/11 (100.0%) of `100MB.bin`.
+[2026-03-05 14:56:23] [Telegram] [INFO] [DOWNLOAD] [Luffy019] Downloaded file `100MB.bin` successfully.
+[2026-03-05 14:56:42] [Database] [INFO] [GET USER] [] Select query executed for uid=2.
+[2026-03-05 14:56:42] [Database] [INFO] [GET USER] [dream2503] Successfully fetched user from database.
+[2026-03-05 14:56:43] [Database] [INFO] [GET FILE] [] Select query executed for ('fname', 'uid')=('100MB.bin', 2).
+[2026-03-05 14:56:43] [Database] [INFO] [GET FILE] [100MB.bin] Successfully fetched file from database.
+[2026-03-05 14:56:43] [Discord] [INFO] [DOWNLOAD] [dream2503] File `100MB.bin` located in database (data center: Discord).
+[2026-03-05 14:56:43] [Discord] [INFO] [DOWNLOAD] [dream2503] Starting download for `100MB.bin` (11 part(s)).
+[2026-03-05 14:56:56] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 1/11 (9.1%) of `100MB.bin`.
+[2026-03-05 14:57:11] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 2/11 (18.2%) of `100MB.bin`.
+[2026-03-05 14:57:23] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 3/11 (27.3%) of `100MB.bin`.
+[2026-03-05 14:57:36] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 4/11 (36.4%) of `100MB.bin`.
+[2026-03-05 14:57:53] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 5/11 (45.5%) of `100MB.bin`.
+[2026-03-05 14:58:09] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 6/11 (54.5%) of `100MB.bin`.
+[2026-03-05 14:58:27] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 7/11 (63.6%) of `100MB.bin`.
+[2026-03-05 14:58:41] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 8/11 (72.7%) of `100MB.bin`.
+[2026-03-05 14:58:53] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 9/11 (81.8%) of `100MB.bin`.
+[2026-03-05 14:59:04] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 10/11 (90.9%) of `100MB.bin`.
+[2026-03-05 14:59:11] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded part 11/11 (100.0%) of `100MB.bin`.
+[2026-03-05 14:59:11] [Discord] [INFO] [DOWNLOAD] [dream2503] Downloaded file `100MB.bin` successfully.
+[2026-03-05 15:00:08] [Database] [INFO] [CLEAR] [] Truncate query executed.
+[2026-03-05 15:00:08] [Database] [INFO] [CLEAR] [] Truncated the files table.
+[2026-03-05 15:00:20] [Discord] [INFO] [CLEAR] [dream2503xd] Cleared 14 message(s) from channel `files-dump`.
+[2026-03-05 15:00:30] [Database] [INFO] [CLEAR] [] Truncate query executed.
+[2026-03-05 15:00:31] [Database] [INFO] [CLEAR] [] Truncated the files table.
+[2026-03-05 15:00:57] [Telegram] [INFO] [CLEAR] [Dream2503XD] Cleared 26 message(s).

@@ -127,6 +127,25 @@ export default function DashboardPage({active = true} = {}) {
     const {
         files, setFiles, folders, setFolders, storageUsed, loadingFiles, loadedFolder, pageError, setPageError, fetchFiles, refreshDirectory,
     } = useDashboardData(currentFolder, navigate);
+
+    // The dashboard stays mounted behind file previews to preserve the upload tray,
+    // but its visual workspace is hidden while a preview is open. Refresh the tree
+    // when returning so the folder view never depends on stale hidden-page state.
+    const wasDashboardActiveRef = useRef(active);
+    useEffect(() => {
+        const wasActive = wasDashboardActiveRef.current;
+        wasDashboardActiveRef.current = active;
+        if (!active || wasActive) return undefined;
+
+        let cancelled = false;
+        const frame = window.requestAnimationFrame(() => {
+            if (!cancelled) void fetchFiles();
+        });
+        return () => {
+            cancelled = true;
+            window.cancelAnimationFrame(frame);
+        };
+    }, [active, fetchFiles]);
     const {searchResults, searchLoading, searchError} = useGlobalFileSearch(searchQuery, activeTab, files);
     const {
         uploadJobs,
@@ -2462,6 +2481,7 @@ export default function DashboardPage({active = true} = {}) {
         </div>)}
 
         <DashboardWorkspace
+            key={active ? `active:${location.pathname}` : "inactive"}
             activeTab={activeTab}
             handleTabChange={handleTabChange}
             handleLogout={handleLogout}

@@ -10,6 +10,15 @@ const API_URL = window.STORELIMITLESS_CONFIG?.API_URL ?? import.meta.env.VITE_AP
 
 const DATA_CENTERS = ["Discord", "Telegram"];
 
+const isTelegramMessageUrl = (value) => {
+    try {
+        const hostname = new URL(String(value ?? "").trim()).hostname.toLowerCase();
+        return ["t.me", "www.t.me", "telegram.me", "www.telegram.me"].includes(hostname);
+    } catch {
+        return false;
+    }
+};
+
 // Each chunk is its own PUT; the server writes it to disk as it arrives.
 const CHUNK_SIZE = 1024 * 1024;
 // How many chunks are in flight at once (browsers allow ~6 connections per host).
@@ -318,7 +327,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         })) : [];
         const queueItems = uploadMode === "file" ? filesWithPaths.map(({file, relativePath}) => ({
             name: relativePath, size: file.size
-        })) : links.map((value) => ({name: value, size: 0}));
+        })) : links.map((value) => ({name: isTelegramMessageUrl(value) ? "Telegram message" : value, size: 0}));
         const queueTotal = queueItems.length;
         setQueueProgress({current: 0, total: queueTotal});
         let batchId = "";
@@ -494,6 +503,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 const {job_id: jobId} = await response.json();
                 if (!jobId) throw new Error("The server did not return an upload job ID.");
                 batchTransfer.activeJobId = jobId;
+                const telegramProcessing = uploadMode === "link" && isTelegramMessageUrl(selectedLink);
                 await publishBatch({
                     status: "uploading",
                     current_index: itemNumber - 1,
@@ -501,8 +511,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     current_name: displayName,
                     item_index: itemNumber - 1,
                     item_status: "uploading",
-                    item_message: "Uploading",
-                    message: `Uploading ${itemNumber} of ${queueTotal}`
+                    item_message: telegramProcessing ? "Processing Telegram message" : "Uploading",
+                    message: telegramProcessing ? "Processing Telegram message" : `Uploading ${itemNumber} of ${queueTotal}`
                 });
 
                 if (uploadMode === "file") {

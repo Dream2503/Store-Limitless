@@ -2325,6 +2325,7 @@ export default function DashboardPage() {
                 activeTab={activeTab}
                 onTabSelect={handleTabChange}
                 onLogout={handleLogout}
+                onUploadClick={() => setShowUploadModal(true)}
                 storageUsed={storageUsed}
             />
         </div>
@@ -2339,6 +2340,7 @@ export default function DashboardPage() {
                         setSidebarOpen(false);
                     }}
                     onLogout={handleLogout}
+                    onUploadClick={() => setShowUploadModal(true)}
                     storageUsed={storageUsed}
                 />
             </div>

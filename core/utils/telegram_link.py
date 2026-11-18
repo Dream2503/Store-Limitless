@@ -158,6 +158,7 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
             raise ValueError("Telegram message was not found or does not contain a downloadable file attachment")
 
         client.add_event_handler(receive_bot_message, events.NewMessage(incoming=True))
+        client.add_event_handler(receive_bot_message, events.MessageEdited())
 
         try:
             try:
@@ -248,6 +249,7 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
 
         finally:
             client.remove_event_handler(receive_bot_message, events.NewMessage(incoming=True))
+            client.remove_event_handler(receive_bot_message, events.MessageEdited())
 
     finally:
         await client.disconnect()

@@ -1,20 +1,20 @@
 # StoreLimitless
 
 StoreLimitless is a self-hosted personal cloud-storage application. It combines a React/Vite web interface, a Python/FastAPI service layer, PostgreSQL
-metadata, Redis-backed coordination, and Discord/Telegram as remote storage providers. It supports multi-file and nested-folder uploads, batch and
-remote-link imports, torrent file selection, resumable browser downloads, seekable HTTP streaming, file previews, folder/trash management, and an
-FTP-compatible virtual filesystem. A separate Next.js service under `backend/storelimitlessbackend/` supplies the stable Vercel API proxy used by
+metadata, Redis-backed coordination, and Discord/Telegram as remote storage providers. It supports multi-file and nested-folder uploads, one-source-at-a-time remote imports, torrent file selection, resumable downloads, seekable HTTP
+streaming, on-the-fly multi-file ZIP downloads, file previews, folder/trash management, keyboard and touch workflows, and an FTP-compatible virtual
+filesystem. A separate Next.js service under `backend/storelimitlessbackend/` supplies the stable Vercel API proxy used by
 `CLOUD` mode.
 
 The web UI is branded **DriveBot** in places, while the overall application and server are called **StoreLimitless**.
 
 > **Scope:** This document covers the StoreLimitless application, including its internal backend, frontend, storage/transfer code, FTP interface,
 > runtime data, and packaging workflow. The separate Python SDK source package is not part of the tracked application tree. The build script generates
-> versioned Linux and Windows `LOCAL`/`CLOUD` executables in the repository-root `releases/linux` and `releases/windows` directories. It also copies
-> only the `LOCAL`
-> executable for each selected platform into `Store-Limitless-api` under the SDK's standard `StoreLimitlessServer_<VERSION>` filename. Those
-> binaries are generated artifacts, not application source. The internal service under `backend/server/` is documented because the frontend, uploads,
-> streaming, and FTP integration depend on it.
+> versioned `LOCAL`/`CLOUD` executables under the repository-root `releases/linux` and `releases/windows` directories for selected targets. With no arguments,
+> `build.sh` now builds only the Linux `CLOUD` executable; when platform flags are supplied, each selected OS produces both variants. The script also copies only the
+> `LOCAL` executable for each selected platform into `Store-Limitless-api` under the SDK's standard `StoreLimitlessServer_<VERSION>` filename. Those binaries are generated
+> artifacts, not application source. The internal service under `backend/server/` is documented because the frontend, uploads, streaming, and FTP integration depend on it.
+
 
 ---
 
@@ -64,21 +64,23 @@ The application provides these user-facing capabilities:
 - Browse a user's virtual home directory and nested folders. The dashboard loads the directory tree into an account-scoped in-memory cache, so
   navigating between folders does not require a fresh request for every directory.
 - Refresh the complete file/folder tree explicitly from the dashboard; a full browser reload also clears the JavaScript memory cache and triggers a
-  fresh load.
+  fresh load. A deliberate upward mouse-wheel gesture at the top of the page or a downward touch pull at the top of the scroll chain reloads the page.
 - Calculate recursive folder sizes and show total size in the item-details dialog.
 - Upload multiple local files from the browser, including folders with nested directories. Dropped/selected folder paths are recreated under the
   chosen destination.
-- Submit multiple local files, complete folder trees, or multiple remote links as one upload task. Every item appears in the tray as queued
-  immediately, then runs sequentially; chunks within the current browser file may transfer concurrently.
+- Submit multiple local files or complete folder trees as one upload task. Remote-link import is deliberately one source per task: use one direct
+  HTTP(S), Google Drive, YouTube, magnet, or supported Telegram message URL at a time. Browser-file batches appear in the tray as queued immediately
+  and run sequentially; chunks within the current browser file may transfer concurrently.
 - After the server registers the task, the upload dialog closes automatically. The task and its per-item statuses remain in the dashboard tray after
   completion, failure, or cancellation until the user removes that task.
+- Expand the upload tray into the dedicated full-screen `/upload-tray` page, then return to the directory from which it was opened.
 - Cancel an active batch from the tray to abort active browser chunk requests, stop the current backend worker where possible, skip queued items, and
   clean up the uncommitted browser-upload temporary state. The backend locks database finalization against cancellation so an interrupted browser file
   is not saved as a partial database record.
 - Remove one terminal task with its row's **X** control or use **Clear all** to cancel active tasks and clear the tray history.
 - Apply optimistic UI updates for single and bulk deletes and item moves, then reconcile with the backend in the background. If a mutation fails, the
   tree is refreshed and an error is shown.
-- Import one or many remote links by pasting one HTTP (S) URL per line.
+- Import a single remote source per task, including direct HTTP(S) downloads, Google Drive, YouTube, magnet torrents, and supported Telegram file-message links.
 - Download direct HTTP (S) file URLs, import Google Drive files, process YouTube URLs, and select individual files from magnet torrents.
 - Show YouTube processing stages in the upload tray: downloading video, downloading audio, merging audio/video, and uploading to the selected storage
   provider.
@@ -86,6 +88,10 @@ The application provides these user-facing capabilities:
   completed, failed, skipped, and cancelled states where applicable.
 - Download stored files through a pause/resume tray in browsers that support the File System Access API. Byte-range requests and an IndexedDB job
   record allow supported downloads to resume after a page reload.
+- Download two or more selected active files as a named ZIP archive. The server streams the ZIP while reading source files from remote storage; it does
+  not first stage a complete archive on disk.
+- Use dashboard keyboard shortcuts for selection, opening, renaming, trashing, permanent deletion, details, and parent-folder navigation. Mouse and touch
+  users can also use context menus, drag selection, long-press selection, and drag-and-drop moves.
 - View media in a custom video player with seeking, volume, speed control, fullscreen, picture-in-picture (when supported), and keyboard shortcuts;
   preview PDFs, audio, Markdown, and common text/source formats.
 - Use keyboard shortcuts on the upload page to return to the dashboard or trigger the upload/import action.
@@ -201,6 +207,7 @@ generated caches, virtual environments, and dependency folders are deliberately 
 │   │   ├── jwt_handler.py            # Bearer-token creation/validation
 │   │   ├── security.py               # Password hashes and signed public tokens
 │   │   ├── utils.py                  # Input validation helpers
+│   │   ├── zip_stream.py             # Streaming ZIP64 archive writer
 │   │   └── routers/
 │   │       ├── __init__.py            # Router composition
 │   │       ├── accounts.py           # Registration, login, metadata
@@ -231,7 +238,8 @@ generated caches, virtual environments, and dependency folders are deliberately 
 │       ├── download_utils.py         # Direct HTTP, Google Drive, YouTube, and libtorrent helpers
 │       ├── env.py                    # Credentials/configuration constants
 │       ├── progress.py               # Progress tracking and part uploader
-│       └── telegram_.py              # Telegram storage provider
+│       ├── telegram_.py              # Telegram storage provider
+│       └── telegram_link.py          # Telegram message-link resolver and user-session login
 ├── data/
 │   ├── logs.lock                     # Runtime log-file lock
 │   ├── logs.log                      # Runtime application log
@@ -249,6 +257,7 @@ generated caches, virtual environments, and dependency folders are deliberately 
 │   │       ├── Landing.jsx               # Public product landing page
 │   │       ├── Auth.jsx                  # Sign-in and registration forms
 │   │       ├── Dashboard.jsx             # Dashboard state, actions, selection, and drag/drop
+│   │       ├── UploadTrayPage.jsx         # Dedicated full-screen upload task tray
 │   │       └── dashboard/
 │   │           ├── constants.js          # API URL, navigation, and shared style/storage constants
 │   │           ├── utils.js              # Path, selection, token, file-kind, and display helpers
@@ -265,6 +274,7 @@ generated caches, virtual environments, and dependency folders are deliberately 
 │   │           │   ├── BackgroundOperationsTray.jsx # Component exists; not currently wired into Dashboard.jsx
 │   │           │   ├── MoveModal.jsx
 │   │           │   ├── UploadModal.jsx
+│   │           │   ├── UploadTrayPage.jsx   # Full-screen tray wrapper
 │   │           │   ├── FileContentPreview.jsx
 │   │           │   └── ViewFile.jsx
 │   │           ├── uploadFiles.js            # Directory/drop path extraction
@@ -432,54 +442,57 @@ temporary files and reports a restart-required failure rather than silently trea
 Temporary browser upload files are stored beneath `TRANSFER_PATH` in a per-user/job layout. In source mode this is under `data/transfer/`, the runtime
 scratch space cleaned up when the application shuts down.
 
-### Import one or many remote links
+### Remote-link imports
 
-`POST /auth/upload-link` starts a background import job for one URL. `GET /auth/torrent-preview` resolves magnet metadata and returns its file list
-without downloading payload data. Torrent metadata inspection is tracked as a persistent upload-tray task and runs after the upload dialog closes, so
-the user can continue using the website while inspection proceeds. When metadata is ready, the tray exposes **Select files and start**. The selection
-dialog shows files from inside the current torrent root (without repeating the root directory name); when multiple magnet links are queued, the modal
-advances one torrent at a time. Selected file records appear individually in the tray; libtorrent can download selected files concurrently, while
-storage uploads remain sequential. Completed files stay visible in the task until the user clears or dismisses it. The upload page accepts **one
-HTTP (S) URL or supported magnet URI per line** and
-validates the complete selection before creating a single batch with `POST /auth/upload-batches`. Each link is then imported sequentially as a child
-job. The one tray task shows every link up front and records its own status, while child jobs provide backend progress.
+`POST /auth/upload-link` starts a background import job for **one remote source URL**. Link mode intentionally accepts one HTTP(S) URL or one valid
+torrent magnet URI per task. It no longer treats newline-separated URLs as a multi-link batch; start another import for each additional source. Local
+multi-file and nested-folder uploads remain batch operations.
 
-Telegram message links are processed before the normal link-import job is created. For a `t.me` message URL, StoreLimitless uses a separate Telethon **user** session to open the original message, require a file/media attachment, forward that original message to `@PremiumFiletoLink_Bot`, and wait up to 90 seconds for a response containing the actual URL behind a **FAST DOWNLOAD** button or inline hyperlink. The resolver follows HTTP redirects without buffering the download and passes the resulting URL into the existing `link_upload()` workflow. It never falls back to the Telegram message URL. Missing messages, failed forwarding, missing links, unauthenticated sessions, and timeouts return explicit errors before an upload job is registered.
+Torrent metadata inspection is tracked in the upload tray. Before payload downloading starts, `GET /auth/torrent-preview` resolves one magnet and
+returns its file list. When metadata is ready, the tray exposes **Select files and start**. Every file is selected by default; deselect unwanted files.
+The picker shows names relative to the torrent root, without repeating the root directory name. Selected torrent files download into temporary staging,
+then are uploaded sequentially to the chosen storage provider. The upload tray shows per-file download/upload state and progress.
 
-To enable this workflow:
+The server chooses the downloader from the URL host or URI scheme:
 
-1. Configure the existing `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` application credentials used by the Telegram integration.
-2. Open `@PremiumFiletoLink_Bot` in Telegram and press **Start** once, if this account has not started it before.
-3. From the repository root, run `python -m core.utils.telegram_link --login` and complete the phone-number, login-code, and (if enabled) two-step-verification prompts.
-4. Keep the generated `telegram_user.session` file private. It authenticates your Telegram user account and is separate from the existing Telegram storage-bot session. Do not commit or share it.
-
-The Telegram account must have access to the linked channel/group and permission to forward its file message. Public message links and private `t.me/c/…/…` links are supported when that account can access the message. This feature requires Telethon to be able to connect to Telegram at import time.
-
-The server chooses the downloader from the URL host:
-
-- **Direct HTTP (S) file URLs** use a streamed HTTP download. The response should contain the file bytes, not an ordinary website page. The downloader
-  uses
-  response filename metadata when available and rejects likely HTML pages that do not look like file downloads.
+- **Direct HTTP(S) file URLs** use a streamed download. The response should contain file bytes, not an ordinary web page. The downloader uses filename
+  metadata where available, rejects likely HTML pages that do not look like file downloads, and attempts to resume an interrupted transfer with HTTP
+  `Range` requests. Resume is safe only when the origin confirms the exact requested byte offset and supports byte-range responses.
 - **Google Drive links** (`drive.google.com`) use the Google Drive downloader. The current implementation requests file name/size metadata through the
   Google Drive API, so the configured Google API key and access to the file are required.
-- **YouTube links** (`youtube.com`, subdomains of `youtube.com`, and `youtu.be`) use `yt-dlp` and FFmpeg to download/process media. The downloader
-  resolves a stable media filename from yt-dlp's metadata/output path, updates the task name when available, and publishes distinct progress phases
-  for
-  video download, audio download, audio/video merging, and storage upload. Stage percentages are available when yt-dlp or the uploader reports byte
-  totals; merging does not necessarily have a meaningful percentage.
-- **Magnet links** (`magnet:?xt=urn:btih:...` or `magnet:?xt=urn:btmh:...`) use the `libtorrent` engine. The downloader reports peer discovery,
-  metadata retrieval, downloading, and the completed/seeding transition through the shared `Progress` object.
+- **YouTube links** (`youtube.com`, its subdomains, and `youtu.be`) use `yt-dlp` and FFmpeg to download/process media. The downloader resolves a
+  stable media filename from metadata/output paths and publishes separate progress phases for video download, audio download, audio/video merging, and
+  storage upload. Merging does not necessarily have a meaningful percentage.
+- **Magnet links** (`magnet:?xt=urn:btih:...` or `magnet:?xt=urn:btmh:...`) use the `libtorrent` engine. A single magnet task can import several
+  selected files from the same torrent. Progress reports peer discovery, metadata retrieval, downloading, and file-level upload progress.
+- **Telegram message links** (`t.me`, `telegram.me`, including private `t.me/c/…/…` links the logged-in account can access) are resolved before the
+  regular URL downloader starts. StoreLimitless uses a separate Telethon **user** session to open the original message, require a media attachment,
+  forward that original message to `@PremiumFiletoLink_Bot`, and wait up to 90 seconds for a response containing the actual URL behind a **FAST
+  DOWNLOAD** button or inline hyperlink. The resolver follows HTTP redirects without buffering the file and sends the resulting URL through the normal
+  import workflow. It never falls back to downloading the Telegram message page itself. Missing/inaccessible messages, forwarding failures, missing
+  download targets, unauthenticated sessions, and timeouts fail the import with an explicit error.
 
-For multiple imports, enter one URL per line, for example:
+To enable Telegram message-link imports:
+
+1. Configure the existing `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` credentials used by the Telegram integration.
+2. Open `@PremiumFiletoLink_Bot` in Telegram and press **Start** once, if this account has not started it before.
+3. While StoreLimitless is running, enter `telegram-login` in its terminal and complete the phone-number, login-code, and (if enabled) two-step
+   verification prompts. In source mode, run `python -m core.utils.telegram_link --login` from the repository root instead.
+4. Keep the generated `telegram_user.session` file private. It authenticates the Telegram user account and is separate from the existing Telegram
+   storage-bot session. Do not commit or share it.
+
+The Telegram user account must have access to the linked channel/group and permission to forward its file message. This workflow requires Telethon and
+outbound connectivity to Telegram. The other downloader dependencies are `yt-dlp` plus FFmpeg for YouTube, and the Python `libtorrent` module for
+magnet torrents.
+
+For a direct-download example, submit a single source URL such as:
 
 ```text
 https://downloads.example.org/archive.zip
-https://downloads.example.org/video.mp4
-magnet:?xt=urn:btih:TORRENT_INFO_HASH&dn=example
 ```
 
-Blank lines are ignored. The batch contains one item per non-empty line. HTTP (S) links must be valid URLs, and magnet links must include a supported
-`xt` info-hash topic.
+Blank lines or additional URLs do not form a multi-source import task. Direct links to ordinary HTML pages, authenticated downloads the server cannot
+access, expired links, or unsupported provider-specific pages may fail even when the URL is syntactically valid.
 
 ### Torrent download and upload flow
 
@@ -490,8 +503,8 @@ and the helpers used for direct HTTP (S), Google Drive, and YouTube downloads.
 
 1. Before importing a magnet, the frontend calls `GET /auth/torrent-preview`. The backend resolves metadata and returns the file paths and sizes
    without intentionally downloading payload data.
-2. The frontend opens a selection modal for each magnet link in queue order. Every file is selected by default; users can deselect unwanted files. For
-   multiple magnets, the modal advances one torrent at a time.
+2. The frontend opens a selection modal for the imported magnet. Every file is selected by default; users can deselect unwanted files. Each remote-link
+   task contains one magnet, but that torrent can contribute multiple selected files.
 3. The selected original file indexes are passed to `POST /auth/upload-link`. Libtorrent assigns normal priority to selected files and priority zero
    to unselected files, focusing payload transfer on the requested files.
 4. Progress reports the selected payload's byte total, connected peers, and seed count. The resolved torrent name is propagated into the active job
@@ -516,8 +529,8 @@ imports require the Python `libtorrent` module to be installed in the runtime en
 
 #### Torrent selection dialog keyboard behavior
 
-The persistent upload tray opens the torrent picker after a metadata-preview task is ready. Every file is checked by default; checked files are the
-ones that will be imported. The keyboard focus highlight is deliberately separate from the checkbox selection so navigating does not change the upload
+The persistent upload tray opens the torrent picker after a metadata-preview task is ready. Every file in the current torrent is checked by default;
+checked files are the ones that will be imported. The keyboard focus highlight is deliberately separate from the checkbox selection so navigating does not change the upload
 set by itself.
 
 | Key       | Action                                                                                        |
@@ -638,6 +651,19 @@ JavaScript. To use the modern folder picker and disk-backed resumable downloads 
 
 ---
 
+### Streaming multi-file ZIP downloads
+
+Select at least two active files in the dashboard, open the context menu, choose **Download as ZIP**, and enter the archive filename in the app's
+filename dialog. The frontend requests a short-lived ZIP token from `POST /auth/files/zip-link`, then starts a browser download from
+`GET /public/download-zip/{token}?filename=...`.
+
+The FastAPI endpoint streams a ZIP64 archive while it reads each source file from the configured remote storage provider. It does not download all
+files into a temporary server directory or create a complete intermediate archive on disk. Output is streamed in ZIP STORE mode, which avoids
+CPU-heavy compression and permits an exact content length. A ZIP token expires after 15 minutes; create a new link if it expires before the download
+starts. Large downloads still require a stable connection, and a remote-storage failure after response streaming begins can leave an incomplete archive.
+
+---
+
 ## FTP interface
 
 The FTP service exposes the same StoreLimitless data through `pyftpdlib`; it does not expose the host's real root filesystem.
@@ -733,16 +759,17 @@ dashboard UI and data lifecycle logic are organized under `frontend/src/pages/da
 
 ### Browser routes
 
-| Route           | Page / behavior                                                                                          |
-|-----------------|----------------------------------------------------------------------------------------------------------|
-| `/`             | Public product landing page (`Landing.jsx`). It introduces StoreLimitless and links to login and signup. |
-| `/login`        | Sign-in form (`Auth.jsx` with `initialMode="login"`).                                                    |
-| `/signup`       | Registration form (`Auth.jsx` with `initialMode="signup"`).                                              |
-| `/home`         | Dashboard root.                                                                                          |
-| `/home/*`       | Dashboard at a nested folder route.                                                                      |
-| `/dashboard`    | Legacy route that redirects to the matching `/home` route.                                               |
-| `/upload`       | Standalone file-upload / remote-link import page (`dashboard/components/UploadModal.jsx`).               |
-| `/view/:fileId` | File preview and media player (`dashboard/components/ViewFile.jsx`).                                     |
+| Route          | Page / behavior                                                                                                   |
+|----------------|--------------------------------------------------------------------------------------------------------------------|
+| `/`            | Public product landing page (`Landing.jsx`) with product information and sign-in / registration links.              |
+| `/login`       | Sign-in form (`Auth.jsx` with `initialMode="login"`).                                                              |
+| `/signup`      | Registration form (`Auth.jsx` with `initialMode="signup"`).                                                       |
+| `/home`        | Dashboard root.                                                                                                   |
+| `/home/*`      | Dashboard at a nested folder route.                                                                               |
+| `/dashboard`   | Legacy route that redirects to the matching `/home` route.                                                        |
+| `/upload`      | Standalone upload/import route (`dashboard/components/UploadModal.jsx`).                                          |
+| `/upload-tray` | Dedicated full-screen upload task tray (`UploadTrayPage.jsx`); minimize returns to the originating folder.       |
+| `/view/:fileId` | File preview and media player (`dashboard/components/ViewFile.jsx`).                                               |
 
 ### Frontend module map
 
@@ -752,7 +779,8 @@ dashboard UI and data lifecycle logic are organized under `frontend/src/pages/da
   login form.
 - `src/main.jsx` mounts React into the HTML root element.
 - `src/index.css` contains global styling, the slim green-accent scrollbar theme for page and nested scroll regions, reduced-motion
-  accommodations, mobile touch-selection rules, and the dashboard scroller's top-edge overscroll behavior for pull-to-refresh.
+  accommodations, and touch-selection rules. `src/App.jsx` installs the app-managed top-edge refresh gesture: a deliberate upward mouse-wheel gesture
+  while at the top, or a downward touch pull at the top of the scroll chain, reloads the current page.
 - `src/pages/Landing.jsx` renders the public-facing product page, including the responsive navigation, product-preview illustration, feature section,
   “how it works” steps, and sign-up/login calls to action. The product preview is illustrative rather than live account data.
 - `src/pages/Auth.jsx` handles both login and signup modes and stores the bearer token in `localStorage` under `token`.
@@ -774,9 +802,11 @@ All dashboard-specific modules are under `src/pages/dashboard/`:
 - `components/MoveModal.jsx` browses destination folders, lets the user choose or deselect a destination, and validates moves before submission.
   Selecting a different directory changes the destination; selecting the current choice again toggles it off and returns the destination to the folder
   currently being browsed.
-- `components/UploadModal.jsx` handles local-file uploads, nested folder uploads, and HTTP (S)/magnet link imports. It registers one batch containing
-  the entire selection, closes the modal automatically, then processes items sequentially.
-- `components/UploadJobsTray.jsx` displays persistent upload/import batches with aggregate progress, cancellation, per-task dismissal, and Clear all.
+- `components/UploadModal.jsx` handles multi-file and nested-folder uploads, plus one-source-at-a-time HTTP(S), Google Drive, YouTube, magnet, and
+  Telegram message-link imports. Local file/folder selections are registered as one batch; a remote URL is one import task. The dialog closes once the
+  server has accepted the task, then work continues in the tray.
+- `components/UploadJobsTray.jsx` displays persistent upload/import jobs with aggregate and per-file progress, cancellation, per-task dismissal, Clear all,
+  and a maximize/pop-out control. The full-screen `/upload-tray` view uses the same Redis-backed task list and can return to the directory that opened it.
   A single-file batch uses the compact single-file row layout; folder and multi-file batches retain the nested per-item status list. Torrent items
   show
   distinct queued/downloading/downloaded/uploading/completed/failed/cancelled states and per-file progress. YouTube task headings use the resolved
@@ -786,6 +816,7 @@ All dashboard-specific modules are under `src/pages/dashboard/`:
   links can surface video/audio download, merge, and storage-upload phases. Completed task history stays visible until dismissed. The
   torrent-selection
   modal uses checked boxes to determine the upload set; arrow-key focus movement is not itself selection.
+- `src/pages/UploadTrayPage.jsx` wraps the shared upload tray in a full-screen route and preserves the dashboard route to return to when minimized.
 - `components/DownloadJobsTray.jsx` displays browser-local resumable download tasks, with pause/resume, progress, removal, and clearing completed
   jobs.
 - `utils/resumableDownloads.js` stores resumable download metadata and browser file handles in IndexedDB.
@@ -896,21 +927,21 @@ not synchronize separate deployments. Redis is operational state rather than the
 shared job tray can be lost. In addition, background task handles are process-local, so a Redis job record alone cannot resume an interrupted transfer
 after the backend process/runtime has stopped.
 
-### Upload page keyboard shortcuts and multiple links
+### Upload page keyboard shortcuts and link behavior
 
 On the standalone upload page:
 
 - **Escape** returns to the dashboard route for the current directory.
 - **Backspace** returns to the dashboard when focus is not in an editable field; normal text editing is preserved.
-- **Enter** triggers the upload/import action when it is enabled, except inside the multi-link text area, where Enter inserts a new line. Key repeat
-  is ignored when triggering the action.
-- **Folder picker:** the Choose folder control uses `window.showDirectoryPicker()` when the browser supports it, recursively gathers files and records
-  relative paths, then recreates those nested paths at upload time. Browsers/security contexts that do not expose that API use a hidden
-  `webkitdirectory` input as a fallback; browser-owned multi-file confirmation prompts may therefore still appear on ordinary HTTP LAN origins.
-- In **Link** mode, paste or type one HTTP (S) URL per line. Blank lines are ignored. The page validates all non-empty URLs before creating separate
-  import jobs, then returns to the dashboard so their progress can be followed in the tray.
-- In **File** mode, users can select multiple local files or drop files into the upload area. Transfers use the chunked upload workflow documented
-  in [Upload and storage flow](#upload-and-storage-flow).
+- **Enter** triggers the upload/import action when it is enabled, except when focus is in a text-editing control. Key repeat is ignored so the same
+  action is not accidentally started more than once.
+- **Folder picker:** the Choose folder control uses `window.showDirectoryPicker()` when supported, recursively gathers files and records relative paths,
+  then recreates those nested paths at upload time. Browsers/security contexts without that API use a hidden `webkitdirectory` input as a fallback;
+  browser-owned multi-file confirmation prompts may therefore still appear on ordinary HTTP LAN origins.
+- In **Link** mode, submit one publicly accessible HTTP(S) URL, one valid magnet URI, or one supported Telegram message link per task. Multi-link input
+  is disabled. Begin another import to process another remote source.
+- In **File** mode, users can select multiple local files or folders, or drop files/folders into the upload area. Transfers use the chunked upload
+  workflow documented in [Upload and storage flow](#upload-and-storage-flow).
 
 ### Selection and move behavior
 
@@ -926,21 +957,17 @@ On touch screens, the workspace uses explicit gestures because desktop drag and 
 - **Long-press and drag an item:** after the long press selects the item, moving the finger starts a move preview. Drop the selected items on a valid
   folder or breadcrumb target to move them. Invalid destinations, including moving a folder into itself or a descendant, are rejected.
 - **Long-press empty workspace and drag:** starts a selection rectangle for selecting multiple visible items.
-- **Pull to refresh from the background:** when the dashboard's main scroll area is already at its top edge, pulling down on empty
-  workspace/background
-  allows the browser's native pull-to-refresh gesture. This is not limited to the header. The `.dashboard-main-scroll` class sets vertical overscroll
-  to
-  `auto`, overriding the general `overscroll-behavior: contain` rule used for other nested scroll areas.
+- **Top-edge refresh:** when the scroll chain is already at the top, a deliberate downward touch pull reloads the current page. A deliberate upward
+  mouse-wheel gesture at the top also reloads it. This is implemented by `src/App.jsx` rather than delegated to browser-native pull-to-refresh behavior.
 - **Scroll normally:** finger movement greater than about 9 px before the long-press activates cancels the pending item/background gesture, leaving
   the
   browser's native scrolling behavior in control. When the dashboard is not at the top, pulling up continues normal content scrolling. A touch gesture
   is
   cancelled if it leaves the dashboard workspace or the browser emits `touchcancel`.
 
-The touch behavior uses the workspace's touch events and global document listeners rather than relying on native HTML5 drag-and-drop. Pull-to-refresh
-itself
-is browser/OS-managed and may vary by browser, installed-app mode, and platform; test it in the actual iOS/Android browsers you intend to support. The
-visible **Refresh** button is separate: it reloads the dashboard's file/folder data without requiring a full browser page reload.
+The touch behavior uses the workspace's touch events and global document listeners rather than relying on native HTML5 drag-and-drop. Top-edge refresh
+uses a separate global listener and reloads the page only after the intentional gesture threshold is reached. The visible **Refresh** button is different:
+it reloads dashboard file/folder data without requiring a full browser page reload.
 
 The move dialog fetches immediate children as the user browses and caches each visited directory for the lifetime of that dialog. A destination must
 pass the dashboard's move validation: moving a directory into itself or one of its descendants is rejected, as is a move with no effective destination
@@ -970,11 +997,10 @@ confirmation dialogs initially focus the destructive action; arrow keys can swit
 ### Global visual behavior
 
 `src/index.css` applies a narrow scrollbar style to the page and nested scrollable elements. The thumb is dark green at rest and brightens on
-hover/active state, with transparent tracks and scrollbar corners. It limits scroll chaining for common overflow utility classes, except that the
-`.dashboard-main-scroll` element explicitly uses `overscroll-behavior-y: auto` so a top-edge pull on the dashboard background can reach the browser's
-native
-pull-to-refresh behavior. The dashboard main scroller keeps horizontal overscroll contained. Global styles also respect reduced-motion preferences.
-Component-specific styling remains in Tailwind utility classes.
+hover/active state, with transparent tracks and scrollbar corners. It limits scroll chaining for common overflow utility classes and keeps horizontal
+overscroll contained. Global styles also respect reduced-motion preferences. `src/App.jsx` listens for a deliberate upward mouse-wheel gesture at the top
+or a downward touch pull at the top of the scroll chain and reloads the page once the relevant threshold is reached. Component-specific styling remains
+in Tailwind utility classes.
 
 ### API URL resolution
 
@@ -1037,6 +1063,8 @@ see [Security notes](#security-notes).
 | `DELETE /auth/trash/file/{fid}`                   | Permanently delete a file record from trash.                                                                       |
 | `DELETE /auth/trash/directory/{did}`              | Permanently delete a directory from trash.                                                                         |
 | `POST /auth/file/{fid}/public-link`               | Create a signed stream/download token for a file.                                                                  |
+| `POST /auth/files/zip-link`                        | Validate at least two active files and create a short-lived token for a streamed ZIP download.                     |
+| `GET /public/download-zip/{token}`                 | Stream a ZIP64 archive directly from remote source files without creating a complete temporary archive.            |
 
 The `/home` root is protected from being moved/renamed/deleted by the directory-management code. File and directory names are validated before path
 changes.
@@ -1091,8 +1119,10 @@ registered.
 The proxy's `/health` endpoint reports whether an upstream is registered and the last update timestamp. It reports registry state, not whether every
 API route is healthy. If browser API requests return `503`, check the health endpoint, confirm the cloud runtime is still running, inspect the
 registration logs, and verify that the Vercel and Python runtime use the same `STORELIMITLESS_PROXY_TOKEN` and valid Upstash Redis environment
-variables. If a request fails with a browser CORS error, inspect the actual response and `OPTIONS` preflight; a proxy-generated `503` is not the same
-as a response from FastAPI with its CORS headers.
+variables. Public stream, file-download, and ZIP-download responses also emit CORS headers for the production frontend origin because browsers may
+follow the stable proxy redirect to the current Cloudflare tunnel. If you change the frontend origin, update the allowlist in
+`backend/server/routers/public_routes.py` as well as the general FastAPI CORS configuration. If a request fails with a browser CORS error, inspect the
+actual final response and `OPTIONS` preflight; a proxy-generated `503` is not the same as a response from FastAPI with its CORS headers.
 
 The Next.js proxy project lives in `backend/storelimitlessbackend/`. Its `.next/`, `node_modules/`, `.turbo/`, and `coverage/` directories are
 generated artifacts and are removed by the successful root build cleanup when present. Keep `package.json`, `package-lock.json`, `app/`, `proxy.ts`,
@@ -1133,7 +1163,9 @@ with the StoreLimitless runtime.
 
 - `TRANSFER_PATH`: temporary downloads, staging files, and the disposable part cache.
 - `BACKUP_DIR`: CSV backup output directory under `backend/database/backup`.
-- `LOG_PATH` / `LOG_LOCK_PATH`: application log and file lock (`data/logs.log` and `data/logs.lock` in source mode).
+- `LOG_PATH` / `LOG_LOCK_PATH`: application log and file lock (`data/logs.log` and `data/logs.lock` in source mode). Application logs, discord.py
+  client/gateway messages, and stdout/stderr from the Redis process launched by StoreLimitless are written to `LOG_PATH` rather than the interactive
+  console. A Redis instance started independently by a system service keeps its own service-managed log destination.
 - `TELEGRAM_SESSION`: Telethon session file path, normally under the base data directory.
 - `TELEGRAM_USER_SESSION`: separate user-account session file at `BASE_DIR/telegram_user.session`, used only for forwarding source messages to the processing bot.
 - `FRONTEND_DIST`: built frontend assets used by packaged execution.
@@ -1288,6 +1320,9 @@ folders so one mode cannot accidentally reuse the other's intermediate files.
 Run the script from the repository root (or another directory; the script resolves paths relative to itself):
 
 ```bash
+# No arguments: build only the Linux CLOUD executable (default)
+./build.sh
+
 # Build both LOCAL and CLOUD Linux executables (2 files)
 ./build.sh 1 0
 
@@ -1301,8 +1336,9 @@ Run the script from the repository root (or another directory; the script resolv
 VERSION=0.2.0 ./build.sh 1 1
 ```
 
-The first argument selects Linux and the second selects Windows. Each argument must be `0` or `1`, and at least one must be `1`. The `VERSION`
-environment variable defaults to `0.1.0` and is incorporated into output filenames.
+With no arguments, the script builds only the Linux `CLOUD` executable. When arguments are supplied, provide both flags: the first selects Linux and
+the second selects Windows. Each argument must be `0` or `1`, and at least one must be `1`; every selected operating system then builds both `LOCAL`
+and `CLOUD` variants. The `VERSION` environment variable defaults to `0.1.0` and is incorporated into output filenames.
 
 The script requires Python 3, `file`, and npm. For a Windows build it also requires Wine, `wineboot`, `winepath`, and `wget`; it installs a 64-bit
 Windows Python runtime inside its Wine prefix. If pip is unavailable after installing Windows Python, the script tries `ensurepip` and then the
@@ -1311,8 +1347,8 @@ official
 
 ### Build variants and output layout
 
-The script writes the platform variants directly to the repository-root `releases/linux` and `releases/windows` directories. With the default
-`VERSION=0.1.0`, the
+The script writes selected platform variants directly to the repository-root `releases/linux` and `releases/windows` directories. A no-argument run
+produces only the Linux `CLOUD` file. With the default `VERSION=0.1.0`, the
 four possible outputs are:
 
 ```text
@@ -1499,10 +1535,10 @@ This project should be treated as a self-hosted application that requires securi
 - Confirm the selected data center name is exactly `Discord` or `Telegram`.
 - Verify access to the configured remote dump destination.
 - Check whether the temporary file still exists and whether the Redis upload session expired.
-- For URL imports, check that every link uses HTTP (S). Direct links must return downloadable file content, Google Drive imports require a valid file
-  link and configured Google API access, and YouTube imports require `yt-dlp` and FFmpeg.
-- When importing several links, use one URL per line. Check each job's separate status in the dashboard tray if one import fails while others
-  continue.
+- For remote imports, submit one source per task. Direct links must return downloadable file content; Google Drive imports require an accessible file
+  and configured Google API access; YouTube imports require `yt-dlp` and FFmpeg; magnet imports require `libtorrent` and reachable peers.
+- For `t.me` message links, configure `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`, start `@PremiumFiletoLink_Bot`, and authenticate the separate user
+  session with `telegram-login`. Confirm the account can open and forward the source message. Read import-stage/error details in the upload tray.
 - Inspect the returned upload status and server logs for the background transfer error.
 - If Chrome displays **“Upload N files to this site?”** after choosing a folder, check the address first. The modern `showDirectoryPicker()` API is
   restricted to secure contexts; an HTTP LAN URL such as `http://192.168.x.x:5173` typically falls back to the legacy `webkitdirectory` input, whose
@@ -1603,15 +1639,18 @@ At minimum, test the affected workflow through the same path a user uses:
     empty workspace starts marquee selection, and long-press-and-drag moves items to valid folders/breadcrumbs. Confirm that ordinary finger movement
     still
     scrolls the workspace and that cancelled/out-of-bounds gestures do not trigger a move.
-15. On a mobile browser, pull down on the dashboard background while the main scroller is at the very top and confirm the browser's native
-    pull-to-refresh
-    can trigger from the background as well as the header. Repeat after scrolling down and confirm upward finger movement scrolls content normally.
-    Also
-    verify that the dashboard's explicit Refresh button still reloads file/folder data.
-16. Exercise upload progress, cancellation, failure reporting, dismissal, and automatic directory synchronization after completion. Open the same
-    account on a second browser/device and verify that jobs and terminal actions are synchronized through the shared API and Redis instance.
-17. Run the frontend lint/build scripts that are actually declared in `frontend/package.json`.
-18. Test the packaged executable separately from development mode.
+15. At the top of the scroll chain, test the app-managed refresh gesture with a deliberate upward mouse-wheel gesture and a downward touch pull; verify
+    ordinary scrolling does not trigger it and that the dashboard's explicit Refresh button still reloads file/folder data.
+16. With at least two active files selected, create a named ZIP download and verify the browser receives a valid archive while the backend streams source
+    files without staging a complete ZIP on disk. Check that an expired ZIP token is rejected and that the browser-facing response includes the required
+    CORS headers in CLOUD mode.
+17. Exercise upload progress, cancellation, failure reporting, dismissal, and automatic directory synchronization after completion. Open the same
+    account on a second browser/device and verify that jobs and terminal actions are synchronized through the shared API and Redis instance. Expand the
+    upload tray, then minimize it and confirm it returns to the originating directory.
+18. If Telegram message-link import is enabled, authenticate the user session, submit an accessible test `t.me` file-message URL, and verify bot
+    resolution, download, storage upload, and failure behavior when the source or processing bot is unavailable.
+19. Run the frontend lint/build scripts that are actually declared in `frontend/package.json`.
+20. Test the packaged executable separately from development mode.
 
 Automated tests should be added for range parsing, chunk-count validation, upload-range merging, folder path rewriting, ownership/authorization,
 public-token expiry, and FTP seek behavior.
@@ -1656,3 +1695,19 @@ For licensing terms, see the repository's `LICENSE` file.
   so a resolved title can replace the source URL as the display name.
 - Torrent selection uses checkboxes as the source of truth for which files to import. All files start checked by default; keyboard focus highlighting
   is separate, and the picker isolates arrow-key navigation from the dashboard.
+- A Telegram `t.me` file-message import runs as a background task, forwards the source media message through the separately authenticated user session,
+  extracts the actual `FAST DOWNLOAD` target from the processing bot response, follows redirects, and then enters the normal download/upload workflow.
+  It fails closed if the original message, session, bot reply, or download target cannot be resolved.
+- Direct HTTP(S) imports can resume interrupted server-side downloads with validated HTTP byte-range requests. Data is appended only when the upstream
+  confirms the requested offset, so unsupported range servers fail instead of silently producing a corrupted file.
+- Multiple selected active files can be downloaded as a named ZIP. The ZIP64 writer streams from remote file readers without first staging source files or
+  a complete archive on the server; its signed download token is short-lived.
+- The upload tray has a dedicated `/upload-tray` full-screen route and returns to its originating dashboard folder when minimized. Sidebar Upload controls
+  open the upload dialog. An app-managed top-edge gesture reloads the page after an intentional upward mouse-wheel gesture or downward touch pull at the
+  top of the scroll chain.
+- Public file, stream, and ZIP responses include production-origin CORS headers so browser downloads can follow the stable Vercel proxy to the current
+  Cloudflare tunnel. The allowlist is in `backend/server/routers/public_routes.py` and must be kept in sync with the deployed frontend origin.
+- The Redis process started by StoreLimitless writes stdout/stderr to `logs.log`; discord.py's default console logging handler is disabled so client and
+  gateway messages can flow through the application's file logger. Expected Cloudflare disconnect noise is filtered from application logs.
+- Running `./build.sh` without arguments now builds only the Linux `CLOUD` executable. Supplying the two platform flags retains the explicit multi-platform
+  build workflow.

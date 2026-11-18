@@ -42,6 +42,10 @@ function isUnresolvedName(value, sourceIsYouTube) {
 }
 
 const LINK_STAGES = {
+    "processing telegram message": "Processing Telegram message",
+    "starting download": "Preparing download",
+    "downloading file": "Downloading file",
+    "downloading and uploading file": "Downloading file",
     "downloading video": "Downloading video",
     "downloading audio": "Downloading audio",
     "merging audio and video": "Merging audio and video",

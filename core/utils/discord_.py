@@ -155,7 +155,9 @@ class Discord(DataCenter, metaclass=ConfigMeta):
 
         try:
             write_log("INFO", Discord, "MAIN", "", "Starting Store Limitless Bot...")
-            Discord.app.run(Discord.TOKEN)
+            # Let discord.py messages propagate to the application's file logger.
+            # Its default setup installs a console StreamHandler, which we don't want.
+            Discord.app.run(Discord.TOKEN, log_handler=None)
 
         except Exception as error:
             Discord.startup_error = error

@@ -16,7 +16,7 @@ from time import monotonic, sleep
 from urllib import request
 from zipfile import ZipFile
 
-from core.config import TRANSFER_PATH
+from core.config import LOG_PATH, TRANSFER_PATH
 from core.data_center import Binaries
 from core.utils import write_log
 
@@ -192,7 +192,15 @@ def start_redis_server() -> Popen[bytes] | None:
 
     redis_data_dir: Path = TRANSFER_PATH.parent / "redis"
     redis_data_dir.mkdir(parents=True, exist_ok=True)
-    redis_process: Popen[bytes] = Popen([str(redis_path), "--bind", "127.0.0.1", "--port", "6379", "--dir", str(redis_data_dir)])
+    # Redis writes persistence and server status reports directly to stdout/stderr.
+    # Send both streams to the application's log file instead of the interactive console.
+    with LOG_PATH.open("ab") as redis_log:
+        redis_process: Popen[bytes] = Popen(
+            [str(redis_path), "--bind", "127.0.0.1", "--port", "6379", "--dir", str(redis_data_dir)],
+            stdout=redis_log,
+            stderr=STDOUT,
+        )
+
     deadline: float = monotonic() + 10
 
     while monotonic() < deadline:

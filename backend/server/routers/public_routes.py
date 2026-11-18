@@ -80,6 +80,29 @@ def _file_etag(file: File) -> str:
     return f'"{sha256(source.encode("utf-8")).hexdigest()}"'
 
 
+def _public_cors_headers(request: Request) -> dict[str, str]:
+    """Attach browser CORS headers directly to public media responses.
+
+    Media URLs are redirected by the stable Vercel proxy to the active Cloudflare
+    tunnel. The final response must carry CORS headers too; headers on the redirect
+    response alone do not authorize the browser to read the redirected byte ranges.
+    """
+
+    origin: str | None = request.headers.get("origin")
+
+    if origin != "https://storelimitless.vercel.app":
+        return {}
+
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type, Range, If-Range, If-None-Match, If-Modified-Since, Accept, Origin, X-Requested-With",
+        "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length, Content-Disposition, ETag",
+        "Vary": "Origin",
+    }
+
+
 def _content_disposition(filename: str, attachment: bool) -> str:
     """Build a safe ASCII fallback plus an RFC 5987 UTF-8 filename."""
 
@@ -92,6 +115,7 @@ def _content_disposition(filename: str, attachment: bool) -> str:
 async def _file_response(file: File, request: Request, *, attachment: bool, head_only: bool = False) -> Response:
     """Build a byte-range response with validators suitable for interrupted downloads."""
 
+    cors_headers: dict[str, str] = _public_cors_headers(request)
     range_header = request.headers.get("range")
     if_range = request.headers.get("if-range")
 
@@ -106,6 +130,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
             "Content-Length": "0",
             "X-Content-Type-Options": "nosniff",
             "X-Accel-Buffering": "no",
+            **cors_headers,
         }
         return Response(content=b"", status_code=200, headers=headers, media_type=content_type)
 
@@ -116,7 +141,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
         size = max(0, int(file.size))
         etag = _file_etag(file)
 
-        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes", "ETag": etag})
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes", "ETag": etag, **cors_headers})
 
     except OSError as error:
         raise HTTPException(status_code=502, detail=f"File storage metadata failure: {error}") from error
@@ -138,6 +163,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
         "Content-Length": str(size),
         "X-Content-Type-Options": "nosniff",
         "X-Accel-Buffering": "no",
+        **cors_headers,
     }
 
     start = stream.byte_range.start
@@ -218,6 +244,7 @@ def _safe_zip_download_filename(value: str | None) -> str:
 @router.get("/download-zip/{token}")
 async def public_zip_download(
         token: str,
+        request: Request,
         filename: str = Query(default="StoreLimitless-files.zip", max_length=180),
 ) -> Response:
     """Stream a multi-file ZIP directly from remote storage with no server-side archive staging."""
@@ -266,5 +293,6 @@ async def public_zip_download(
         # STORE-mode ZIP output has a predictable exact size, so browser download
         # managers can show the total without buffering or pre-compressing the files.
         "Content-Length": str(zip64_stored_content_length(entries)),
+        **_public_cors_headers(request),
     }
     return StreamingResponse(stream_zip64(entries), status_code=200, headers=headers, media_type="application/zip")

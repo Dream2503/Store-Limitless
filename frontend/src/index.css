@@ -100,6 +100,12 @@ body {
     background: #0b0e0c;
 }
 
+/* The app handles intentional top-edge refresh gestures itself on every route. */
+html,
+body {
+    overscroll-behavior-y: none;
+}
+
 :focus-visible {
     outline-offset: 3px;
 }

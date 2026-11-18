@@ -14,25 +14,37 @@ die() {
 
 usage() {
     cat <<USAGE
-Usage: $0 <linux_server:0|1> <windows_server:0|1>
+Usage: $0 [<linux_server:0|1> <windows_server:0|1>]
 
-Each selected OS builds both HOST variants: LOCAL and CLOUD.
+Without arguments, builds only the Linux CLOUD executable.
+
+When arguments are provided, each selected OS builds both HOST variants: LOCAL and CLOUD.
 
 Examples:
-  $0 1 0   # 2 Linux executables
-  $0 0 1   # 2 Windows executables
-  $0 1 1   # all 4 executables
+  $0          # Linux CLOUD executable only
+  $0 1 0      # 2 Linux executables (LOCAL + CLOUD)
+  $0 0 1      # 2 Windows executables (LOCAL + CLOUD)
+  $0 1 1      # all 4 executables
 USAGE
-    exit 1
 }
 
-[[ $# -eq 2 ]] || usage
-for arg in "$@"; do
-    [[ "$arg" == "0" || "$arg" == "1" ]] || usage
-done
+DEFAULT_CLOUD_ONLY=0
 
-BUILD_LINUX="$1"
-BUILD_WINDOWS="$2"
+if [[ $# -eq 0 ]]; then
+    BUILD_LINUX=1
+    BUILD_WINDOWS=0
+    DEFAULT_CLOUD_ONLY=1
+elif [[ $# -eq 2 ]]; then
+    for arg in "$@"; do
+        [[ "$arg" == "0" || "$arg" == "1" ]] || { usage; exit 1; }
+    done
+
+    BUILD_LINUX="$1"
+    BUILD_WINDOWS="$2"
+else
+    usage
+    exit 1
+fi
 
 if [[ "$BUILD_LINUX" != "1" && "$BUILD_WINDOWS" != "1" ]]; then
     die "Nothing to build. Select Linux, Windows, or both."
@@ -154,8 +166,13 @@ copy_local_to_sdk_bin() {
 echo "========================================"
 echo "StoreLimitless Server Build"
 echo "Version: $VERSION"
-echo "Linux server:   $BUILD_LINUX (LOCAL + CLOUD)"
-echo "Windows server: $BUILD_WINDOWS (LOCAL + CLOUD)"
+if [[ "$DEFAULT_CLOUD_ONLY" == "1" ]]; then
+    echo "Linux server:   CLOUD only (default)"
+    echo "Windows server: disabled"
+else
+    echo "Linux server:   $BUILD_LINUX (LOCAL + CLOUD)"
+    echo "Windows server: $BUILD_WINDOWS (LOCAL + CLOUD)"
+fi
 echo "========================================"
 
 mkdir -p "$ROOT/build" "$RELEASE_ROOT" "$SDK_BIN_ROOT"
@@ -218,6 +235,10 @@ if [[ "$BUILD_LINUX" == "1" ]]; then
     "$LINUX_VENV/bin/python" -m pip install pyinstaller
 
     for host in LOCAL CLOUD; do
+        if [[ "$DEFAULT_CLOUD_ONLY" == "1" && "$host" != "CLOUD" ]]; then
+            continue
+        fi
+
         echo
         echo "==> Building Linux HOST=$host"
         set_host "$host"

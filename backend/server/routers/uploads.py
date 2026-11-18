@@ -855,6 +855,10 @@ async def upload_link(
                 # can return immediately while the bot works. Never pass the original
                 # Telegram message URL to the normal downloader.
                 await Redis.set(job_id, Progress(file.name, "Processing Telegram message", 0))
+
+                if batch_id:
+                    await update_upload_batch(batch_id, user.username, message="Processing Telegram message")
+
                 download_link, source_name = await resolve_telegram_message_link(link)
                 resolved_name: str = source_name.replace("\\", "/").rsplit("/", 1)[-1].strip()[:255] or "Telegram download"
                 file.name = resolved_name
@@ -871,7 +875,7 @@ async def upload_link(
                     latest_batch = await get_upload_batch_metadata(batch_id)
 
                     if latest_batch and latest_batch.get("username") == user.username:
-                        batch_updates: dict[str, Any] = {"current_name": file.name}
+                        batch_updates: dict[str, Any] = {"current_name": file.name, "message": "Downloading file"}
                         batch_items: Any = latest_batch.get("items")
 
                         if isinstance(batch_items, list):
@@ -945,6 +949,25 @@ async def upload_link(
 
                         if batch_updates:
                             await update_upload_batch(batch_id, user.username, **batch_updates)
+
+                if is_telegram_message_link and batch_id:
+                    stage_message: str = str(progress.message or "").strip().casefold()
+                    display_stage: str | None = None
+
+                    if stage_message in {"downloading and uploading file", "downloading file"}:
+                        display_stage = "Downloading file"
+                    elif stage_message.startswith("upload complete of id="):
+                        display_stage = "Finalizing upload"
+
+                    if display_stage:
+                        latest_batch = await get_upload_batch_metadata(batch_id)
+
+                        if (
+                                latest_batch
+                                and latest_batch.get("username") == user.username
+                                and str(latest_batch.get("message") or "") != display_stage
+                        ):
+                            await update_upload_batch(batch_id, user.username, message=display_stage)
 
                 await Redis.set(job_id, progress)
 

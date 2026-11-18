@@ -1027,7 +1027,7 @@ export default function ViewFile({active = true} = {}) {
         };
     }, [fileId, kind, navigate, publicToken]);
 
-    return (<div className="absolute inset-0 flex h-screen flex-col bg-[#0b0f0c] text-[#f3f7f4]"
+    return (<div className="absolute inset-0 z-10 flex h-screen flex-col bg-[#0b0f0c] text-[#f3f7f4]"
                  style={{
                      fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
                      visibility: active ? "visible" : "hidden",

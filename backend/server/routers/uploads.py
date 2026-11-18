@@ -1375,6 +1375,8 @@ async def upload_chunk(
 
     position: int = offset
     last_activity_heartbeat: float = 0.0
+    last_progress_persist: float = 0.0
+    progress_key = upload_chunk_progress_key(job_id)
 
     try:
         # Start the idle timer only once this authenticated chunk request is ready
@@ -1395,51 +1397,50 @@ async def upload_chunk(
                 await buffer.write(chunk)
                 position += len(chunk)
 
-                # Publish the in-flight body offset independently of completed ranges.
-                # GET /upload-batches can then reflect bytes arriving within a large
-                # 8 MiB request instead of waiting for the whole request to finish.
-                # This is display-only progress: record_written_range remains the sole
-                # source of committed ranges used by the storage worker.
-                await Redis.redis.hset(
-                    upload_chunk_progress_key(job_id),
-                    str(offset),
-                    str(min(total, position)),
-                )
-                await Redis.redis.expire(upload_chunk_progress_key(job_id), 60 * 60)
-
-                # A range is committed to Redis only after its complete request body
-                # arrives. Large/slow 8 MiB requests must still count as activity while
-                # their fragments are being written, or the producer's 120s idle timer
-                # can incorrectly fail a healthy transfer.
                 current_time = time()
+                # Progress is display-only until record_written_range() commits this
+                # entire request. Limit Redis writes to 10 Hz per chunk; the batch
+                # endpoint itself is polled at 2 Hz, so this is plenty of resolution.
+                if current_time - last_progress_persist >= 0.1:
+                    await Redis.redis.hset(progress_key, str(offset), str(min(total, position)))
+                    await Redis.redis.expire(progress_key, 60 * 60)
+                    last_progress_persist = current_time
+
+                # Large/slow request bodies still refresh the producer's idle heartbeat.
                 if current_time - last_activity_heartbeat >= 5:
                     await touch_upload_activity(job_id, current_time)
                     last_activity_heartbeat = current_time
 
-            # Flush once after the complete HTTP range has arrived. The range is
-            # not published to Redis until after this point, so the storage worker
-            # never treats buffered, incomplete bytes as a completed chunk.
+            # Flush once after the complete HTTP range has arrived. In-flight progress
+            # is not consumed by the storage worker; only the committed ranges are.
             await buffer.flush()
     except ClientDisconnect:
-        # The browser intentionally aborts in-flight XHRs when Pause is pressed.
-        # A partially written range is not recorded as complete, so resume safely
-        # retransmits this chunk from its original offset.
+        # Pause aborts in-flight XHRs. Drop their temporary display progress so a
+        # partial request is not mistaken for bytes that will remain after resume.
+        await Redis.redis.hdel(progress_key, str(offset))
         latest_metadata = await get_upload_job_metadata(job_id)
         detail = "Upload is paused." if latest_metadata and latest_metadata.get("paused") else "Chunk transfer was interrupted."
         return JSONResponse({"job_id": job_id, "detail": detail, "interrupted": True}, status_code=409)
+    except Exception:
+        await Redis.redis.hdel(progress_key, str(offset))
+        raise
 
     latest_metadata = await get_upload_job_metadata(job_id)
 
     if latest_metadata is None or latest_metadata.get("username") != user.username:
+        await Redis.redis.hdel(progress_key, str(offset))
         raise HTTPException(status_code=404, detail="Upload job not found")
 
     if latest_metadata.get("cancelled"):
+        await Redis.redis.hdel(progress_key, str(offset))
         raise HTTPException(status_code=409, detail="Upload was cancelled")
 
     if latest_metadata.get("failed"):
+        await Redis.redis.hdel(progress_key, str(offset))
         raise HTTPException(status_code=409, detail="Upload has already failed")
 
     if latest_metadata.get("paused"):
+        await Redis.redis.hdel(progress_key, str(offset))
         raise HTTPException(status_code=409, detail="Upload is paused")
 
     contiguous: int = await record_written_range(job_id, offset, position)

@@ -6,7 +6,7 @@ const ACTIVE_POLL_INTERVAL_MS = 500;
 const IDLE_POLL_INTERVAL_MS = 10000;
 
 /** Polls account-scoped batch tasks and retains terminal results until the user dismisses them. */
-export default function useUploadJobs(refreshDirectory) {
+export default function useUploadJobs(refreshDirectory, enabled = true) {
     const [uploadJobs, setUploadJobs] = useState([]);
     const refreshedTerminalIds = useRef(new Set());
     const hasActiveUploads = useRef(false);
@@ -14,10 +14,18 @@ export default function useUploadJobs(refreshDirectory) {
     refreshDirectoryRef.current = refreshDirectory;
 
     useEffect(() => {
+        // Dashboard pages remain mounted in the background so their upload workers
+        // survive navigation. Only the visible dashboard or standalone tray should
+        // own the shared batch poller; otherwise both pages poll the same account.
+        if (!enabled) return undefined;
+
         let cancelled = false;
         let polling = false;
         let pollAgain = false;
         let pollTimer = null;
+        // Keep active polling at no more than two requests per second, even when
+        // focus/online/optimistic events request an immediate refresh.
+        let nextPollAllowedAt = 0;
 
         const handleOptimisticBatch = (event) => {
             const batch = event.detail;
@@ -59,12 +67,13 @@ export default function useUploadJobs(refreshDirectory) {
             // can still stop an in-progress transfer.
             if (document.visibilityState !== "visible" && !hasActiveUploads.current) return;
 
-            const delay = immediate
+            const requestedDelay = immediate
                 ? 0
                 : hasActiveUploads.current
                     ? ACTIVE_POLL_INTERVAL_MS
                     : IDLE_POLL_INTERVAL_MS;
-            pollTimer = window.setTimeout(refreshUploadBatches, delay);
+            const minimumWait = Math.max(0, nextPollAllowedAt - Date.now());
+            pollTimer = window.setTimeout(refreshUploadBatches, Math.max(requestedDelay, minimumWait));
         };
 
         const authenticatedFetch = async (url, options = {}) => {
@@ -113,6 +122,7 @@ export default function useUploadJobs(refreshDirectory) {
                 return;
             }
             polling = true;
+            nextPollAllowedAt = Date.now() + ACTIVE_POLL_INTERVAL_MS;
             try {
                 const response = await authenticatedFetch(`${API_URL}/auth/upload-batches`);
                 if (!response) {
@@ -287,7 +297,7 @@ export default function useUploadJobs(refreshDirectory) {
             window.removeEventListener("beforeunload", warnBeforeUnload);
             document.removeEventListener("visibilitychange", handleVisibilityChange);
         };
-    }, []);
+    }, [enabled]);
 
     /** Remove one terminal task from the shared tray. */
     const dismissUploadJob = (jobId) => {

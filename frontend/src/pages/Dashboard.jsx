@@ -135,7 +135,7 @@ export default function DashboardPage({active = true} = {}) {
         pauseUploadJob,
         resumeUploadJob,
         clearAllUploadJobs,
-    } = useUploadJobs(refreshDirectory);
+    } = useUploadJobs(refreshDirectory, active);
     const [showFolderModal, setShowFolderModal] = useState(false);
     const [showUploadModal, setShowUploadModal] = useState(false);
     const [shareDialog, setShareDialog] = useState(null);

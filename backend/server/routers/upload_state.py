@@ -337,6 +337,9 @@ async def record_written_range(job_id: str, start: int, end: int) -> int:
             file_state["size"] = contiguous
 
         await Redis.set_json(session_key, state, ex=60 * 60)
+        # Once this range is committed, the session range list becomes its source
+        # of truth. Remove the temporary in-flight marker to keep Redis state small.
+        await Redis.redis.hdel(upload_chunk_progress_key(job_id), str(start))
         await touch_upload_activity(job_id, state["last_activity"] if isinstance(state.get("last_activity"), (int, float)) else None)
         return contiguous
 

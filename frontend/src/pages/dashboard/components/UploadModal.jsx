@@ -175,66 +175,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         checkSnapshot(window.__storeLimitlessUploadBatchesSnapshot);
     });
 
-    /**
-     * Wait for link-import jobs. Browser-file jobs use the shared batch snapshot,
-     * so there are no separate status requests for each file.
-     * @param {string} jobId
-     * @param {string} token
-     * @param {UploadCancelToken | null} cancelToken
-     * @param {((job: object) => void) | null} onProgress
-     * @param {{batchId: string, itemIndex: number} | null} batchContext
-     * @returns {Promise<void>}
-     */
-    const waitForJobCompletion = async (jobId, token, cancelToken = null, onProgress = null, batchContext = null) => {
-        if (batchContext) return waitForBatchItemCompletion(batchContext, cancelToken);
-
-        let delay = 500;
-        while (true) {
-            await waitWhilePaused(cancelToken);
-            const controller = new AbortController();
-            const timeoutId = window.setTimeout(() => controller.abort(), 8000);
-            let response;
-            try {
-                response = await fetch(`${API_URL}/auth/upload-jobs/${encodeURIComponent(jobId)}/status`, {
-                    headers: {Authorization: `Bearer ${token}`},
-                    cache: "no-store",
-                    signal: controller.signal,
-                });
-            } catch {
-                delay = Math.min(delay * 2, 3000);
-                await sleep(delay);
-                continue;
-            } finally {
-                window.clearTimeout(timeoutId);
-            }
-
-            if (!response.ok) {
-                if (response.status >= 500 || response.status === 408 || response.status === 429) {
-                    delay = Math.min(delay * 2, 3000);
-                    await sleep(delay);
-                    continue;
-                }
-                let detail = `Could not check upload status (${response.status})`;
-                try {
-                    const payload = await response.json();
-                    detail = payload.detail || detail;
-                } catch {
-                    // Preserve the status code when no JSON body is available.
-                }
-                throw new Error(detail);
-            }
-
-            const job = await response.json();
-            if (typeof onProgress === "function") onProgress(job);
-            if (job.status === "completed") return;
-            if (job.status === "cancelled") throw new Error(`${job.name || "Upload"} was cancelled.`);
-            if (job.status === "error") throw new Error(job.message || `${job.name || "Upload"} failed.`);
-
-            delay = 500;
-            await sleep(500);
-        }
-    };
-
     // ==========================================
     // Send ONE chunk (several of these run in parallel)
     // ==========================================
@@ -248,7 +188,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      * @param {Set<XMLHttpRequest>} jobXhrs
      * @returns {Promise<void>}
      */
-    const sendChunk = (uploadApiUrl, jobId, blob, offset, totalSize, jobXhrs, onProgress = null) => new Promise((resolve, reject) => {
+    const sendChunk = (uploadApiUrl, jobId, blob, offset, totalSize, jobXhrs) => new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         jobXhrs.add(xhr);
 
@@ -257,12 +197,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         xhr.open("PUT", `${uploadApiUrl}/public/upload/${encodeURIComponent(jobId)}/chunk?offset=${offset}&total=${totalSize}`);
         xhr.setRequestHeader("Authorization", `Bearer ${localStorage.getItem("token")}`);
         xhr.setRequestHeader("Content-Type", "application/octet-stream");
-
-        if (typeof onProgress === "function") {
-            xhr.upload.onprogress = (event) => {
-                if (event.lengthComputable) onProgress(Math.min(blob.size, Math.max(0, event.loaded)));
-            };
-        }
 
         xhr.onload = () => {
             done();
@@ -305,37 +239,21 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
     /**
      * Upload a file in parallel chunks with retries and per-job cancellation.
+     * Progress is read from the backend's live chunk-receive counters through
+     * GET /auth/upload-batches; browser progress events never issue HTTP requests.
      * @param {string} jobId
      * @param {File} selectedFile
      * @param {string} uploadApiUrl Direct API origin for the chunk bodies.
      * @param {UploadCancelToken} cancelToken
      * @param {Set<XMLHttpRequest>} jobXhrs
-     * @param {(progress: {transfer: number, total: number, progress: number, message: string}, immediate?: boolean) => void} onProgress
+     * @param {() => boolean} isItemCancelled
      * @returns {Promise<void>}
      */
-    const uploadFileInChunks = async (jobId, selectedFile, uploadApiUrl, cancelToken, jobXhrs, onProgress = null, isItemCancelled = () => false) => {
+    const uploadFileInChunks = async (jobId, selectedFile, uploadApiUrl, cancelToken, jobXhrs, isItemCancelled = () => false) => {
         const totalSize = selectedFile.size;
         // An empty file still sends one (empty) chunk so the server can finish.
         const chunkCount = Math.max(1, Math.ceil(totalSize / CHUNK_SIZE));
-        const completedChunks = new Set();
-        const activeChunkProgress = new Map();
         let nextIndex = 0;
-
-        const reportProgress = (immediate = false) => {
-            const confirmedBytes = Array.from(completedChunks).reduce(
-                (sum, index) => sum + Math.min(CHUNK_SIZE, Math.max(0, totalSize - index * CHUNK_SIZE)), 0
-            );
-            const inFlightBytes = Array.from(activeChunkProgress.values()).reduce((sum, loaded) => sum + loaded, 0);
-            const transfer = Math.min(totalSize, confirmedBytes + inFlightBytes);
-            const ratio = totalSize > 0 ? transfer / totalSize : 0;
-
-            onProgress?.({
-                transfer,
-                total: totalSize,
-                progress: ratio * 50,
-                message: "Sending file to server",
-            }, immediate);
-        };
 
         // Each lane keeps taking the next unsent chunk, so chunks start in order.
         /**
@@ -361,18 +279,9 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     }
 
                     try {
-                        await sendChunk(uploadApiUrl, jobId, blob, start, totalSize, jobXhrs, (loaded) => {
-                            activeChunkProgress.set(index, loaded);
-                            reportProgress();
-                        });
-                        completedChunks.add(index);
-                        activeChunkProgress.delete(index);
-                        reportProgress();
+                        await sendChunk(uploadApiUrl, jobId, blob, start, totalSize, jobXhrs);
                         break;
                     } catch (error) {
-                        activeChunkProgress.delete(index);
-                        reportProgress();
-
                         if (isItemCancelled()) {
                             throw new Error("File upload was cancelled.");
                         }
@@ -404,14 +313,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
         await Promise.all(Array.from({length: Math.min(PARALLEL_CHUNKS, chunkCount)}, lane));
         if (isItemCancelled()) throw new Error("File upload was cancelled.");
-        // The second half of the meter represents storage-provider upload, after
-        // the browser has successfully sent every chunk to the server.
-        onProgress?.({
-            transfer: totalSize,
-            total: totalSize,
-            progress: 50,
-            message: "Sending complete · uploading to storage",
-        }, true);
     };
 
     /**
@@ -1017,34 +918,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 if (uploadMode === "file") {
                     try {
                         await waitWhilePaused(batchTransfer);
-                        await uploadFileInChunks(
-                            jobId,
-                            selectedFile,
-                            directUploadApiUrl,
-                            cancelToken,
-                            batchTransfer.xhrs,
-                            (progress) => {
-                                // XHR reports partial bytes while each chunk is still in flight.
-                                // Persist these through the sparse Redis progress hash so the
-                                // 500ms tray poll observes fresh values without rewriting the queue.
-                                void publishBatch({
-                                    item_index: itemNumber - 1,
-                                    item_status: "uploading",
-                                    item_transfer: progress.transfer,
-                                    item_total: progress.total,
-                                    item_progress: progress.progress,
-                                    item_message: progress.message,
-                                }).catch((error) => {
-                                    console.error("Could not publish live upload progress:", error);
-                                });
-                            },
-                            isItemCancelled,
-                        );
+                        await uploadFileInChunks(jobId, selectedFile, directUploadApiUrl, cancelToken, batchTransfer.xhrs, isItemCancelled);
                         await waitWhilePaused(batchTransfer);
                         if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
                         // Sending browser chunks is not enough: wait until the storage provider
                         // confirms completion before the next queued file starts.
-                        await waitForJobCompletion(jobId, token, cancelToken, null, {batchId, itemIndex: itemNumber - 1});
+                        await waitForBatchItemCompletion({batchId, itemIndex: itemNumber - 1}, cancelToken);
                     } catch (error) {
                         const wasCancelled = cancelToken.cancelled || isItemCancelled() || /cancelled/i.test(error instanceof Error ? error.message : "");
                         if (!wasCancelled) {
@@ -1067,7 +946,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     }
                 } else {
                     try {
-                        await waitForJobCompletion(jobId, token, cancelToken);
+                        await waitForBatchItemCompletion({batchId, itemIndex: itemNumber - 1}, cancelToken);
                     } finally {
                         batchTransfer.activeJobId = "";
                     }

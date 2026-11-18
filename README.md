@@ -450,10 +450,11 @@ transfer layer.
    can therefore begin before the complete browser file has finished arriving.
 8. The transfer layer splits the file into provider-sized parts, uploads those parts, and collects their remote links. Browser-file metadata is saved
    only after the complete transfer succeeds and the worker acquires the same finalization lock used by cancellation.
-9. The frontend polls `GET /auth/upload-jobs/{job_id}/status` until the child job reaches a terminal state. Only then does the queue mark that batch
-   item completed and start the next file.
-10. The batch status is updated with per-item state and aggregate progress. The frontend polls `GET /auth/upload-batches` to keep the
-    account-synchronized tray current, and refreshes the affected directory after the whole batch reaches a terminal state.
+9. The frontend waits for the active item to reach a terminal state through the same batch snapshot; it does not issue a separate
+   `GET /auth/upload-jobs/{job_id}/status` poll.
+10. The dashboard polls `GET /auth/upload-batches` every 500 ms while a queue is active. The backend includes the current child status and byte
+    counters in that response, including bytes arriving inside unfinished chunk requests. This single snapshot drives the upload tray and wakes the
+    browser worker when an item completes. The affected directory is refreshed after the whole batch reaches a terminal state.
 
 The pending upload/session data has an approximately one-hour Redis TTL in the current implementation. Job metadata and the per-user job index are
 maintained separately so that the dashboard tray can discover jobs from another browser/device. The chunk receiver also detects interrupted/missing
@@ -893,7 +894,7 @@ refresh path, use the dashboard Refresh control to reconcile the client tree wit
 ### Upload progress and job behavior
 
 The upload tray is account-synchronized rather than being backed by a browser-local job list. `useUploadJobs.js` polls `GET /auth/upload-batches`
-about once per second. Redis stores each batch, every queued item, per-item state, and its child-job IDs under the authenticated username, so the same
+every 500 ms while active, with a single-flight guard and a minimum polling interval. Redis stores each batch, every queued item, per-item state, and its child-job IDs under the authenticated username, so the same
 account sees the same task tray across browsers/devices using the same backend and Redis instance. The browser's `localStorage` holds the
 authentication
 token, but it is not the source of truth for upload tasks.

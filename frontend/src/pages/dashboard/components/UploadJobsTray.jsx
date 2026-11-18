@@ -170,7 +170,10 @@ function useTransferMetrics(transfer, total, metricKey) {
 
         const sample = {transfer: currentTransfer, at: now, speed: nextSpeed};
         previous.current = sample;
+        // Keep the HMR cache bounded on accounts with a large amount of upload history.
+        cache.delete(key);
         cache.set(key, sample);
+        if (cache.size > 500) cache.delete(cache.keys().next().value);
         setSpeed(nextSpeed);
     }, [currentTransfer, key]);
 
@@ -179,14 +182,18 @@ function useTransferMetrics(transfer, total, metricKey) {
     return {speed, eta, remaining};
 }
 
-function TransferDetails({transfer, total, status, compact = false, speed = 0, eta = null}) {
+function TransferDetails({transfer, total, status, compact = false, inline = false, speed = 0, eta = null}) {
     if (num(total) <= 0) return null;
 
     const transferLabel = status === "downloading" ? "Downloaded" : "Transferred";
     const done = status === "completed" || num(transfer) >= num(total);
+    const layoutClass = inline
+        ? "min-w-0 flex-nowrap gap-x-1.5 whitespace-nowrap text-[9px] leading-tight"
+        : compact
+            ? "ml-[23px] mt-1 flex-wrap gap-x-2 gap-y-0.5 text-[9px]"
+            : "mt-1 flex-wrap gap-x-2 gap-y-0.5 text-[10px]";
 
-    return <div
-        className={`flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 font-mono tabular-nums text-[#789083] ${compact ? "ml-[23px] mt-1 text-[9px]" : "mt-1 text-[10px]"}`}>
+    return <div className={`flex min-w-0 items-center font-mono tabular-nums text-[#789083] ${layoutClass}`}>
         <span>{transferLabel} {formatFileSize(Math.min(num(transfer), num(total)))} / {formatFileSize(total)}</span>
         {!done && <>
             <span className="text-[#3b5144]">·</span>
@@ -201,7 +208,7 @@ function TransferDetails({transfer, total, status, compact = false, speed = 0, e
 function ItemRow({item, status, metricKey}) {
     const meta = ITEM_STATUS[status] || ITEM_STATUS.queued;
     const {size, percent} = getItemProgress(item, status);
-    const transfer = status === "completed" ? size : num(item.transfer);
+    const transfer = status === "completed" || status === "downloaded" ? size : num(item.transfer);
     const name = getFileName(item);
     const {speed, eta} = useTransferMetrics(transfer, size, metricKey || `item:${normalizePath(item?.path || name)}`);
     const showPercent = meta.transferring && size > 0;
@@ -211,14 +218,15 @@ function ItemRow({item, status, metricKey}) {
             <Icon name={meta.icon}
                   className={`text-[15px] ${meta.tone === "muted" ? "text-[#5f7567]" : meta.tone === "danger" ? TEXT.danger : TEXT.success}`}/>
             <span className="min-w-0 flex-1 truncate text-[11px] text-[#c6d2ca]" title={name}>{name}</span>
-            <span className={`shrink-0 text-[10px] tabular-nums ${TEXT[meta.tone]}`}>
-                {meta.label}{showPercent ? ` · ${percent.toFixed(0)}%` : ""}
-            </span>
+            <span className={`shrink-0 text-[10px] tabular-nums ${TEXT[meta.tone]}`}>{meta.label}</span>
         </div>
-        {showPercent && <>
-            <ProgressBar percent={percent} className="ml-[23px] mt-1.5"/>
-            <TransferDetails transfer={transfer} total={size} status={status} compact speed={speed} eta={eta}/>
-        </>}
+        {showPercent && <div className="ml-[23px] mt-1.5 min-w-0 space-y-1">
+            <ProgressBar percent={percent}/>
+            <div className="flex min-w-0 items-center justify-between gap-2">
+                <TransferDetails transfer={transfer} total={size} status={status} inline speed={speed} eta={eta}/>
+                <span className="shrink-0 text-[9px] font-mono tabular-nums text-[#789083]">{percent.toFixed(0)}%</span>
+            </div>
+        </div>}
     </div>;
 }
 
@@ -233,8 +241,8 @@ function TorrentLinkPanel({torrent, items, parentStatus, index}) {
     const files = torrentItems.length ? torrentItems : previewFiles;
     const selectedCount = torrentItems.length;
     const has = (status) => torrentItems.some((item) => item.status === status);
-    const completeCount = torrentItems.filter((item) => item.status === "completed").length;
-    const allComplete = selectedCount > 0 && completeCount === selectedCount;
+    const downloadedCount = torrentItems.filter((item) => ["downloaded", "uploading", "completed"].includes(item.status)).length;
+    const allComplete = selectedCount > 0 && torrentItems.every((item) => item.status === "completed");
     const hasError = has("error");
 
     const totalBytes = torrentItems.reduce((sum, item) => sum + getItemSize(item), 0);
@@ -253,7 +261,7 @@ function TorrentLinkPanel({torrent, items, parentStatus, index}) {
             <div className="min-w-0 flex-1">
                 <p className="truncate text-xs font-medium text-[#dce9e0]" title={title}>{title}</p>
                 <p className={`mt-0.5 text-[11px] ${statusTone}`} title={String(torrent?.link || "")}>
-                    {status}{selectedCount ? `, ${completeCount} of ${selectedCount} files done` : ""}
+                    {status}{selectedCount ? `, ${downloadedCount} of ${selectedCount} files downloaded` : ""}
                 </p>
             </div>
             {selectedCount > 0 && <span className="shrink-0 font-mono text-[11px] tabular-nums text-[#718477]">{percent.toFixed(0)}%</span>}
@@ -437,10 +445,6 @@ async function runTorrentImport(job, selection, onStarted) {
 
 /* -------------------------------------------------------------------------- */
 
-function Kbd({children}) {
-    return <kbd className="rounded border border-[#2f4237] bg-[#1a251e] px-1.5 py-0.5 font-sans text-[10px] text-[#9bbba7]">{children}</kbd>;
-}
-
 function TorrentSelectionDialog({job, torrentIndex, selection, starting, error, onToggle, onSetAll, onClose, onNext, onStart}) {
     const dialogRef = useRef(null);
     const startRef = useRef(null);
@@ -542,9 +546,6 @@ function TorrentSelectionDialog({job, torrentIndex, selection, starting, error, 
             {error && <p role="alert" className="border-t border-[#29362e] px-5 py-3 text-xs text-[#ff7278]">{error}</p>}
 
             <footer className="flex items-center justify-between gap-3 border-t border-[#29362e] px-5 py-3.5">
-                <div className="hidden items-center gap-1.5 text-[11px] text-[#7f9586] sm:flex">
-                    <Kbd>↑</Kbd><Kbd>↓</Kbd> move <Kbd>Space</Kbd> toggle <Kbd>Enter</Kbd> {isLast ? "start" : "next"} <Kbd>Esc</Kbd> cancel
-                </div>
                 <div className="ml-auto flex items-center gap-2">
                     <button type="button" disabled={starting} onClick={onClose}
                             className="rounded-md border border-[#713b3d] bg-[#3a1c20] px-3.5 py-2 text-xs font-medium text-[#ff9298] transition-colors hover:border-[#a94a50] hover:bg-[#512329] disabled:cursor-not-allowed disabled:opacity-50">
@@ -586,11 +587,14 @@ function describeJob(job) {
     const usableItem = singleName && !isUnresolvedName(rawItemName, sourceIsYouTube) ? singleName : "";
     const torrentName = String(torrents[0]?.name || "").trim();
     const firstItemName = items.length ? getFileName(items[0]) : "";
-    const title = singleItem
-        ? usableCurrent || usableItem || (sourceIsYouTube ? "YouTube video" : singleName || job.name || "Upload task")
-        : job.kind === "link"
-            ? usableCurrent || torrentName || firstItemName || job.name || "Upload task"
-            : job.name || "Upload task";
+    // Use the torrent's root name as the parent heading. The current child filename
+    // belongs in its per-file row, not in the task title.
+    const title = torrentName
+        || (singleItem
+            ? usableCurrent || usableItem || (sourceIsYouTube ? "YouTube video" : singleName || job.name || "Upload task")
+            : job.kind === "link"
+                ? usableCurrent || firstItemName || job.name || "Upload task"
+                : job.name || "Upload task");
 
     /*
      * Prefer item-level byte counts when available. This gives multi-file tasks a
@@ -627,19 +631,26 @@ function describeJob(job) {
     const stage = job.kind === "link" ? formatLinkStage(job.message) : "";
     const stagePercent = total > 0 ? Math.max(0, Math.min(99, transfer * 100 / total)) : null;
     const stageText = stage ? `${stage}${stagePercent !== null && STAGES_WITH_PERCENT.has(stage) ? ` · ${stagePercent.toFixed(0)}%` : ""}` : "";
-    const finishedFromItems = hasTorrentItems ? items.filter((item) => item.status === "completed").length : Number(job.completedItems) || 0;
-    const finished = Math.min(itemCount, finishedFromItems);
+    // "Downloaded" means the torrent file is fully present locally. It may still
+    // be uploading to storage, so count downloaded, uploading, and completed rows.
+    const downloadedFromItems = hasTorrentItems
+        ? items.filter((item) => ["downloaded", "uploading", "completed"].includes(item.status)).length
+        : Number(job.completedItems) || 0;
+    const downloadedCount = Math.min(itemCount, downloadedFromItems);
+    const finished = Math.min(itemCount, hasTorrentItems
+        ? items.filter((item) => item.status === "completed").length
+        : Number(job.completedItems) || 0);
     const itemsLabel = `${itemCount} items`;
 
     let statusText;
-    if (isComplete) statusText = singleItem ? "Completed" : `Completed · ${itemsLabel}`; else if (isError) statusText = job.message || "Some items failed"; else if (isCancelled) statusText = "Cancelled"; else if (isQueued) statusText = singleItem ? "Queued" : `Queued · ${itemsLabel}`; else if (stageText) statusText = stageText; else if (singleItem) statusText = sourceIsYouTube ? "Processing video" : "Uploading"; else {
-        const headingName = String(title || "").trim().toLocaleLowerCase();
-        const currentNameKey = String(currentName || "").trim().toLocaleLowerCase();
-        const leafNameKey = leafOf(title).toLocaleLowerCase();
-        const repeatedCurrentName = currentNameKey && (currentNameKey === headingName || currentNameKey === leafNameKey);
-        const currentNameSuffix = currentName && !repeatedCurrentName && !isHttpUrl(rawCurrentName) ? ` · ${currentName}` : "";
-        statusText = `${finished} of ${itemCount} complete${currentNameSuffix}`;
-    }
+    if (isComplete) statusText = singleItem ? "Completed" : `Completed · ${itemsLabel}`;
+    else if (isError) statusText = job.message || "Some items failed";
+    else if (isCancelled) statusText = "Cancelled";
+    else if (isQueued) statusText = singleItem ? "Queued" : `Queued · ${itemsLabel}`;
+    else if (hasTorrentItems) statusText = `${downloadedCount} of ${itemCount} downloaded`;
+    else if (stageText) statusText = stageText;
+    else if (singleItem) statusText = sourceIsYouTube ? "Processing video" : "Uploading";
+    else statusText = `${finished} of ${itemCount} complete`;
 
     const tone = isError || isCancelled ? "danger" : isComplete ? "success" : "muted";
     const icon = isError ? "error" : isCancelled ? "cancel" : isComplete ? "check_circle" : isQueued ? "schedule" : "upload_file";
@@ -670,14 +681,16 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
                     Select files and start
                 </button>}
 
-                {isActive && <div className="mt-2.5">
+                {isActive && <div className="mt-2.5 min-w-0 space-y-1">
                     <ProgressBar percent={isQueued ? 0 : percent} muted={isQueued}/>
-                    <p className="mt-1 text-right font-mono text-[10px] tabular-nums text-[#718477]">
-                        {isQueued ? "Waiting" : `${percent.toFixed(1)}%`}
-                    </p>
-                    {!isQueued && <TransferDetails transfer={transfer} total={total}
-                                                   status={job.status === "completed" ? "completed" : (/download/i.test(String(job.message || "")) ? "downloading" : "uploading")}
-                                                   speed={speed} eta={eta}/>}
+                    <div className="flex min-w-0 items-center justify-between gap-2">
+                        {!isQueued && <TransferDetails transfer={transfer} total={total}
+                                                       status={job.status === "completed" ? "completed" : (/download/i.test(String(job.message || "")) ? "downloading" : "uploading")}
+                                                       inline speed={speed} eta={eta}/>}
+                        <span className="shrink-0 text-right font-mono text-[10px] tabular-nums text-[#718477]">
+                            {isQueued ? "Waiting" : `${percent.toFixed(1)}%`}
+                        </span>
+                    </div>
                 </div>}
 
 
@@ -809,7 +822,7 @@ export default function UploadJobsTray({uploadJobs, cancelUploadJob, dismissUplo
         `}</style>
 
         <aside aria-label="Uploads"
-               className={`min-w-0 overflow-hidden bg-[#111713] ${fullscreen ? "flex h-[100dvh] w-full flex-col" : "fixed bottom-4 right-4 z-[120] w-[min(25rem,calc(100vw-2rem))] rounded-xl border border-[#303b34] shadow-2xl shadow-black/40"}`}>
+               className={`min-w-0 overflow-hidden bg-[#111713] ${fullscreen ? "flex h-[100dvh] w-full flex-col" : "fixed bottom-4 right-4 z-[120] w-[min(32rem,calc(100vw-2rem))] rounded-xl border border-[#303b34] shadow-2xl shadow-black/40"}`}>
 
             <header className="flex items-center justify-between gap-3 border-b border-[#29362e] bg-[#151d18] px-4 py-3">
                 <div className="flex min-w-0 items-center gap-2.5">
@@ -839,7 +852,7 @@ export default function UploadJobsTray({uploadJobs, cancelUploadJob, dismissUplo
                 </div>
             </header>
 
-            <div className={`upload-tray-scrollbar min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2 ${fullscreen ? "" : "max-h-80"}`}>
+            <div className={`upload-tray-scrollbar min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2 ${fullscreen ? "" : "max-h-[min(62dvh,36rem)]"}`}>
                 {!uploadJobs.length && <div className="flex min-h-48 flex-col items-center justify-center px-4 py-10 text-center">
                     <Icon name="cloud_upload" className="text-3xl text-[#3b5144]"/>
                     <p className="mt-3 text-sm text-[#c6d2ca]">No upload tasks yet</p>

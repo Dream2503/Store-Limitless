@@ -27,7 +27,7 @@ export default function DashboardContextMenu({menu, onClose, onAction, multipleS
             id: "rename", label: "Rename", icon: "drive_file_rename_outline"
         }, {id: "details", label: "Details", icon: "info"},] : []), {id: "delete", label: "Move to Trash", icon: "delete", danger: true},];
     } else {
-        items = [{id: "move", label: "Move to folder", icon: "drive_file_move"}, ...(!multipleSelected ? [{
+        items = [...(!multipleSelected ? [{id: "share", label: "Share", icon: "share"}] : []), {id: "move", label: "Move to folder", icon: "drive_file_move"}, ...(!multipleSelected ? [{
             id: "rename", label: "Rename", icon: "drive_file_rename_outline"
         }, {id: "details", label: "Details", icon: "info"}, {
             id: "download", label: "Download", icon: "download"

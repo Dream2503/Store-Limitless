@@ -14,6 +14,7 @@ build.log
 logs.log
 logs.lock
 busy.sh
+build-vercel.sh
 
 frontend/node_modules/
 
@@ -33,3 +34,4 @@ frontend/src-tauri/resources/backend/
 *.AppImage
 *.msi
 *.exe
+.vercel

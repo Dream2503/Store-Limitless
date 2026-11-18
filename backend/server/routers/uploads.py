@@ -287,18 +287,32 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, Any] = Body(...),
             updates["items"] = items
 
     if status == "error":
-        items = [dict(item) if isinstance(item, dict) else {"name": str(item)} for item in metadata.get("items", [])]
+        # Prefer the latest item snapshot supplied by the tray's child-status
+        # recovery. Falling back to persisted items also supports older clients.
+        raw_items = updates.get("items", metadata.get("items", []))
+        items = [dict(item) if isinstance(item, dict) else {"name": str(item)} for item in raw_items]
+        active_error_assigned = False
 
         for item in items:
-            if item.get("status") == "queued":
+            item_status = str(item.get("status") or "queued")
+
+            if item_status == "queued":
                 item["status"] = "skipped"
                 item["message"] = "Not started"
 
-            elif item.get("status") == "uploading":
-                item["status"] = "error"
-                item["message"] = updates.get("message", "Upload failed")
+            elif item_status in {"downloading", "uploading"}:
+                if not active_error_assigned:
+                    item["status"] = "error"
+                    item["message"] = updates.get("message", "Upload failed")
+                    active_error_assigned = True
+
+                else:
+                    item["status"] = "skipped"
+                    item["message"] = "Not started after failure"
 
         updates["items"] = items
+        updates["total_items"] = len(items)
+        updates["completed_items"] = sum(item.get("status") == "completed" for item in items)
 
     updated = await update_upload_batch(batch_id, user.username, **updates)
     return JSONResponse({"batch_id": batch_id, "status": str(updated.get("status") or "queued")})

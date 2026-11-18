@@ -253,6 +253,8 @@ export default function DashboardPage() {
     };
     const [showFolderModal, setShowFolderModal] = useState(false);
     const [showUploadModal, setShowUploadModal] = useState(false);
+    const [shareDialog, setShareDialog] = useState(null);
+    const [shareCopyStatus, setShareCopyStatus] = useState("");
     const [zipDownloadPrompt, setZipDownloadPrompt] = useState(null);
     const [zipDownloadName, setZipDownloadName] = useState("StoreLimitless-files");
     const [zipDownloadNameError, setZipDownloadNameError] = useState("");
@@ -495,6 +497,102 @@ export default function DashboardPage() {
             console.error("Download failed:", error);
             alert(error.message || "Failed to download file.");
         }
+    };
+
+    /**
+     * Create a durable public-view link for a single active file.
+     * The signed public stream token lets viewers open the file without an account.
+     * @param {SelectableItem} file
+     * @returns {Promise<void>}
+     */
+    const createShareLink = async (file) => {
+        const token = getToken();
+        if (!token) {
+            navigate("/");
+            return;
+        }
+
+        setShareCopyStatus("");
+        setShareDialog({name: file.name, url: "", loading: true, error: ""});
+
+        try {
+            const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(file.id))}/public-link`, {
+                method: "POST",
+                headers: {Authorization: `Bearer ${token}`},
+            });
+            const data = await response.json().catch(() => ({}));
+
+            if (!response.ok) {
+                if (response.status === 401) {
+                    localStorage.removeItem("token");
+                    setShareDialog(null);
+                    navigate("/");
+                    return;
+                }
+                throw new Error(data.detail || "Could not create a share link.");
+            }
+            if (!data.public_token) throw new Error("The server did not return a public link.");
+
+            const params = new URLSearchParams({
+                name: file.name || "Untitled",
+                public_token: data.public_token,
+            });
+            const kind = getFileKind(file.name);
+            if (kind) params.set("kind", kind);
+            const url = new URL(`/view/${encodeURIComponent(String(file.id))}?${params.toString()}`, window.location.origin).toString();
+
+            setShareDialog({name: file.name, url, loading: false, error: ""});
+        } catch (error) {
+            setShareDialog({
+                name: file.name,
+                url: "",
+                loading: false,
+                error: error instanceof Error ? error.message : "Could not create a share link.",
+            });
+        }
+    };
+
+    /**
+     * Copy the generated public-view URL, including a fallback for browsers without
+     * Clipboard API access.
+     * @returns {Promise<void>}
+     */
+    const copyShareLink = async () => {
+        const url = shareDialog?.url;
+        if (!url) return;
+
+        const copyUsingFallback = () => {
+            const textArea = document.createElement("textarea");
+            textArea.value = url;
+            textArea.setAttribute("readonly", "");
+            textArea.style.position = "fixed";
+            textArea.style.opacity = "0";
+            textArea.style.pointerEvents = "none";
+            document.body.appendChild(textArea);
+            textArea.select();
+            let copied = false;
+            try {
+                copied = document.execCommand("copy");
+            } catch {
+                copied = false;
+            } finally {
+                textArea.remove();
+            }
+            return copied;
+        };
+
+        let copied = false;
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(url);
+                copied = true;
+            } else {
+                copied = copyUsingFallback();
+            }
+        } catch {
+            copied = copyUsingFallback();
+        }
+        setShareCopyStatus(copied ? "Copied!" : "Copy failed");
     };
 
     /**
@@ -1083,6 +1181,13 @@ export default function DashboardPage() {
         if (!item) return;
 
         const actionItems = selectedItems.has(item.key) ? selectableItems.filter((candidate) => selectedItems.has(candidate.key)) : [item];
+
+        if (action === "share") {
+            if (item.type === "file" && !item.is_deleted && activeTab !== "trash" && actionItems.length === 1) {
+                void createShareLink(item);
+            }
+            return;
+        }
 
         if (action === "download-zip") {
             const filesToDownload = actionItems.filter((candidate) => candidate.type === "file" && !candidate.is_deleted);
@@ -2499,6 +2604,79 @@ export default function DashboardPage() {
                         </div>
                     </div>
                 </form>
+            </section>
+        </div>)}
+
+        {shareDialog && (<div
+            className="fixed inset-0 z-[320] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+            onMouseDown={(event) => {
+                if (event.target === event.currentTarget) {
+                    setShareDialog(null);
+                    setShareCopyStatus("");
+                }
+            }}
+        >
+            <section
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="share-dialog-title"
+                className="w-full max-w-lg overflow-hidden rounded-xl border border-[#35443a] bg-[#111713] shadow-2xl shadow-black/50"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => {
+                    event.stopPropagation();
+                    if (event.key === "Escape") {
+                        event.preventDefault();
+                        setShareDialog(null);
+                        setShareCopyStatus("");
+                    }
+                }}
+            >
+                <header className="flex items-start gap-3 border-b border-[#29362e] bg-[#151d18] px-5 py-4">
+                    <span className="material-symbols-outlined mt-0.5 text-[22px] text-[#3ecf8e]" aria-hidden="true">link</span>
+                    <div className="min-w-0 flex-1">
+                        <h2 id="share-dialog-title" className="text-sm font-semibold text-[#e8f0eb]">Share file</h2>
+                        <p className="mt-1 break-words text-xs text-[#8ca296]">{shareDialog.name}</p>
+                    </div>
+                    <button type="button" onClick={() => {
+                        setShareDialog(null);
+                        setShareCopyStatus("");
+                    }} aria-label="Close share dialog"
+                            className="flex h-8 w-8 items-center justify-center rounded-lg text-[#9bbba7] transition-colors hover:bg-white/5 hover:text-white">
+                        <span className="material-symbols-outlined text-[18px]" aria-hidden="true">close</span>
+                    </button>
+                </header>
+                <div className="space-y-3 p-5">
+                    <p className="text-sm leading-6 text-[#c6d2ca]">Anyone with this link can open this file’s view page without signing in.</p>
+                    <div className="flex min-w-0 items-stretch gap-2 rounded-lg border border-[#293b30] bg-[#0c110e] px-3">
+                        <input
+                            type="text"
+                            readOnly
+                            value={shareDialog.url}
+                            placeholder={shareDialog.loading ? "Generating share link…" : "Share link unavailable"}
+                            onFocus={(event) => event.currentTarget.select()}
+                            aria-label="Public share link"
+                            className="min-w-0 flex-1 bg-transparent py-3 text-sm text-[#f3f7f4] outline-none placeholder:text-[#607366]"
+                        />
+                    </div>
+                    {shareDialog.loading && <p className="flex items-center gap-2 text-xs text-[#8ca296]"><span className="material-symbols-outlined animate-spin text-[16px]" aria-hidden="true">progress_activity</span>Generating public link…</p>}
+                    {shareDialog.error && <p role="alert" className="text-xs text-[#ff7278]">{shareDialog.error}</p>}
+                    <p className="text-xs leading-5 text-[#718477]">Anyone who receives the link can access the file while the link remains valid. Share it only with people you trust.</p>
+                </div>
+                <footer className="flex items-center justify-between gap-3 border-t border-[#29362e] px-5 py-3">
+                    <span aria-live="polite" className={`text-xs ${shareCopyStatus === "Copied!" ? "text-[#3ecf8e]" : shareCopyStatus === "Copy failed" ? "text-[#ff7278]" : "text-[#718477]"}`}>{shareCopyStatus}</span>
+                    <div className="ml-auto flex items-center gap-2">
+                        <button type="button" onClick={() => {
+                            setShareDialog(null);
+                            setShareCopyStatus("");
+                        }}
+                                className="rounded-lg border border-[#35443a] bg-[#18211b] px-4 py-2 text-sm font-medium text-[#dce9e0] transition-colors hover:bg-[#232f27]">Close
+                        </button>
+                        <button type="button" onClick={() => void copyShareLink()} disabled={!shareDialog.url || shareDialog.loading}
+                                className="inline-flex items-center gap-1.5 rounded-md border border-[#2e8058] bg-[#17643d] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#1d794a] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[#3ecf8e]/40">
+                            <span className="material-symbols-outlined text-[15px]" aria-hidden="true">{shareCopyStatus === "Copied!" ? "check" : "content_copy"}</span> {shareCopyStatus || "Copy link"}
+                        </button>
+                    </div>
+                </footer>
             </section>
         </div>)}
 

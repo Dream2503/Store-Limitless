@@ -15,9 +15,12 @@ function PreviewMessage({message}) {
 /**
  * Fetch a signed preview URL for an owned file.
  * @param {string} fileId
+ * @param {string | null} [publicToken]
  * @returns {Promise<string>}
  */
-async function getPreviewUrl(fileId) {
+async function getPreviewUrl(fileId, publicToken) {
+    if (publicToken) return `${API_URL}/public/stream/${encodeURIComponent(publicToken)}`;
+
     const token = localStorage.getItem("token");
     if (!token) throw new Error("Your session has expired. Please sign in again.");
     const response = await fetch(`${API_URL}/auth/file/${fileId}/public-link`, {
@@ -37,7 +40,7 @@ async function getPreviewUrl(fileId) {
  * Render a plain text file or a small safe Markdown subset.
  * @param {{fileId: string, kind: "text" | "markdown", navigate: Function}} props
  */
-export default function FileContentPreview({fileId, kind, navigate}) {
+export default function FileContentPreview({fileId, kind, navigate, publicToken}) {
     const [content, setContent] = useState("");
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
@@ -49,7 +52,7 @@ export default function FileContentPreview({fileId, kind, navigate}) {
         setLoading(true);
         (async () => {
             try {
-                const streamUrl = await getPreviewUrl(fileId);
+                const streamUrl = await getPreviewUrl(fileId, publicToken);
                 const response = await fetch(streamUrl);
                 if (!response.ok) throw new Error(`Could not read this file (${response.status}).`);
                 const value = await response.text();
@@ -68,7 +71,7 @@ export default function FileContentPreview({fileId, kind, navigate}) {
         return () => {
             cancelled = true;
         };
-    }, [fileId, kind, navigate]);
+    }, [fileId, kind, navigate, publicToken]);
 
     if (loading) return <PreviewMessage message="Loading file…"/>;
     if (error) return <PreviewMessage message={error}/>;
@@ -174,14 +177,14 @@ function MarkdownPreview({content}) {
  * Render the browser's native PDF or audio preview.
  * @param {{fileId: string, navigate: Function, type: "pdf" | "audio"}} props
  */
-export function MediaPreview({fileId, navigate, type}) {
+export function MediaPreview({fileId, navigate, type, publicToken}) {
     const [streamUrl, setStreamUrl] = useState("");
     const [error, setError] = useState("");
     useEffect(() => {
         let cancelled = false;
         (async () => {
             try {
-                const url = await getPreviewUrl(fileId);
+                const url = await getPreviewUrl(fileId, publicToken);
                 if (!cancelled) setStreamUrl(url);
             } catch (err) {
                 if (!cancelled) {
@@ -194,7 +197,7 @@ export function MediaPreview({fileId, navigate, type}) {
         return () => {
             cancelled = true;
         };
-    }, [fileId, navigate]);
+    }, [fileId, navigate, publicToken]);
     if (error) return <PreviewMessage message={error}/>;
     if (!streamUrl) return <PreviewMessage message="Preparing preview…"/>;
     if (type === "pdf") return <iframe title="PDF preview" src={streamUrl} className="h-full w-full bg-[#222]"/>;

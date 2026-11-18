@@ -473,6 +473,7 @@ export default function ViewFile() {
     const navigate = useNavigate();
     const name = searchParams.get("name") || "Untitled";
     const kind = searchParams.get("kind");
+    const publicToken = searchParams.get("public_token");
 
     /** @type {[VideoSource | null, import("react").Dispatch<import("react").SetStateAction<VideoSource | null>>]} */
     const [source, setSource] = useState(null);
@@ -506,7 +507,7 @@ export default function ViewFile() {
     }, [navigate]);
 
     const copyStreamLink = useCallback(async () => {
-        const streamUrl = source?.streamUrl;
+        const streamUrl = publicToken ? window.location.href : source?.streamUrl;
         if (!streamUrl) return;
 
         const copyUsingFallback = () => {
@@ -546,22 +547,32 @@ export default function ViewFile() {
         setCopyStatus(copied ? "Copied!" : "Copy failed");
         clearTimeout(copyTimer.current);
         copyTimer.current = window.setTimeout(() => setCopyStatus(""), 2500);
-    }, [source?.streamUrl]);
+    }, [source?.streamUrl, publicToken]);
 
     useEffect(() => () => clearTimeout(copyTimer.current), []);
 
     useEffect(() => {
         if (kind !== "video") return;
-        const token = localStorage.getItem("token");
-        if (!token) {
-            navigate("/");
-            return;
-        }
 
         let cancelled = false;
         setSource(null);
         setStatus("Preparing video…");
         setError("");
+
+        if (publicToken) {
+            setSource({streamUrl: `${API_URL}/public/stream/${encodeURIComponent(publicToken)}`});
+            return () => {
+                cancelled = true;
+            };
+        }
+
+        const token = localStorage.getItem("token");
+        if (!token) {
+            navigate("/");
+            return () => {
+                cancelled = true;
+            };
+        }
 
         (async () => {
             try {
@@ -585,7 +596,7 @@ export default function ViewFile() {
         return () => {
             cancelled = true;
         };
-    }, [fileId, kind, navigate]);
+    }, [fileId, kind, navigate, publicToken]);
 
     return (<div className="flex h-screen flex-col bg-[#171717] text-[#fafafa]"
                  style={{fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"}}>
@@ -599,20 +610,20 @@ export default function ViewFile() {
             {source?.streamUrl && kind === "video" && (<button
                 type="button"
                 onClick={copyStreamLink}
-                title="Copy the stream URL to your clipboard"
+                title={publicToken ? "Copy the public view link to your clipboard" : "Copy the stream URL to your clipboard"}
                 aria-live="polite"
                 className="ml-auto flex shrink-0 items-center gap-2 rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#fafafa] transition-colors hover:bg-[#2a2a2a] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]"
             >
                 <span className="material-symbols-outlined text-[17px]"
                       aria-hidden="true">{copyStatus === "Copied!" ? "check" : copyStatus === "Copy failed" ? "error" : "content_copy"}</span>
-                {copyStatus || "Copy stream link"}
+                {copyStatus || (publicToken ? "Copy share link" : "Copy stream link")}
             </button>)}
         </header>
 
         <main className="min-h-0 flex-1 overflow-hidden p-0">
-            {kind === "text" || kind === "markdown" ? <FileContentPreview fileId={fileId} kind={kind} navigate={navigate}/> : kind === "pdf" ?
-                <MediaPreview fileId={fileId} navigate={navigate} type="pdf"/> : kind === "audio" ?
-                    <MediaPreview fileId={fileId} navigate={navigate} type="audio"/> : kind !== "video" ? (
+            {kind === "text" || kind === "markdown" ? <FileContentPreview fileId={fileId} kind={kind} navigate={navigate} publicToken={publicToken}/> : kind === "pdf" ?
+                <MediaPreview fileId={fileId} navigate={navigate} type="pdf" publicToken={publicToken}/> : kind === "audio" ?
+                    <MediaPreview fileId={fileId} navigate={navigate} type="audio" publicToken={publicToken}/> : kind !== "video" ? (
                         <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-[#898989]">
                             <span className="material-symbols-outlined text-[40px] text-[#4d4d4d]" aria-hidden="true">visibility_off</span>
                             <p className="text-sm text-[#fafafa]">Preview isn't available for this file type yet.</p>

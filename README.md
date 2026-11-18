@@ -437,9 +437,13 @@ transfer layer.
    the per-user index, and associates it with the parent batch. Pending file/session data also uses a time-to-live.
 4. Before each file transfer, the browser discovers the latest registered Cloudflare Quick Tunnel URL through the uncached
    `GET /api/current-upstream` endpoint on the stable API proxy. Local and custom API configurations keep using their configured API URL.
-5. The frontend divides each local file into **1 MiB chunks**, sends up to **8 chunks concurrently**, and allows up to **3 total attempts** for each
-   chunk before failing the item. The chunk `PUT /public/upload/{job_id}/chunk` requests go directly to the discovered tunnel, with `offset` and
-   `total` query parameters. Job creation, status, progress, and other control requests continue through the stable API proxy.
+5. The frontend divides each local file into **8 MiB chunks**, sends up to **8 chunks concurrently**, and allows up to **3 total attempts** for each
+   chunk before failing the item. The chunk `PUT /public/upload/{job_id}/chunk` requests go directly to the newly discovered random Quick Tunnel, with
+   `offset` and `total` query parameters. The dashboard makes one `GET /auth/upload-batches` request every 500 ms while a queue is active;
+   that response includes every queue item, current child status, received bytes, storage bytes, speeds, and ETAs. The browser upload worker consumes
+   the same in-page snapshot rather than issuing separate per-file status requests or frequent progress PATCHes. Batch creation, queue transitions,
+   pause/cancel controls, and account metadata continue through the stable API proxy. In `CLOUD` mode, `cloudflared` defaults to protocol `http2` because it delivered substantially better throughput in the Colab deployment test. Set
+   `STORELIMITLESS_CLOUDFLARE_PROTOCOL=auto` or `quic` to override it for a different network; the startup log reports the selected protocol.
 6. The backend writes each chunk at its declared byte offset and records received ranges in Redis. The range helper merges overlapping/adjacent ranges
    and tracks the contiguous byte count from offset zero.
 7. A producer task waits for incoming bytes while the upload worker passes the growing temporary file through the core upload pipeline. The transfer

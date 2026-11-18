@@ -703,12 +703,13 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
 
         items_changed = False
 
-        # Browser uploads run as sequential child jobs. Their child progress record is
-        # authoritative once the storage provider and File.save() have both completed.
-        # Reconcile every child by its recorded queue index so a missed browser PATCH
-        # cannot leave a fully uploaded file showing as "Uploading" indefinitely.
+        # Browser files run sequentially. The active child is authoritative until the
+        # browser starts the next item, at which point the previous completion is saved
+        # in the batch itself. Reconcile only the active/latest child on each snapshot.
         if str(metadata.get("kind") or "") == "file" and not metadata.get("cancelled"):
             child_ids = [str(value) for value in metadata.get("child_job_ids", []) if str(value)]
+            current_child_id = str(metadata.get("current_job_id") or "")
+            child_ids = [current_child_id] if current_child_id else child_ids[-1:]
             for child_position, child_id in enumerate(child_ids):
                 child_metadata = await get_upload_job_metadata(child_id)
                 if (

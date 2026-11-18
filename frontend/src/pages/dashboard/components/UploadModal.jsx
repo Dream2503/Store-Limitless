@@ -118,67 +118,119 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
     };
 
     /**
-     * Wait until the backend finishes storing one upload before allowing the queue to advance.
-     * @param {string} jobId
-     * @param {string} token
+     * Wait for one file's terminal state from the shared full-queue snapshot.
+     * The dashboard performs the only HTTP poll: GET /auth/upload-batches.
+     * @param {{batchId: string, itemIndex: number}} batchContext
+     * @param {UploadCancelToken | null} cancelToken
      * @returns {Promise<void>}
      */
-    const waitForJobCompletion = async (jobId, token, cancelToken = null, onProgress = null) => {
-        let delay = 500;
+    const waitForBatchItemCompletion = (batchContext, cancelToken = null) => new Promise((resolve, reject) => {
+        let settled = false;
 
+        const wakeOnControlChange = () => checkSnapshot(window.__storeLimitlessUploadBatchesSnapshot);
+
+        const finish = (error = null) => {
+            if (settled) return;
+            settled = true;
+            window.removeEventListener("storelimitless:upload-batches-snapshot", handleSnapshot);
+            if (Array.isArray(cancelToken?.pauseWaiters)) {
+                const waiterIndex = cancelToken.pauseWaiters.indexOf(wakeOnControlChange);
+                if (waiterIndex >= 0) cancelToken.pauseWaiters.splice(waiterIndex, 1);
+            }
+            if (error) reject(error);
+            else resolve();
+        };
+
+        const checkSnapshot = (snapshot) => {
+            if (settled) return;
+            if (cancelToken?.cancelled) {
+                finish(new Error("Upload task was cancelled."));
+                return;
+            }
+
+            const batches = Array.isArray(snapshot) ? snapshot : [];
+            const batch = batches.find((entry) => String(entry.batch_id) === String(batchContext.batchId));
+            if (!batch) return;
+
+            const batchStatus = String(batch.status || "queued").toLowerCase();
+            const item = Array.isArray(batch.items) ? batch.items[batchContext.itemIndex] : null;
+            if (!item) return;
+
+            const itemStatus = String(item.status || "queued").toLowerCase();
+            if (itemStatus === "completed") {
+                finish();
+            } else if (itemStatus === "cancelled" || batchStatus === "cancelled") {
+                finish(new Error(`${item.name || "Upload"} was cancelled.`));
+            } else if (["error", "failed", "skipped"].includes(itemStatus) || batchStatus === "error") {
+                finish(new Error(String(item.message || batch.message || `${item.name || "Upload"} failed.`)));
+            }
+        };
+
+        const handleSnapshot = (event) => checkSnapshot(event.detail);
+        window.addEventListener("storelimitless:upload-batches-snapshot", handleSnapshot);
+        if (cancelToken) {
+            if (!Array.isArray(cancelToken.pauseWaiters)) cancelToken.pauseWaiters = [];
+            cancelToken.pauseWaiters.push(wakeOnControlChange);
+        }
+        checkSnapshot(window.__storeLimitlessUploadBatchesSnapshot);
+    });
+
+    /**
+     * Wait for link-import jobs. Browser-file jobs use the shared batch snapshot,
+     * so there are no separate status requests for each file.
+     * @param {string} jobId
+     * @param {string} token
+     * @param {UploadCancelToken | null} cancelToken
+     * @param {((job: object) => void) | null} onProgress
+     * @param {{batchId: string, itemIndex: number} | null} batchContext
+     * @returns {Promise<void>}
+     */
+    const waitForJobCompletion = async (jobId, token, cancelToken = null, onProgress = null, batchContext = null) => {
+        if (batchContext) return waitForBatchItemCompletion(batchContext, cancelToken);
+
+        let delay = 500;
         while (true) {
             await waitWhilePaused(cancelToken);
+            const controller = new AbortController();
+            const timeoutId = window.setTimeout(() => controller.abort(), 8000);
             let response;
             try {
                 response = await fetch(`${API_URL}/auth/upload-jobs/${encodeURIComponent(jobId)}/status`, {
-                    headers: {Authorization: `Bearer ${token}`}, cache: "no-store",
+                    headers: {Authorization: `Bearer ${token}`},
+                    cache: "no-store",
+                    signal: controller.signal,
                 });
             } catch {
-                await waitWhilePaused(cancelToken);
-                await sleep(delay);
                 delay = Math.min(delay * 2, 3000);
+                await sleep(delay);
                 continue;
+            } finally {
+                window.clearTimeout(timeoutId);
             }
 
-            await waitWhilePaused(cancelToken);
             if (!response.ok) {
-                if (response.status >= 500) {
-                    await waitWhilePaused(cancelToken);
-                    await sleep(delay);
+                if (response.status >= 500 || response.status === 408 || response.status === 429) {
                     delay = Math.min(delay * 2, 3000);
+                    await sleep(delay);
                     continue;
                 }
-
                 let detail = `Could not check upload status (${response.status})`;
                 try {
                     const payload = await response.json();
                     detail = payload.detail || detail;
                 } catch {
-                    // Keep the HTTP status message if the response is not JSON.
+                    // Preserve the status code when no JSON body is available.
                 }
-                /** @type {UploadRequestError} */
-                const statusError = new Error(detail);
-                statusError.queueFatal = true;
-                throw statusError;
+                throw new Error(detail);
             }
 
-            let job;
-            try {
-                job = await response.json();
-            } catch {
-                /** @type {UploadRequestError} */
-                const statusError = new Error("The server returned an unreadable upload status.");
-                statusError.queueFatal = true;
-                throw statusError;
-            }
-
+            const job = await response.json();
             if (typeof onProgress === "function") onProgress(job);
             if (job.status === "completed") return;
             if (job.status === "cancelled") throw new Error(`${job.name || "Upload"} was cancelled.`);
             if (job.status === "error") throw new Error(job.message || `${job.name || "Upload"} failed.`);
 
             delay = 500;
-            await waitWhilePaused(cancelToken);
             await sleep(500);
         }
     };
@@ -700,11 +752,24 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 }
                 const currentToken = localStorage.getItem("token");
                 if (!currentToken) throw new Error("Your session has expired.");
-                const response = await fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(batchId)}`, {
-                    method: "PATCH",
-                    headers: {Authorization: `Bearer ${currentToken}`, "Content-Type": "application/json"},
-                    body: JSON.stringify(batchUpdates),
-                });
+                const patchController = new AbortController();
+                const patchTimeoutId = window.setTimeout(() => patchController.abort(), 10000);
+                let response;
+                try {
+                    response = await fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(batchId)}`, {
+                        method: "PATCH",
+                        headers: {Authorization: `Bearer ${currentToken}`, "Content-Type": "application/json"},
+                        body: JSON.stringify(batchUpdates),
+                        signal: patchController.signal,
+                    });
+                } catch (error) {
+                    if (error?.name === "AbortError") {
+                        throw new Error("The upload tray update timed out. The file transfer itself is not affected; retry the task if the queue does not resume.");
+                    }
+                    throw error;
+                } finally {
+                    window.clearTimeout(patchTimeoutId);
+                }
                 if (!response.ok) {
                     let detail = `Could not update upload task (${response.status})`;
                     try {
@@ -768,63 +833,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 if (batchTransfer && transfers) transfers.set(batchId, batchTransfer);
 
                 await publishBatch({status: "error", message});
-            };
-
-            // Coalesce frequent XMLHttpRequest progress events into small Redis patches.
-            // Keep writes ordered so an older progress snapshot cannot overwrite a newer one.
-            let pendingProgressUpdate = null;
-            let progressUpdateTimer = null;
-            let lastProgressUpdateAt = 0;
-            let progressUpdateChain = Promise.resolve();
-
-            const flushProgressUpdate = async () => {
-                if (!pendingProgressUpdate) return;
-                const updates = pendingProgressUpdate;
-                pendingProgressUpdate = null;
-                lastProgressUpdateAt = Date.now();
-                progressUpdateChain = progressUpdateChain.catch(() => {}).then(() => publishBatch(updates));
-                try {
-                    await progressUpdateChain;
-                } catch (error) {
-                    console.error("Could not publish upload progress:", error);
-                }
-            };
-
-            const flushPendingProgressUpdate = async () => {
-                if (progressUpdateTimer !== null) {
-                    window.clearTimeout(progressUpdateTimer);
-                    progressUpdateTimer = null;
-                }
-                await flushProgressUpdate();
-                await progressUpdateChain.catch(() => {});
-            };
-
-            const publishTransferProgress = (itemIndex, progress, immediate = false) => {
-                const total = Math.max(0, Number(progress.total) || 0);
-                const transfer = Math.max(0, Math.min(total > 0 ? total : Number.MAX_SAFE_INTEGER, Number(progress.transfer) || 0));
-                pendingProgressUpdate = {
-                    item_index: itemIndex,
-                    item_status: "uploading",
-                    item_transfer: Math.floor(transfer),
-                    item_total: Math.floor(total),
-                    item_progress: Math.max(0, Math.min(99.5, Number(progress.progress) || 0)),
-                    item_message: String(progress.message || "Uploading").slice(0, 300),
-                };
-
-                if (progressUpdateTimer !== null) {
-                    window.clearTimeout(progressUpdateTimer);
-                    progressUpdateTimer = null;
-                }
-
-                const delay = 250 - (Date.now() - lastProgressUpdateAt);
-                if (immediate || delay <= 0) {
-                    void flushProgressUpdate();
-                } else {
-                    progressUpdateTimer = window.setTimeout(() => {
-                        progressUpdateTimer = null;
-                        void flushProgressUpdate();
-                    }, delay);
-                }
             };
 
             // Only the first item is registered initially. Later items stay in the local
@@ -979,7 +987,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     items: [{
                         ...(queueItems[itemNumber - 1] || {}),
                         name: resolvedDisplayName,
-                        size: Math.max(0, Number(jobResult.file_size) || 0),
+                        size: Math.max(0, Number(selectedFile?.size) || Number(jobResult.file_size) || Number(queueItems[itemNumber - 1]?.size) || 0),
                         status: "uploading",
                         message: isStoreLimitlessCopy ? "Copying existing storage references" : "Uploading",
                     }],
@@ -987,32 +995,15 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         ? "Copying StoreLimitless file reference"
                         : telegramProcessing ? "Processing Telegram message" : `Uploading ${itemNumber} of ${queueItems.length}`
                 });
-
-                const publishCurrentFileProgress = (progress, immediate = false) => {
-                    if (uploadMode !== "file") return;
-                    publishTransferProgress(itemNumber - 1, progress, immediate);
-                };
-
                 if (uploadMode === "file") {
                     try {
                         await waitWhilePaused(batchTransfer);
-                        await uploadFileInChunks(jobId, selectedFile, directUploadApiUrl, cancelToken, batchTransfer.xhrs, publishCurrentFileProgress);
-                        await flushPendingProgressUpdate();
+                        await uploadFileInChunks(jobId, selectedFile, directUploadApiUrl, cancelToken, batchTransfer.xhrs);
                         await waitWhilePaused(batchTransfer);
                         if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
                         // Sending browser chunks is not enough: wait until the storage provider
                         // confirms completion before the next queued file starts.
-                        await waitForJobCompletion(jobId, token, cancelToken, (child) => {
-                            const total = Math.max(0, Number(child.total) || Number(selectedFile?.size) || 0);
-                            const transfer = Math.max(0, Math.min(total, Number(child.transfer) || 0));
-                            const fraction = total > 0 ? transfer / total : 0;
-                            publishCurrentFileProgress({
-                                transfer,
-                                total,
-                                progress: 50 + fraction * 49.5,
-                                message: child.message || "Uploading to storage",
-                            });
-                        });
+                        await waitForJobCompletion(jobId, token, cancelToken, null, {batchId, itemIndex: itemNumber - 1});
                     } catch (error) {
                         const wasCancelled = cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "");
                         if (!wasCancelled) {
@@ -1032,7 +1023,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         throw error;
                     } finally {
                         batchTransfer.activeJobId = "";
-                        await flushPendingProgressUpdate();
                     }
                 } else {
                     try {
@@ -1050,25 +1040,9 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 // Consume a growing shared queue. New file selections append to the same
                 // array while this worker is active, so only this loop can start a file.
                 let index = 0;
-                let unpersistedCompletedIndex = -1;
                 while (true) {
                     if (index >= queueItems.length) {
                         if (sharedFileQueue && Number(sharedFileQueue.pendingAppends) > 0) {
-                            // If the queue temporarily drains while a new selection is still
-                            // being prepared, persist the completed item before waiting.
-                            if (unpersistedCompletedIndex >= 0) {
-                                await publishBatch({
-                                    status: "uploading",
-                                    current_index: index,
-                                    current_job_id: "",
-                                    current_name: "",
-                                    item_index: unpersistedCompletedIndex,
-                                    item_status: "completed",
-                                    item_message: "Uploaded successfully",
-                                    message: `Completed ${successfulItems} of ${queueItems.length}`,
-                                });
-                                unpersistedCompletedIndex = -1;
-                            }
                             await sleep(150);
                             continue;
                         }
@@ -1119,7 +1093,6 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         });
                         // This single start update also commits the previous item's
                         // locally recorded completion, replacing a separate PATCH.
-                        unpersistedCompletedIndex = -1;
                         await createJob(
                             selectedFile,
                             "",
@@ -1130,14 +1103,50 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         );
                         successfulItems += 1;
 
-                        // Keep the completed item locally. The next item's start PATCH
-                        // persists this completion and the new active item together.
+                        // Persist this file's terminal state before the worker advances.
+                        // This prevents the next child's start update from making the prior
+                        // row appear blank or leave it in its previous transient state.
+                        const completedSize = Math.max(0, Number(selectedFile.size) || Number(queueItem.size) || 0);
                         queueItem.status = "completed";
                         queueItem.message = "Uploaded successfully";
-                        queueItem.transfer = Math.max(0, Number(selectedFile.size) || 0);
-                        queueItem.total = Math.max(0, Number(selectedFile.size) || 0);
+                        queueItem.size = completedSize;
+                        queueItem.transfer = completedSize;
+                        queueItem.total = completedSize;
                         queueItem.progress = 100;
-                        unpersistedCompletedIndex = index;
+                        queueItem.download_transfer = completedSize;
+                        queueItem.download_total = completedSize;
+                        queueItem.upload_transfer = completedSize;
+                        queueItem.upload_total = completedSize;
+
+                        try {
+                            await publishBatch({
+                                status: "uploading",
+                                current_index: index,
+                                current_job_id: "",
+                                current_name: relativePath,
+                                item_index: index,
+                                item_status: "completed",
+                                item_message: "Uploaded successfully",
+                                item_transfer: completedSize,
+                                item_total: completedSize,
+                                item_progress: 100,
+                                message: `Completed ${successfulItems} of ${queueItems.length}`,
+                            });
+                        } catch (publishError) {
+                            // The file is already committed in storage. Keep it locally
+                            // completed; the next queue update (or final batch update)
+                            // republishes the complete items array.
+                            console.error("Could not immediately persist completed upload item:", publishError);
+                        }
+
+                        window.dispatchEvent(new CustomEvent("storelimitless:upload-file-completed", {
+                            detail: {
+                                batchId,
+                                itemIndex: index,
+                                fileName: relativePath,
+                                directory: destinationDirectory,
+                            },
+                        }));
                     } catch (error) {
                         // A missing/unavailable tunnel registry prevents every file from
                         // reaching FastAPI. Stop the shared queue instead of failing each

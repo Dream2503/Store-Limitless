@@ -832,20 +832,29 @@ function expandBrowserFileQueue(job) {
 
     return displayItems.map(({item, index, status}, displayIndex) => {
         const size = num(item.size) || num(item.total);
-        const itemProgress = item.progress == null ? 0 : Math.max(0, Math.min(100, num(item.progress)));
+        const itemProgress = status === "completed" ? 100 : item.progress == null ? 0 : Math.max(0, Math.min(100, num(item.progress)));
         const isCurrent = index === Number(job.currentIndex);
         const name = String(item.name || `File ${index + 1}`);
 
         // The batch-level counters describe only currentIndex. Copying them onto
         // every expanded file card makes queued siblings appear to be uploading
         // the active file's bytes. Keep storage metrics scoped to the active item.
-        const itemTotal = size || (isCurrent ? num(job.uploadTotal) || num(job.total) : 0);
-        const itemUploadTransfer = isCurrent
-            ? Math.min(itemTotal || Number.MAX_SAFE_INTEGER, Math.max(num(job.uploadTransfer), num(job.transfer)))
-            : 0;
-        const itemUploadTotal = isCurrent
-            ? (num(job.uploadTotal) || num(job.total) || itemTotal)
-            : itemTotal;
+        // Both bars represent progress against the original selected file size.
+        // The backend's live upload_total is only the currently staged/received size,
+        // so using it here incorrectly makes storage appear nearly 100% complete.
+        const itemTotal = size || (isCurrent ? num(job.downloadTotal) || num(job.uploadTotal) || num(job.total) : 0);
+        const itemCompleted = status === "completed";
+        const itemUploadTransfer = itemCompleted
+            ? itemTotal
+            : isCurrent
+                ? Math.min(itemTotal || Number.MAX_SAFE_INTEGER, Math.max(num(job.uploadTransfer), num(job.transfer)))
+                : Math.max(0, Math.min(itemTotal || Number.MAX_SAFE_INTEGER, num(item.upload_transfer ?? item.transfer)));
+        const itemDownloadTransfer = itemCompleted
+            ? itemTotal
+            : isCurrent
+                ? Math.max(0, Math.min(itemTotal || Number.MAX_SAFE_INTEGER, num(job.downloadTransfer)))
+                : Math.max(0, Math.min(itemTotal || Number.MAX_SAFE_INTEGER, num(item.download_transfer)));
+        const itemUploadTotal = itemTotal;
 
         item.name = name;
         item.size = size;
@@ -872,12 +881,12 @@ function expandBrowserFileQueue(job) {
             transfer: itemUploadTransfer,
             uploadTransfer: itemUploadTransfer,
             uploadTotal: itemUploadTotal,
-            downloadTransfer: 0,
+            downloadTransfer: itemDownloadTransfer,
             downloadTotal: itemTotal,
-            downloadActive: true,
-            downloadSpeed: 0,
+            downloadActive: itemCompleted || isCurrent && Boolean(job.downloadActive || itemTotal > 0),
+            downloadSpeed: isCurrent ? num(job.downloadSpeed) : 0,
             uploadSpeed: isCurrent ? num(job.uploadSpeed) : 0,
-            downloadEta: null,
+            downloadEta: isCurrent ? job.downloadEta : null,
             uploadEta: isCurrent ? job.uploadEta : null,
             progress: itemProgress,
             torrentFiles: [],

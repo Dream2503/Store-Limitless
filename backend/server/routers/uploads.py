@@ -1134,8 +1134,12 @@ async def upload_chunk(
                     raise HTTPException(status_code=413, detail="Chunk exceeds declared file size")
 
                 await buffer.write(chunk)
-                await buffer.flush()
                 position += len(chunk)
+
+            # Flush once after the complete HTTP range has arrived. The range is
+            # not published to Redis until after this point, so the storage worker
+            # never treats buffered, incomplete bytes as a completed chunk.
+            await buffer.flush()
     except ClientDisconnect:
         # The browser intentionally aborts in-flight XHRs when Pause is pressed.
         # A partially written range is not recorded as complete, so resume safely

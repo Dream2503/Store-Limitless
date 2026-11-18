@@ -1,6 +1,6 @@
 import {useEffect, useRef, useState} from "react";
 import {API_URL} from "../constants.js";
-import {getToken} from "../utils.js";
+import {endAuthSession, getToken} from "../utils.js";
 
 const ACTIVE_POLL_INTERVAL_MS = 1000;
 const IDLE_POLL_INTERVAL_MS = 10000;
@@ -124,7 +124,16 @@ export default function useUploadJobs(refreshDirectory) {
                     if (!cancelled) setUploadJobs([]);
                     return;
                 }
-                if (response.status === 401 || response.status === 403) {
+                if (response.status === 401) {
+                    // Drop an expired/revoked token so the dashboard stops polling
+                    // with credentials the API has already rejected.
+                    const rejectedToken = getToken();
+                    if (rejectedToken) endAuthSession(rejectedToken);
+                    hasActiveUploads.current = false;
+                    if (!cancelled) setUploadJobs([]);
+                    return;
+                }
+                if (response.status === 403) {
                     hasActiveUploads.current = false;
                     if (!cancelled) setUploadJobs([]);
                     return;

@@ -54,12 +54,15 @@ export default function Auth({initialMode = "login"}) {
         setMessage("");
         setLoading(true);
         try {
-            const endpoint = isLogin ? `${API_URL}/auth/login?username=${encodeURIComponent(formData.username)}&password=${encodeURIComponent(formData.password)}` : `${API_URL}/auth/register`;
-
-            const bodyData = isLogin ? undefined : {...formData};
+            const endpoint = isLogin ? `${API_URL}/auth/login` : `${API_URL}/auth/register`;
+            const bodyData = isLogin
+                ? {username: formData.username, password: formData.password}
+                : {...formData};
 
             const response = await fetch(endpoint, {
-                method: "POST", headers: {"Content-Type": "application/json"}, ...(bodyData ? {body: JSON.stringify(bodyData)} : {}),
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(bodyData),
             });
 
             const data = await response.json().catch(() => ({}));

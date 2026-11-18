@@ -1,11 +1,17 @@
+from __future__ import annotations
+
 import os
 from asyncio import Lock, to_thread
 from collections import OrderedDict
 from pathlib import Path
 from shutil import rmtree
 from time import monotonic
+from typing import TYPE_CHECKING
 
-from core import TRANSFER_PATH
+from core.config import TRANSFER_PATH
+
+if TYPE_CHECKING:
+    from core.utils import Progress
 
 
 class DataCenter:
@@ -18,14 +24,14 @@ class DataCenter:
     CACHE_DIR: Path = TRANSFER_PATH / Path("cached")
     CACHE_LIMIT: int = 512 * 1024 * 1024
 
-    _cache: OrderedDict[str, tuple[int, float]] = OrderedDict()
+    _cache: OrderedDict[str, tuple[int, float | int]] = OrderedDict()
     _cache_size: int = 0
     _cache_lock: Lock | None = None
 
     def __new__(cls, name: str):
-        from core.discord_utils import Discord
-        from core.telegram_utils import Telegram
-        from core.github_utils import GitHub
+        from core.utils.discord_ import Discord
+        from core.utils.telegram_ import Telegram
+        from core.utils.github_ import GitHub
 
         match name:
             case Discord.NAME:
@@ -186,7 +192,7 @@ class DataCenter:
             DataCenter._cache_size = 0
 
     @staticmethod
-    async def upload(chunk: bytes, filename: str) -> str:
+    async def upload(chunk: bytes, filename: str, progress: Progress) -> str:
         pass
 
     @staticmethod

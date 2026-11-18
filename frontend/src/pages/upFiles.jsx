@@ -3,6 +3,21 @@ import {useNavigate, useSearchParams} from "react-router-dom";
 
 const DATA_CENTERS = ["Discord", "Telegram"];
 
+const formatBytes = (bytes) => {
+    if (bytes < 1024) return `${bytes} B`;
+
+    const units = ["KB", "MB", "GB", "TB"];
+    let value = bytes;
+    let unit = -1;
+
+    do {
+        value /= 1024;
+        unit++;
+    } while (value >= 1024 && unit < units.length - 1);
+
+    return `${value.toFixed(1)} ${units[unit]}`;
+};
+
 export default function UploadPage() {
     const navigate = useNavigate();
     const [searchParams] = useSearchParams();
@@ -18,61 +33,96 @@ export default function UploadPage() {
     // Other states
     const [dataCenter, setDataCenter] = useState("Discord");
     const [progress, setProgress] = useState(0);
+    const [message, setMessage] = useState("");
+    const [transfer, setTransfer] = useState(0);
+    const [total, setTotal] = useState(0);
     const [status, setStatus] = useState("idle");
     const [dragOver, setDragOver] = useState(false);
 
+    const pollJobStatus = (jobId) => {
+        return new Promise((resolve, reject) => {
+            const poll = setInterval(async () => {
+                try {
+                    const statusRes = await fetch(`http://127.0.0.1:8000/auth/upload/${jobId}/status`, {
+                        headers: {
+                            Authorization: `Bearer ${localStorage.getItem("token")}`
+                        }
+                    });
+
+                    if (!statusRes.ok) {
+                        if (statusRes.status === 404) return;
+
+                        clearInterval(poll);
+                        reject(new Error(`Status check failed: ${statusRes.status}`));
+                        return;
+                    }
+
+                    const data = await statusRes.json();
+
+                    if (data.status === "error") {
+                        clearInterval(poll);
+                        reject(new Error(data.error || "Upload failed"));
+                        return;
+                    }
+
+                    if (data.message !== undefined && data.transfer !== undefined && data.total !== undefined) {
+                        setMessage(data.message);
+                        setTransfer(data.transfer);
+                        setTotal(data.total);
+                        setProgress(data.total ? (data.transfer / data.total) * 100 : 0);
+                    }
+
+                    if (data.status === "completed" || data.message?.startsWith("Upload complete")) {
+                        clearInterval(poll);
+                        setProgress(100);
+                        resolve();
+                    }
+
+                } catch (error) {
+                    clearInterval(poll);
+                    reject(error);
+                }
+            }, 100);
+        });
+    };
+
     const handleUpload = async () => {
-        // ==========================================
-        // VALIDATION
-        // ==========================================
         if (!dataCenter) return;
 
         if (uploadMode === "file" && !file) return;
 
-        if (uploadMode === "link" && !link.trim()) {
-            return;
-        }
+        if (uploadMode === "link" && !link.trim()) return;
 
         setStatus("uploading");
         setProgress(0);
+        setMessage("");
+        setTransfer(0);
+        setTotal(0);
 
         try {
             let res;
 
-            // ==========================================
-            // LOCAL FILE UPLOAD
-            // ==========================================
             if (uploadMode === "file") {
-                const formData = new FormData();
-
-                formData.append("file", file);
-                formData.append("data_center", dataCenter);
-                formData.append("directory", directory);
-
                 res = await fetch("http://127.0.0.1:8000/auth/upload", {
                     method: "POST", headers: {
                         Authorization: `Bearer ${localStorage.getItem("token")}`,
-                    }, body: formData,
+                        "Content-Type": file.type || "application/octet-stream",
+                        "X-File-Name": file.name,
+                        "X-Data-Center": dataCenter,
+                        "X-Directory": directory,
+                    }, body: file,
                 });
-            }
-
-                // ==========================================
-                // LINK UPLOAD
-            // ==========================================
-            else {
-                res = await fetch("http://127.0.0.1:8000/auth/upload-from-link", {
+            } else {
+                res = await fetch("http://127.0.0.1:8000/auth/upload-link", {
                     method: "POST", headers: {
-                        "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("token")}`,
+                        Authorization: `Bearer ${localStorage.getItem("token")}`, "Content-Type": "application/json",
                     }, body: JSON.stringify({
                         link: link.trim(), data_center: dataCenter, directory: directory,
                     }),
                 });
             }
 
-            // ==========================================
-            // CHECK HTTP RESPONSE
-            // ==========================================
-            if (!res.ok || !res.body) {
+            if (!res.ok) {
                 let errorMessage = "Upload failed";
 
                 try {
@@ -83,130 +133,17 @@ export default function UploadPage() {
                 }
 
                 console.error("Upload failed:", errorMessage);
-
                 setStatus("error");
                 return;
             }
 
-            // ==========================================
-            // READ STREAMING RESPONSE
-            // ==========================================
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
+            const {job_id} = await res.json();
 
-            let buffer = "";
-            let uploadFailed = false;
-            let uploadError = "";
-            let uploadCompleted = false;
+            await pollJobStatus(job_id);
 
-            while (true) {
-                const {done, value} = await reader.read();
-
-                if (done) break;
-
-                buffer += decoder.decode(value, {
-                    stream: true,
-                });
-
-                const lines = buffer.split("\n");
-
-                // Keep incomplete JSON
-                buffer = lines.pop() || "";
-
-                for (const line of lines) {
-                    if (!line.trim()) continue;
-
-                    try {
-                        const data = JSON.parse(line);
-
-                        // ==========================================
-                        // BACKEND ERROR
-                        // ==========================================
-                        if (data.status === "error") {
-                            uploadFailed = true;
-                            uploadError = data.error || "Upload failed";
-                            break;
-                        }
-
-                        // ==========================================
-                        // BACKEND COMPLETED
-                        // ==========================================
-                        if (data.status === "completed") {
-                            uploadCompleted = true;
-                            setProgress(100);
-                            continue;
-                        }
-
-                        // ==========================================
-                        // PROGRESS UPDATE
-                        // ==========================================
-                        if (data.progress !== undefined) {
-                            setProgress((previousProgress) => Math.max(previousProgress, Number(data.progress)));
-                        }
-
-                    } catch (error) {
-                        console.error("Could not parse upload progress:", error);
-                    }
-                }
-
-                // Stop reading if backend reported failure
-                if (uploadFailed) {
-                    await reader.cancel();
-                    break;
-                }
-            }
-
-            // ==========================================
-            // HANDLE REMAINING BUFFER
-            // ==========================================
-            if (buffer.trim() && !uploadFailed) {
-                try {
-                    const data = JSON.parse(buffer);
-
-                    if (data.status === "error") {
-                        uploadFailed = true;
-                        uploadError = data.error || "Upload failed";
-                    }
-
-                    if (data.status === "completed") {
-                        uploadCompleted = true;
-                        setProgress(100);
-                    }
-
-                } catch (error) {
-                    console.error("Could not parse final response:", error);
-                }
-            }
-
-            // ==========================================
-            // UPLOAD FAILED
-            // ==========================================
-            if (uploadFailed) {
-                console.error("Upload failed:", uploadError);
-
-                setStatus("error");
-                return;
-            }
-
-            // ==========================================
-            // LINK UPLOAD REQUIRES COMPLETION
-            // ==========================================
-            if (uploadMode === "link" && !uploadCompleted) {
-                console.error("Link upload ended without completion confirmation.");
-
-                setStatus("error");
-                return;
-            }
-
-            // ==========================================
-            // SUCCESS
-            // ==========================================
             setProgress(100);
             setStatus("done");
 
-            // ==========================================
-            // RETURN TO CURRENT DIRECTORY
-            // ==========================================
             setTimeout(() => {
                 if (directory) {
                     navigate(`/dashboard?directory=${encodeURIComponent(directory)}`);
@@ -217,7 +154,6 @@ export default function UploadPage() {
 
         } catch (error) {
             console.error("Upload error:", error);
-
             setStatus("error");
         }
     };
@@ -390,8 +326,8 @@ export default function UploadPage() {
                             <p className="text-sm text-on-surface-variant">
                                 Drop file here or{" "}
                                 <span className="text-primary">
-                                            browse
-                                        </span>
+                                    browse
+                                </span>
                             </p>
                             <p className="text-xs text-on-surface-variant/50 mt-1">
                                 Any file type supported
@@ -422,9 +358,9 @@ export default function UploadPage() {
                     <div className="bg-surface-container-low border border-outline-variant/30 rounded-2xl p-4">
                         <div className="flex items-center gap-3 mb-4">
                             <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
-                                    <span className="material-symbols-outlined text-primary">
-                                        link
-                                    </span>
+                                <span className="material-symbols-outlined text-primary">
+                                    link
+                                </span>
                             </div>
                             <div>
                                 <p className="text-sm font-medium text-on-surface">
@@ -438,9 +374,9 @@ export default function UploadPage() {
 
                         {/* LINK INPUT */}
                         <div className="relative">
-                                <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant">
-                                    link
-                                </span>
+                            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant">
+                                link
+                            </span>
                             <input
                                 type="url"
                                 value={link}
@@ -453,9 +389,9 @@ export default function UploadPage() {
 
                         {/* LINK DETECTED */}
                         {link.trim() && (<div className="flex items-center gap-2 mt-3 text-primary">
-                                    <span className="material-symbols-outlined text-[16px]">
-                                        check_circle
-                                    </span>
+                            <span className="material-symbols-outlined text-[16px]">
+                                check_circle
+                            </span>
                             <p className="text-xs">
                                 Link added
                             </p>
@@ -475,14 +411,14 @@ export default function UploadPage() {
                     className="w-full bg-primary text-on-primary py-3 rounded-xl font-medium text-sm hover:bg-primary/90 transition-colors shadow-[0_0_20px_rgba(192,193,255,0.2)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                     {status === "uploading" ? (<>
-                            <span className="material-symbols-outlined text-[18px] animate-spin">
-                                autorenew
-                            </span>
+                        <span className="material-symbols-outlined text-[18px] animate-spin">
+                            autorenew
+                        </span>
                         {uploadMode === "link" ? "Importing..." : "Uploading..."}
                     </>) : (<>
-                            <span className="material-symbols-outlined text-[18px]">
-                                cloud_upload
-                            </span>
+                        <span className="material-symbols-outlined text-[18px]">
+                            cloud_upload
+                        </span>
                         {uploadMode === "link" ? "Import File" : "Upload File"}
                     </>)}
                 </button>
@@ -492,14 +428,14 @@ export default function UploadPage() {
                 ========================================== */}
                 {status !== "idle" && (<div className="mt-6 glass-panel rounded-2xl p-4 border border-outline-variant/10">
                     <div className="flex justify-between text-xs text-on-surface-variant mb-2">
-                            <span className="font-geist uppercase tracking-widest">
-                                {status === "uploading" && (uploadMode === "link" ? "Importing" : "Uploading")}
-                                {status === "done" && "✓ Completed"}
-                                {status === "error" && "✗ Failed"}
-                            </span>
+                        <span className="font-geist uppercase tracking-widest">
+                            {status === "uploading" && `${message || (uploadMode === "link" ? "Importing" : "Uploading")}:`}
+                            {status === "done" && "✓ Completed:"}
+                            {status === "error" && "✗ Failed:"}
+                        </span>
                         <span>
-                                {progress}%
-                            </span>
+                            {total > 0 ? `${formatBytes(transfer)} / ${formatBytes(total)}    ${progress.toFixed(1)}%` : `${progress.toFixed(1)}%`}
+                        </span>
                     </div>
 
                     {/* PROGRESS BAR */}

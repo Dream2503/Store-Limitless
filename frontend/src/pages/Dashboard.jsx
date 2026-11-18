@@ -3,9 +3,10 @@ import {useNavigate} from "react-router-dom";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 
-const NAV_ITEMS = [{icon: "folder_open", label: "All Files", enabled: true}, {icon: "schedule", label: "Recent", enabled: false}, {
-    icon: "group", label: "Shared", enabled: false
-}, {icon: "delete", label: "Trash", enabled: false},];
+const NAV_ITEMS = [
+    {id: "files", icon: "folder_open", label: "All Files", enabled: true},
+    {id: "trash", icon: "delete", label: "Trash", enabled: true},
+];
 
 const FILE_ICONS = {
     pdf: {icon: "picture_as_pdf", color: "text-error"},
@@ -41,90 +42,194 @@ function formatDate(dateStr) {
     });
 }
 
+function formatFileSize(bytes) {
+    if (!bytes || bytes <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
 function getToken() {
     return localStorage.getItem("token");
 }
 
 /* -------------------------------------------------------------------- */
-/*  Sidebar                                                              */
-
+/* Sidebar                                                             */
 /* -------------------------------------------------------------------- */
 
-function Sidebar({onUpload, onGoHome, onLogout}) {
-    return (<nav className="flex h-screen w-72 flex-col gap-4 border-r border-outline-variant/20 bg-surface/70 p-6 backdrop-blur-xl">
-        <div className="mb-4 flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary">
-          <span
-              className="material-symbols-outlined text-on-primary"
-              style={{fontVariationSettings: "'FILL' 1"}}
-              aria-hidden="true"
-          >
-            cloud
-          </span>
+function Sidebar({activeTab, onTabSelect, onUpload, onLogout}) {
+    return (
+        <nav className="flex h-screen w-72 flex-col gap-4 border-r border-outline-variant/20 bg-surface/70 p-6 backdrop-blur-xl">
+            <div className="mb-4 flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary">
+                    <span
+                        className="material-symbols-outlined text-on-primary"
+                        style={{fontVariationSettings: "'FILL' 1"}}
+                        aria-hidden="true"
+                    >
+                        cloud
+                    </span>
+                </div>
+                <div>
+                    <h1 className="text-lg font-bold text-primary">DriveBot</h1>
+                    <p className="font-geist text-xs uppercase tracking-widest text-on-surface-variant">
+                        File Management
+                    </p>
+                </div>
             </div>
-            <div>
-                <h1 className="text-lg font-bold text-primary">DriveBot</h1>
-                <p className="font-geist text-xs uppercase tracking-widest text-on-surface-variant">
-                    File Management
-                </p>
-            </div>
-        </div>
-
-        <button
-            type="button"
-            onClick={onUpload}
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-on-primary shadow-[0_0_15px_rgba(192,193,255,0.2)] transition-colors hover:bg-primary/90"
-        >
-        <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-          add
-        </span>
-            Upload Files
-        </button>
-
-        <div className="mt-2 flex flex-1 flex-col gap-1">
-            {NAV_ITEMS.map(({icon, label, enabled}) => (<button
-                key={label}
-                type="button"
-                disabled={!enabled}
-                onClick={enabled ? onGoHome : undefined}
-                title={enabled ? undefined : "Coming soon"}
-                className={`flex items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition-all ${label === "All Files" ? "bg-primary-container/30 font-semibold text-primary" : enabled ? "text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface" : "cursor-not-allowed text-on-surface-variant/40"}`}
-            >
-            <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
-              {icon}
-            </span>
-                {label}
-            </button>))}
-        </div>
-
-        <div className="flex flex-col gap-1 border-t border-outline-variant/10 pt-4">
-            <button
-                type="button"
-                className="flex items-center gap-3 rounded-xl px-3 py-2 text-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-            >
-          <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
-            help_outline
-          </span>
-                Help
-            </button>
 
             <button
                 type="button"
-                onClick={onLogout}
-                className="flex items-center gap-3 rounded-xl px-3 py-2 text-sm text-on-surface-variant transition-colors hover:bg-error/10 hover:text-error"
+                onClick={onUpload}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-on-primary shadow-[0_0_15px_rgba(192,193,255,0.2)] transition-colors hover:bg-primary/90"
             >
-          <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
-            logout
-          </span>
-                Sign Out
+                <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
+                    add
+                </span>
+                Upload Files
             </button>
-        </div>
-    </nav>);
+
+            <div className="mt-2 flex flex-1 flex-col gap-1">
+                {NAV_ITEMS.map(({id, icon, label, enabled}) => {
+                    const isActive = activeTab === id;
+                    return (
+                        <button
+                            key={id}
+                            type="button"
+                            disabled={!enabled}
+                            onClick={enabled ? () => onTabSelect(id) : undefined}
+                            title={enabled ? undefined : "Coming soon"}
+                            className={`flex items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition-all ${
+                                isActive
+                                    ? "bg-primary-container/30 font-semibold text-primary"
+                                    : enabled
+                                    ? "text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface"
+                                    : "cursor-not-allowed text-on-surface-variant/40"
+                            }`}
+                        >
+                            <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+                                {icon}
+                            </span>
+                            {label}
+                        </button>
+                    );
+                })}
+            </div>
+
+            <div className="flex flex-col gap-1 border-t border-outline-variant/10 pt-4">
+                <button
+                    type="button"
+                    className="flex items-center gap-3 rounded-xl px-3 py-2 text-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+                >
+                    <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+                        help_outline
+                    </span>
+                    Help
+                </button>
+
+                <button
+                    type="button"
+                    onClick={onLogout}
+                    className="flex items-center gap-3 rounded-xl px-3 py-2 text-sm text-on-surface-variant transition-colors hover:bg-error/10 hover:text-error"
+                >
+                    <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+                        logout
+                    </span>
+                    Sign Out
+                </button>
+            </div>
+        </nav>
+    );
 }
 
 /* -------------------------------------------------------------------- */
-/*  Create-folder modal                                                  */
+/* Stream Preview Modal                                                */
+/* -------------------------------------------------------------------- */
 
+function StreamModal({file, streamUrl, onClose}) {
+    useEffect(() => {
+        const onKeyDown = (e) => {
+            if (e.key === "Escape") onClose();
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [onClose]);
+
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    const isVideo = ["mp4", "mkv", "webm", "mov"].includes(ext);
+    const isAudio = ["mp3", "wav", "ogg"].includes(ext);
+    const isImage = ["jpg", "jpeg", "png", "gif", "webp"].includes(ext);
+    const isPdf = ext === "pdf";
+
+    return (
+        <div 
+            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/80 px-4 backdrop-blur-md"
+            onClick={onClose}
+        >
+            <div 
+                className="relative flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl border border-outline-variant/20 bg-surface p-4 shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="mb-3 flex items-center justify-between border-b border-outline-variant/10 pb-3">
+                    <div className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-primary" aria-hidden="true">
+                            play_circle
+                        </span>
+                        <h3 className="truncate font-medium text-on-surface">{file.name}</h3>
+                    </div>
+                    <button 
+                        type="button" 
+                        onClick={onClose}
+                        className="rounded-lg p-1 text-on-surface-variant hover:bg-surface-container hover:text-on-surface"
+                    >
+                        <span className="material-symbols-outlined">close</span>
+                    </button>
+                </div>
+
+                <div className="flex flex-1 items-center justify-center overflow-auto rounded-xl bg-black/40 p-2">
+                    {isVideo && (
+                        <video controls autoPlay className="max-h-[70vh] w-full rounded-lg">
+                            <source src={streamUrl} />
+                            Your browser does not support playing this video format.
+                        </video>
+                    )}
+                    {isAudio && (
+                        <div className="py-12">
+                            <audio controls autoPlay className="w-96">
+                                <source src={streamUrl} />
+                                Your browser does not support audio playback.
+                            </audio>
+                        </div>
+                    )}
+                    {isImage && (
+                        <img 
+                            src={streamUrl} 
+                            alt={file.name} 
+                            className="max-h-[70vh] max-w-full rounded-lg object-contain" 
+                        />
+                    )}
+                    {isPdf && (
+                        <iframe 
+                            src={streamUrl} 
+                            title={file.name} 
+                            className="h-[70vh] w-full rounded-lg border-0" 
+                        />
+                    )}
+                    {!isVideo && !isAudio && !isImage && !isPdf && (
+                        <iframe 
+                            src={streamUrl} 
+                            title={file.name} 
+                            className="h-[70vh] w-full rounded-lg bg-surface p-4 font-mono text-xs text-on-surface" 
+                        />
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+/* -------------------------------------------------------------------- */
+/* Create Folder Modal                                                 */
 /* -------------------------------------------------------------------- */
 
 function CreateFolderModal({targetPath, onClose, onCreate}) {
@@ -164,58 +269,78 @@ function CreateFolderModal({targetPath, onClose, onCreate}) {
         }
     };
 
-    return (<div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm"
-                 onClick={() => !creating && onClose()}>
-        <div className="w-full max-w-md rounded-2xl border border-outline-variant/20 bg-surface p-6 shadow-2xl"
-             onClick={(e) => e.stopPropagation()}>
-            <div className="mb-5 flex items-center justify-between">
-                <div>
-                    <h2 className="text-lg font-semibold text-on-surface">Create New Folder</h2>
-                    <p className="mt-1 text-sm text-on-surface-variant">
-                        Will be created inside <span className="text-on-surface font-medium">{targetPath || "Root"}</span>.
-                    </p>
+    return (
+        <div 
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 px-4 backdrop-blur-sm"
+            onClick={() => !creating && onClose()}
+        >
+            <div 
+                className="w-full max-w-md rounded-2xl border border-outline-variant/20 bg-surface p-6 shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="mb-5 flex items-center justify-between">
+                    <div>
+                        <h2 className="text-lg font-semibold text-on-surface">Create New Folder</h2>
+                        <p className="mt-1 text-sm text-on-surface-variant">
+                            Will be created inside <span className="font-medium text-on-surface">{targetPath || "Root"}</span>.
+                        </p>
+                    </div>
+                    <button 
+                        type="button" 
+                        onClick={onClose} 
+                        disabled={creating} 
+                        aria-label="Close"
+                        className="text-on-surface-variant hover:text-on-surface disabled:opacity-50"
+                    >
+                        <span className="material-symbols-outlined" aria-hidden="true">close</span>
+                    </button>
                 </div>
-                <button type="button" onClick={onClose} disabled={creating} aria-label="Close"
-                        className="text-on-surface-variant hover:text-on-surface disabled:opacity-50">
-                    <span className="material-symbols-outlined" aria-hidden="true">close</span>
-                </button>
-            </div>
 
-            <form onSubmit={handleSubmit}>
-                <input
-                    type="text"
-                    value={name}
-                    onChange={(e) => {
-                        setName(e.target.value);
-                        setError("");
-                    }}
-                    placeholder="Folder name"
-                    autoFocus
-                    disabled={creating}
-                    className="w-full rounded-xl border border-outline-variant/30 bg-surface-container-low px-4 py-3 text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30 disabled:opacity-60"
-                />
-                {error && <p className="mt-2 text-sm text-error">{error}</p>}
-                <div className="mt-6 flex justify-end gap-3">
-                    <button type="button" onClick={onClose} disabled={creating}
-                            className="rounded-xl px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-container disabled:opacity-50">Cancel
-                    </button>
-                    <button type="submit" disabled={creating}
-                            className="rounded-xl bg-primary px-5 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary/90 disabled:opacity-60">
-                        {creating ? "Creating…" : "Create Folder"}
-                    </button>
-                </div>
-            </form>
+                <form onSubmit={handleSubmit}>
+                    <input
+                        type="text"
+                        value={name}
+                        onChange={(e) => {
+                            setName(e.target.value);
+                            setError("");
+                        }}
+                        placeholder="Folder name"
+                        autoFocus
+                        disabled={creating}
+                        className="w-full rounded-xl border border-outline-variant/30 bg-surface-container-low px-4 py-3 text-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30 disabled:opacity-60"
+                    />
+                    {error && <p className="mt-2 text-sm text-error">{error}</p>}
+                    <div className="mt-6 flex justify-end gap-3">
+                        <button 
+                            type="button" 
+                            onClick={onClose} 
+                            disabled={creating}
+                            className="rounded-xl px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-container disabled:opacity-50"
+                        >
+                            Cancel
+                        </button>
+                        <button 
+                            type="submit" 
+                            disabled={creating}
+                            className="rounded-xl bg-primary px-5 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary/90 disabled:opacity-60"
+                        >
+                            {creating ? "Creating…" : "Create Folder"}
+                        </button>
+                    </div>
+                </form>
+            </div>
         </div>
-    </div>);
+    );
 }
 
 /* -------------------------------------------------------------------- */
-/*  Dashboard page                                                       */
+/* Dashboard Page                                                      */
 /* -------------------------------------------------------------------- */
 
 export default function DashboardPage() {
     const navigate = useNavigate();
 
+    const [activeTab, setActiveTab] = useState("files");
     const [files, setFiles] = useState([]);
     const [folders, setFolders] = useState([]);
     const [currentFolder, setCurrentFolder] = useState("");
@@ -225,6 +350,7 @@ export default function DashboardPage() {
     const [pageError, setPageError] = useState("");
     const [showFolderModal, setShowFolderModal] = useState(false);
     const [deletingId, setDeletingId] = useState(null);
+    const [streamData, setStreamData] = useState(null);
 
     /* ---------------------------- fetch files --------------------------- */
 
@@ -239,32 +365,54 @@ export default function DashboardPage() {
         setPageError("");
 
         try {
-            const response = await fetch(`${API_URL}/auth/files`, {
-                headers: {Authorization: `Bearer ${token}`},
+            // 1. Fetch active files first
+            const filesRes = await fetch(`${API_URL}/auth/files`, {
+                headers: { Authorization: `Bearer ${token}` },
             });
 
-            if (response.status === 401) {
+            if (filesRes.status === 401) {
                 localStorage.removeItem("token");
                 navigate("/");
                 return;
             }
 
-            const data = await response.json();
+            const activeData = await filesRes.json();
+            if (!filesRes.ok) throw new Error(activeData.detail || "Failed to fetch files");
 
-            if (!response.ok) {
-                throw new Error(data.detail || "Failed to fetch files");
-            }
+            // 2. Fetch trash files after the first request finishes (sequential, no cursor clash)
+            const trashRes = await fetch(`${API_URL}/auth/trash`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
 
-            const allFiles = Array.isArray(data) ? data : [];
+            const trashData = trashRes.ok ? await trashRes.json() : [];
+
+            const normalizedActive = (Array.isArray(activeData) ? activeData : []).map(f => ({
+                ...f,
+                is_deleted: Boolean(f.deleted_at),
+            }));
+
+            const normalizedTrash = (Array.isArray(trashData) ? trashData : []).map(f => ({
+                ...f,
+                is_deleted: true,
+            }));
+
+            const allFiles = [...normalizedActive, ...normalizedTrash];
             setFiles(allFiles);
 
-            // Folders are represented as placeholder records: name === ".__folder__"
+            const seenKeys = new Set();
             const uniqueFolders = [];
-            const seenPaths = new Set();
             allFiles.forEach((file) => {
-                if (file.name === ".__folder__" && file.directory && !seenPaths.has(file.directory)) {
-                    seenPaths.add(file.directory);
-                    uniqueFolders.push({path: file.directory, id: file.id});
+                if (file.name === ".__folder__" && file.directory) {
+                    const isDeleted = Boolean(file.deleted_at);
+                    const key = `${file.directory}:${isDeleted}`;
+                    if (!seenKeys.has(key)) {
+                        seenKeys.add(key);
+                        uniqueFolders.push({
+                            path: file.directory,
+                            id: file.id,
+                            is_deleted: isDeleted,
+                        });
+                    }
                 }
             });
             setFolders(uniqueFolders);
@@ -289,9 +437,9 @@ export default function DashboardPage() {
         return () => window.removeEventListener("keydown", onKeyDown);
     }, [sidebarOpen]);
 
-    /* ----------------------------- download ------------------------------ */
+    /* ----------------------------- stream/play ---------------------------- */
 
-    const downloadFile = async (fileId, filename) => {
+    const startStreaming = async (file) => {
         const token = getToken();
         if (!token) {
             navigate("/");
@@ -299,51 +447,83 @@ export default function DashboardPage() {
         }
 
         try {
-            const linkRes = await fetch(`${API_URL}/auth/files/${fileId}/public-link`, {
-                method: "POST", headers: {Authorization: `Bearer ${token}`},
+            const linkRes = await fetch(`${API_URL}/auth/files/${file.id}/public-link`, {
+                method: "POST", 
+                headers: {Authorization: `Bearer ${token}`},
             });
-            if (!linkRes.ok) throw new Error("Failed to get download link.");
+            if (!linkRes.ok) throw new Error("Failed to initialize stream.");
             const {url} = await linkRes.json();
+            setStreamData({file, url: `${API_URL}${url}`});
+        } catch (error) {
+            console.error("Stream init error:", error);
+            alert(error.message || "Could not stream file.");
+        }
+    };
 
-            const response = await fetch(`${API_URL}${url.replace("/stream/", "/download/")}`);
-            if (!response.ok) throw new Error("Failed to download file.");
+    /* ----------------------------- download ------------------------------ */
 
-            const blob = await response.blob();
-            const objectUrl = window.URL.createObjectURL(blob);
+    const downloadFile = async (fileId) => {
+        const token = getToken();
+        if (!token) {
+            navigate("/");
+            return;
+        }
+
+        try {
+            // 1. Get the authenticated public stream URL
+            const linkRes = await fetch(`${API_URL}/auth/files/${fileId}/public-link`, {
+                method: "POST", 
+                headers: { Authorization: `Bearer ${token}` },
+            });
+
+            if (!linkRes.ok) {
+                const errorData = await linkRes.json().catch(() => ({}));
+                throw new Error(errorData.detail || "Failed to generate download link.");
+            }
+
+            const { url } = await linkRes.json();
+
+            // 2. Convert /stream/ token to /download/ route
+            const downloadUrl = `${API_URL}${url.replace("/stream/", "/download/")}`;
+
+            // 3. Trigger native browser stream download (no RAM overhead/blob buffering)
             const anchor = document.createElement("a");
-            anchor.href = objectUrl;
-            anchor.download = filename;
+            anchor.href = downloadUrl;
+            anchor.setAttribute("download", ""); // Tells browser to handle as download
             document.body.appendChild(anchor);
             anchor.click();
             anchor.remove();
-            window.URL.revokeObjectURL(objectUrl);
         } catch (error) {
             console.error("Download failed:", error);
             alert(error.message || "Failed to download file.");
         }
     };
 
-    /* ------------------------------ delete -------------------------------- */
-    // NOTE: assumes a DELETE /auth/files/{fileId} endpoint, mirroring the
-    // /auth/download/{fileId} pattern. Update the URL below if your backend
-    // uses a different route.
+    /* ------------------------------ delete/restore ----------------------- */
 
-    const deleteFile = async (fileId, filename) => {
-        const token = getToken();
+    const deleteFile = async (fileId, filename, permanent = false) => {
+        const token = getToken(); // <-- Add this line
         if (!token) {
             navigate("/");
             return;
         }
 
-        if (!window.confirm(`Move "${filename}" to Trash?`)) {
-            return;
-        }
+        const confirmMsg = permanent 
+            ? `Permanently delete "${filename}"? This action cannot be undone.` 
+            : `Move "${filename}" to Trash?`;
+
+        if (!window.confirm(confirmMsg)) return;
 
         setDeletingId(fileId);
 
         try {
-            const response = await fetch(`${API_URL}/auth/files/${fileId}`, {
-                method: "DELETE", headers: {Authorization: `Bearer ${token}`},
+            const endpoint = permanent 
+                ? `${API_URL}/auth/trash/${fileId}` 
+                : `${API_URL}/auth/files/${fileId}`;
+
+            const response = await fetch(endpoint, {
+                method: "DELETE", 
+                headers: { Authorization: `Bearer ${token}` },
             });
 
             if (!response.ok) {
@@ -351,18 +531,43 @@ export default function DashboardPage() {
                 try {
                     const data = await response.json();
                     message = data.detail || message;
-                } catch {
-                    // response wasn't JSON — keep the default message
-                }
+                } catch {}
                 throw new Error(message);
             }
 
-            setFiles((prev) => prev.filter((file) => file.id !== fileId));
+            await fetchFiles();
         } catch (error) {
             console.error("Delete failed:", error);
             alert(error.message || "Failed to delete file.");
         } finally {
             setDeletingId(null);
+        }
+    };
+
+    const restoreItem = async (itemId) => {
+        const token = getToken();
+        if (!token) return;
+
+        try {
+            // Change /auth/files/ to /auth/trash/
+            const response = await fetch(`${API_URL}/auth/trash/${itemId}/restore`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}` },
+            });
+
+            if (!response.ok) {
+                let message = "Failed to restore item.";
+                try {
+                    const data = await response.json();
+                    message = data.detail || message;
+                } catch {}
+                throw new Error(message);
+            }
+
+            await fetchFiles();
+        } catch (error) {
+            console.error("Restore failed:", error);
+            alert(error.message || "Failed to restore item.");
         }
     };
 
@@ -391,61 +596,49 @@ export default function DashboardPage() {
     };
 
     const isFolderEmpty = (path) => {
-        const hasFiles = files.some((f) => f.name !== ".__folder__" && (f.directory || "") === path);
-        const hasSubfolders = folders.some((f) => f.path !== path && f.path.startsWith(`${path}/`));
+        const hasFiles = files.some((f) => f.name !== ".__folder__" && (f.directory || "") === path && !f.is_deleted);
+        const hasSubfolders = folders.some((f) => f.path !== path && f.path.startsWith(`${path}/`) && !f.is_deleted);
         return !hasFiles && !hasSubfolders;
     };
 
-    const deleteFolder = async (folderId, folderPath) => {
-        const token = getToken();
-
+    const deleteFolder = async (folderId, folderPath, permanent = false) => {
+        const token = getToken(); // <-- Add this line
         if (!token) {
             navigate("/");
             return;
         }
 
-        // Don't allow deletion if folder contains anything
-        if (!isFolderEmpty(folderPath)) {
+        if (!permanent && !isFolderEmpty(folderPath)) {
             alert("This folder isn't empty. Delete its contents first.");
             return;
         }
 
         const folderName = folderPath.split("/").pop();
+        const confirmMsg = permanent
+            ? `Permanently delete folder "${folderName}"?`
+            : `Move folder "${folderName}" to Trash?`;
 
-        if (!window.confirm(`Move folder "${folderName}" to Trash?`)) {
-            return;
-        }
+        if (!window.confirm(confirmMsg)) return;
 
         setDeletingId(`folder-${folderId}`);
 
         try {
-            const response = await fetch(`${API_URL}/auth/files/${folderId}`, {
-                method: "DELETE", headers: {
-                    Authorization: `Bearer ${token}`,
-                },
+            const endpoint = permanent 
+                ? `${API_URL}/auth/trash/${folderId}` 
+                : `${API_URL}/auth/files/${folderId}`;
+
+            const response = await fetch(endpoint, {
+                method: "DELETE", 
+                headers: { Authorization: `Bearer ${token}` },
             });
 
-            let data = {};
-
-            try {
-                data = await response.json();
-            } catch {
-                // Response may not contain JSON
-            }
-
-            if (response.status === 401) {
-                localStorage.removeItem("token");
-                navigate("/");
-                return;
-            }
-
             if (!response.ok) {
+                let data = {};
+                try { data = await response.json(); } catch {}
                 throw new Error(data.detail || "Failed to delete folder.");
             }
 
-            // Refresh both files and folders from backend
             await fetchFiles();
-
         } catch (error) {
             console.error("Folder deletion failed:", error);
             alert(error.message || "Failed to delete folder.");
@@ -471,21 +664,34 @@ export default function DashboardPage() {
         setCurrentFolder(parts.join("/"));
     };
 
+    const handleTabChange = (tabId) => {
+        setActiveTab(tabId);
+        setCurrentFolder("");
+        setSearchQuery("");
+    };
+
     /* ------------------------------ derived data ---------------------------- */
 
-    // Direct-child folders of the current directory.
+    const isTrash = activeTab === "trash";
+
     const visibleFolders = useMemo(() => {
-        return folders.filter(({path}) => {
+        return folders.filter(({path, is_deleted}) => {
+            if (isTrash) return Boolean(is_deleted);
+            if (is_deleted) return false;
             if (!currentFolder) return !path.includes("/");
             if (!path.startsWith(`${currentFolder}/`)) return false;
             const remainder = path.slice(currentFolder.length + 1);
             return remainder && !remainder.includes("/");
         });
-    }, [folders, currentFolder]);
+    }, [folders, currentFolder, isTrash]);
 
     const visibleFiles = useMemo(() => {
-        return files.filter((file) => file.name !== ".__folder__" && (file.directory || "") === currentFolder);
-    }, [files, currentFolder]);
+        return files.filter((file) => {
+            if (file.name === ".__folder__") return false;
+            if (isTrash) return Boolean(file.is_deleted);
+            return !file.is_deleted && (file.directory || "") === currentFolder;
+        });
+    }, [files, currentFolder, isTrash]);
 
     const filteredFiles = useMemo(() => {
         const query = searchQuery.trim().toLowerCase();
@@ -507,358 +713,403 @@ export default function DashboardPage() {
 
     const isEmpty = filteredFiles.length === 0 && filteredFolders.length === 0;
 
-    /* --------------------------------- render --------------------------------- */
-
-    return (<div className="flex h-screen overflow-hidden bg-background text-on-surface">
-        {/* Desktop sidebar */}
-        <div className="fixed left-0 top-0 hidden h-screen md:flex">
-            <Sidebar
-                onUpload={() => navigate(`/upload?directory=${encodeURIComponent(currentFolder)}`)}
-                onGoHome={() => setCurrentFolder("")}
-                onLogout={handleLogout}
-            />
-        </div>
-
-        {/* Mobile sidebar */}
-        {sidebarOpen && (<div className="fixed inset-0 z-50 flex md:hidden">
-            <div className="flex-shrink-0">
+    return (
+        <div className="flex h-screen overflow-hidden bg-background text-on-surface">
+            {/* Desktop sidebar */}
+            <div className="fixed left-0 top-0 hidden h-screen md:flex">
                 <Sidebar
+                    activeTab={activeTab}
+                    onTabSelect={handleTabChange}
                     onUpload={() => navigate(`/upload?directory=${encodeURIComponent(currentFolder)}`)}
-                    onGoHome={() => {
-                        setCurrentFolder("");
-                        setSidebarOpen(false);
-                    }}
                     onLogout={handleLogout}
                 />
             </div>
-            <div
-                className="flex-1 bg-black/50"
-                onClick={() => setSidebarOpen(false)}
-                aria-hidden="true"
-            />
-        </div>)}
 
-        <div className="flex h-screen flex-1 flex-col md:ml-72">
-            {/* Top bar */}
-            <header
-                className="fixed top-0 right-0 z-40 flex h-16 w-full items-center justify-between border-b border-outline-variant/10 bg-surface/70 px-6 backdrop-blur-md md:w-[calc(100%-288px)]">
-                <div className="flex w-full max-w-md items-center gap-4">
-                    <button
-                        type="button"
-                        className="text-on-surface-variant transition-colors hover:text-primary md:hidden"
-                        onClick={() => setSidebarOpen(true)}
-                        aria-label="Open menu"
-                    >
-              <span className="material-symbols-outlined" aria-hidden="true">
-                menu
-              </span>
-                    </button>
-
-                    <div className="relative hidden w-full sm:block">
-              <span
-                  className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant"
-                  style={{fontSize: 20}}
-                  aria-hidden="true"
-              >
-                search
-              </span>
-                        <input
-                            type="text"
-                            value={searchQuery}
-                            onChange={(event) => setSearchQuery(event.target.value)}
-                            placeholder="Search files…"
-                            aria-label="Search files"
-                            className="w-full rounded-xl border border-outline-variant/30 bg-surface-container-low py-2 pl-10 pr-3 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/50"
+            {/* Mobile sidebar */}
+            {sidebarOpen && (
+                <div className="fixed inset-0 z-50 flex md:hidden">
+                    <div className="flex-shrink-0">
+                        <Sidebar
+                            activeTab={activeTab}
+                            onTabSelect={(tab) => {
+                                handleTabChange(tab);
+                                setSidebarOpen(false);
+                            }}
+                            onUpload={() => navigate(`/upload?directory=${encodeURIComponent(currentFolder)}`)}
+                            onLogout={handleLogout}
                         />
                     </div>
+                    <div
+                        className="flex-1 bg-black/50"
+                        onClick={() => setSidebarOpen(false)}
+                        aria-hidden="true"
+                    />
                 </div>
+            )}
 
-                <div className="flex items-center gap-3">
-                    <div className="mr-3 hidden items-center gap-2 border-r border-outline-variant/20 pr-4 lg:flex">
-              <span className="material-symbols-outlined text-primary" aria-hidden="true">
-                cloud_done
-              </span>
-                        <span className="font-geist text-xs text-on-surface-variant">
-                Unlimited storage
-              </span>
-                    </div>
-
-                    <button
-                        type="button"
-                        className="rounded-full p-2 text-on-surface-variant transition-colors hover:text-primary"
-                        aria-label="Notifications"
-                    >
-              <span className="material-symbols-outlined" aria-hidden="true">
-                notifications
-              </span>
-                    </button>
-
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full border border-primary/30 bg-primary/20">
-              <span className="material-symbols-outlined text-[18px] text-primary" aria-hidden="true">
-                person
-              </span>
-                    </div>
-                </div>
-            </header>
-
-            {/* Main content */}
-            <main className="flex-1 overflow-y-auto bg-gradient-to-br from-background to-surface-container-lowest px-4 pb-8 pt-24 md:px-8">
-                <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-                    <div>
-                        <h2 className="text-2xl font-semibold tracking-tight text-on-surface">
-                            Your Files
-                        </h2>
-                        {currentFolder && (<div className="mb-4 flex items-center gap-1 text-sm text-on-surface-variant">
-                            <button onClick={() => setCurrentFolder("")} className="hover:text-primary hover:underline">All Files</button>
-                            {breadcrumbSegments.map(({label, path}, i) => (<span key={path} className="flex items-center gap-1">
-                                        <span className="text-on-surface-variant/40">/</span>
-                                {i === breadcrumbSegments.length - 1 ? <span className="text-on-surface font-medium">{label}</span> :
-                                    <button onClick={() => openFolder(path)} className="hover:text-primary hover:underline">{label}</button>}
-                                    </span>))}
-                        </div>)}
-                    </div>
-
-                    <div className="flex gap-2">
+            <div className="flex h-screen flex-1 flex-col md:ml-72">
+                {/* Header */}
+                <header className="fixed top-0 right-0 z-40 flex h-16 w-full items-center justify-between border-b border-outline-variant/10 bg-surface/70 px-6 backdrop-blur-md md:w-[calc(100%-288px)]">
+                    <div className="flex w-full max-w-md items-center gap-4">
                         <button
                             type="button"
-                            onClick={() => setShowFolderModal(true)}
-                            className="flex items-center gap-1 rounded-xl border border-outline-variant/20 bg-surface-container-high px-4 py-2 text-xs font-medium text-on-surface transition-colors hover:bg-surface-container-highest"
+                            className="text-on-surface-variant transition-colors hover:text-primary md:hidden"
+                            onClick={() => setSidebarOpen(true)}
+                            aria-label="Open menu"
                         >
-                <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
-                  create_new_folder
-                </span>
-                            New Folder
+                            <span className="material-symbols-outlined" aria-hidden="true">
+                                menu
+                            </span>
                         </button>
 
-                        {/*Top-right button*/}
-                        <button
-                            type="button"
-                            onClick={() => navigate(`/upload?directory=${encodeURIComponent(currentFolder)}`)}
-                            className="flex items-center gap-1 rounded-xl bg-primary px-4 py-2 text-xs font-medium text-on-primary shadow-[0_0_15px_rgba(192,193,255,0.15)] transition-colors hover:bg-primary/90"
-                        >
-                            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">cloud_upload</span>
-                            Upload
-                        </button>
-                    </div>
-                </div>
-
-                {currentFolder && (<button
-                    type="button"
-                    onClick={goBack}
-                    className="mb-4 flex items-center gap-2 text-sm text-primary hover:underline"
-                >
-              <span className="material-symbols-outlined" aria-hidden="true">
-                arrow_back
-              </span>
-                    Back
-                </button>)}
-
-                <div
-                    className="glass-panel relative mb-8 flex flex-col items-center justify-between gap-4 overflow-hidden rounded-2xl border border-outline-variant/10 p-4 sm:flex-row">
-                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-primary/5 to-transparent"/>
-                    <div className="relative z-10 flex items-center gap-4">
-                        <div
-                            className="flex h-12 w-12 items-center justify-center rounded-full border border-outline-variant/20 bg-surface-container">
-                <span className="material-symbols-outlined text-[24px] text-primary" aria-hidden="true">
-                  cloud
-                </span>
+                        <div className="relative hidden w-full sm:block">
+                            <span
+                                className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant"
+                                style={{fontSize: 20}}
+                                aria-hidden="true"
+                            >
+                                search
+                            </span>
+                            <input
+                                type="text"
+                                value={searchQuery}
+                                onChange={(event) => setSearchQuery(event.target.value)}
+                                placeholder={isTrash ? "Search trash…" : "Search files…"}
+                                aria-label="Search files"
+                                className="w-full rounded-xl border border-outline-variant/30 bg-surface-container-low py-2 pl-10 pr-3 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/50"
+                            />
                         </div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-full border border-primary/30 bg-primary/20">
+                            <span className="material-symbols-outlined text-[18px] text-primary" aria-hidden="true">
+                                person
+                            </span>
+                        </div>
+                    </div>
+                </header>
+
+                {/* Main View Area */}
+                <main className="flex-1 overflow-y-auto bg-gradient-to-br from-background to-surface-container-lowest px-4 pb-8 pt-24 md:px-8">
+                    <div className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
                         <div>
-                            <h3 className="font-semibold text-on-surface">Storage Status</h3>
-                            <p className="text-sm text-on-surface-variant">Unlimited</p>
+                            <h2 className="text-2xl font-semibold tracking-tight text-on-surface">
+                                {isTrash ? "Trash Bin" : "Your Files"}
+                            </h2>
+                            {!isTrash && currentFolder && (
+                                <div className="mb-4 flex items-center gap-1 text-sm text-on-surface-variant">
+                                    <button onClick={() => setCurrentFolder("")} className="hover:text-primary hover:underline">
+                                        All Files
+                                    </button>
+                                    {breadcrumbSegments.map(({label, path}, i) => (
+                                        <span key={path} className="flex items-center gap-1">
+                                            <span className="text-on-surface-variant/40">/</span>
+                                            {i === breadcrumbSegments.length - 1 ? (
+                                                <span className="font-medium text-on-surface">{label}</span>
+                                            ) : (
+                                                <button onClick={() => openFolder(path)} className="hover:text-primary hover:underline">
+                                                    {label}
+                                                </button>
+                                            )}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
                         </div>
-                    </div>
-                    <span className="relative z-10 text-sm font-medium text-primary">
-              {files.length} item{files.length !== 1 ? "s" : ""}
-            </span>
-                </div>
 
-                {pageError && (<div
-                    className="mb-6 flex items-center justify-between rounded-xl border border-error/30 bg-error-container/20 px-4 py-3 text-sm text-error">
-                    <span>{pageError}</span>
-                    <button type="button" onClick={fetchFiles} className="text-xs font-semibold underline">
-                        Retry
-                    </button>
-                </div>)}
-
-                {loadingFiles ? (<div className="flex flex-col items-center justify-center py-24 text-on-surface-variant">
-              <span
-                  className="material-symbols-outlined mb-4 animate-spin text-[48px]"
-                  aria-hidden="true"
-              >
-                progress_activity
-              </span>
-                    Loading files…
-                </div>) : (<>
-                    {filteredFolders.length > 0 && (<div className="mb-8">
-                        <h3 className="mb-4 flex items-center gap-2 font-semibold text-on-surface">
-                    <span className="material-symbols-outlined text-primary" aria-hidden="true">
-                      folder
-                    </span>
-                            Folders
-                        </h3>
-
-                        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                            {filteredFolders.map(({path, id}) => {
-                                const displayName = path.split("/").pop();
-                                return (<div
-                                    key={path}
-                                    className="group relative rounded-2xl border border-outline-variant/10 bg-surface-container-lowest p-4 text-left transition-all hover:border-primary/30 hover:bg-surface-container-low"
+                        {!isTrash && (
+                            <div className="flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setShowFolderModal(true)}
+                                    className="flex items-center gap-1 rounded-xl border border-outline-variant/20 bg-surface-container-high px-4 py-2 text-xs font-medium text-on-surface transition-colors hover:bg-surface-container-highest"
                                 >
-                                    <button type="button" onClick={() => openFolder(path)} className="block w-full text-left">
-                                        <span className="material-symbols-outlined text-[42px] text-primary" aria-hidden="true">folder</span>
-                                        <p className="mt-3 truncate text-sm font-medium text-on-surface">{displayName}</p>
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => deleteFolder(id, path)}
-                                        disabled={deletingId === `folder-${id}`}
-                                        title="Delete folder"
-                                        aria-label={`Delete folder ${displayName}`}
-                                        className="absolute right-2 top-2 rounded-lg p-1 text-on-surface-variant opacity-0 transition-opacity hover:bg-error/10 hover:text-error group-hover:opacity-100 disabled:opacity-50"
-                                    >
-                                            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
-                                                {deletingId === `folder-${id}` ? "progress_activity" : "delete"}
-                                            </span>
-                                    </button>
-                                </div>);
-                            })}
-                        </div>
-                    </div>)}
+                                    <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                                        create_new_folder
+                                    </span>
+                                    New Folder
+                                </button>
 
-                    {isEmpty ? (<div className="flex flex-col items-center justify-center py-24 text-on-surface-variant">
-                  <span
-                      className="material-symbols-outlined mb-4 text-[64px] text-outline/40"
-                      aria-hidden="true"
-                  >
-                    cloud_off
-                  </span>
-                        <p className="text-lg font-medium text-on-surface">
-                            {searchQuery ? "No matching files found" : "No files yet"}
-                        </p>
-                        <p className="mt-1 text-sm">
-                            {searchQuery ? "Try a different search." : "Create a folder or upload your first file."}
-                        </p>
-
-                        {!searchQuery && (<div className="mt-6 flex gap-3">
-                            <button
-                                type="button"
-                                onClick={() => setShowFolderModal(true)}
-                                className="rounded-xl bg-surface-container-high px-5 py-2 text-sm font-medium text-on-surface transition-colors hover:bg-surface-container-highest"
-                            >
-                                New Folder
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => navigate(`/upload?directory=${encodeURIComponent(currentFolder)}`)}
-                                className="rounded-xl bg-primary px-5 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary/90"
-                            >
-                                Upload File
-                            </button>
-                        </div>)}
-                    </div>) : (filteredFiles.length > 0 && (<div>
-                        <h3 className="mb-4 flex items-center gap-2 font-semibold text-on-surface">
-                      <span className="material-symbols-outlined text-primary/70" aria-hidden="true">
-                        description
-                      </span>
-                            Files
-                        </h3>
-
-                        <div
-                            className="glass-panel overflow-hidden rounded-2xl border border-outline-variant/10 bg-surface-container-lowest">
-                            <div
-                                className="grid grid-cols-12 gap-2 border-b border-outline-variant/10 bg-surface-container-low/50 p-3 px-4">
-                                <div
-                                    className="col-span-6 font-geist text-xs uppercase tracking-widest text-on-surface-variant sm:col-span-5">
-                                    Name
-                                </div>
-                                <div
-                                    className="col-span-3 hidden font-geist text-xs uppercase tracking-widest text-on-surface-variant sm:block">
-                                    Location
-                                </div>
-                                <div
-                                    className="col-span-3 font-geist text-xs uppercase tracking-widest text-on-surface-variant sm:col-span-2">
-                                    Data Center
-                                </div>
-                                <div
-                                    className="col-span-3 text-right font-geist text-xs uppercase tracking-widest text-on-surface-variant sm:col-span-2">
-                                    Actions
-                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => navigate(`/upload?directory=${encodeURIComponent(currentFolder)}`)}
+                                    className="flex items-center gap-1 rounded-xl bg-primary px-4 py-2 text-xs font-medium text-on-primary shadow-[0_0_15px_rgba(192,193,255,0.15)] transition-colors hover:bg-primary/90"
+                                >
+                                    <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+                                        cloud_upload
+                                    </span>
+                                    Upload
+                                </button>
                             </div>
+                        )}
+                    </div>
 
-                            {filteredFiles.map((file, index) => {
-                                const {icon, color} = getFileIcon(file.name);
-                                const isLast = index === filteredFiles.length - 1;
-                                const isDeleting = deletingId === file.id;
+                    {!isTrash && currentFolder && (
+                        <button
+                            type="button"
+                            onClick={goBack}
+                            className="mb-4 flex items-center gap-2 text-sm text-primary hover:underline"
+                        >
+                            <span className="material-symbols-outlined" aria-hidden="true">arrow_back</span>
+                            Back
+                        </button>
+                    )}
 
-                                return (<div
-                                    key={file.id}
-                                    className={`group grid grid-cols-12 items-center gap-2 p-3 px-4 transition-colors hover:bg-surface-container-low/30 ${isLast ? "" : "border-b border-outline-variant/5"}`}
-                                >
-                                    <div className="col-span-6 flex items-center gap-3 sm:col-span-5">
-                              <span className={`material-symbols-outlined text-[20px] ${color}`} aria-hidden="true">
-                                {icon}
-                              </span>
-                                        <div className="min-w-0">
-                                            <p className="truncate text-sm text-on-surface transition-colors group-hover:text-primary">
-                                                {file.name}
-                                            </p>
-                                            <p className="mt-0.5 text-xs text-on-surface-variant sm:hidden">
-                                                {formatDate(file.modified_at)}
-                                            </p>
+                    {pageError && (
+                        <div className="mb-6 flex items-center justify-between rounded-xl border border-error/30 bg-error-container/20 px-4 py-3 text-sm text-error">
+                            <span>{pageError}</span>
+                            <button type="button" onClick={fetchFiles} className="text-xs font-semibold underline">
+                                Retry
+                            </button>
+                        </div>
+                    )}
+
+                    {loadingFiles ? (
+                        <div className="flex flex-col items-center justify-center py-24 text-on-surface-variant">
+                            <span className="material-symbols-outlined mb-4 animate-spin text-[48px]" aria-hidden="true">
+                                progress_activity
+                            </span>
+                            Loading files…
+                        </div>
+                    ) : (
+                        <>
+                            {filteredFolders.length > 0 && (
+                                <div className="mb-8">
+                                    <h3 className="mb-4 flex items-center gap-2 font-semibold text-on-surface">
+                                        <span className="material-symbols-outlined text-primary" aria-hidden="true">
+                                            folder
+                                        </span>
+                                        Folders
+                                    </h3>
+
+                                    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                                        {filteredFolders.map(({path, id}) => {
+                                            const displayName = path.split("/").pop();
+                                            return (
+                                                <div
+                                                    key={path}
+                                                    className="group relative rounded-2xl border border-outline-variant/10 bg-surface-container-lowest p-4 text-left transition-all hover:border-primary/30 hover:bg-surface-container-low"
+                                                >
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => !isTrash && openFolder(path)}
+                                                        className={`block w-full text-left ${isTrash ? "cursor-default" : ""}`}
+                                                    >
+                                                        <span className="material-symbols-outlined text-[42px] text-primary" aria-hidden="true">
+                                                            folder
+                                                        </span>
+                                                        <p className="mt-3 truncate text-sm font-medium text-on-surface">
+                                                            {displayName}
+                                                        </p>
+                                                    </button>
+                                                    <div className="absolute right-2 top-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                                                        {isTrash ? (
+                                                            <>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => restoreItem(id)}
+                                                                    title="Restore Folder"
+                                                                    className="rounded-lg p-1 text-on-surface-variant hover:bg-primary/10 hover:text-primary"
+                                                                >
+                                                                    <span className="material-symbols-outlined text-[16px]">restore</span>
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => deleteFolder(id, path, true)}
+                                                                    title="Delete Permanently"
+                                                                    className="rounded-lg p-1 text-on-surface-variant hover:bg-error/10 hover:text-error"
+                                                                >
+                                                                    <span className="material-symbols-outlined text-[16px]">delete_forever</span>
+                                                                </button>
+                                                            </>
+                                                        ) : (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => deleteFolder(id, path, false)}
+                                                                disabled={deletingId === `folder-${id}`}
+                                                                title="Move to Trash"
+                                                                className="rounded-lg p-1 text-on-surface-variant hover:bg-error/10 hover:text-error"
+                                                            >
+                                                                <span className="material-symbols-outlined text-[16px]">
+                                                                    {deletingId === `folder-${id}` ? "progress_activity" : "delete"}
+                                                                </span>
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+
+                            {isEmpty ? (
+                                <div className="flex flex-col items-center justify-center py-24 text-on-surface-variant">
+                                    <span className="material-symbols-outlined mb-4 text-[64px] text-outline/40" aria-hidden="true">
+                                        {isTrash ? "auto_delete" : "cloud_off"}
+                                    </span>
+                                    <p className="text-lg font-medium text-on-surface">
+                                        {isTrash ? "Trash is empty" : searchQuery ? "No matching files" : "No files yet"}
+                                    </p>
+                                </div>
+                            ) : (
+                                filteredFiles.length > 0 && (
+                                    <div>
+                                        <h3 className="mb-4 flex items-center gap-2 font-semibold text-on-surface">
+                                            <span className="material-symbols-outlined text-primary/70" aria-hidden="true">
+                                                description
+                                            </span>
+                                            Files
+                                        </h3>
+
+                                        <div className="glass-panel overflow-hidden rounded-2xl border border-outline-variant/10 bg-surface-container-lowest">
+                                            <div className="grid grid-cols-12 gap-2 border-b border-outline-variant/10 bg-surface-container-low/50 p-3 px-4">
+                                                <div className="col-span-5 font-geist text-xs uppercase tracking-widest text-on-surface-variant sm:col-span-4">
+                                                    Name
+                                                </div>
+                                                <div className="col-span-2 hidden font-geist text-xs uppercase tracking-widest text-on-surface-variant sm:block">
+                                                    Size
+                                                </div>
+                                                <div className="col-span-2 hidden font-geist text-xs uppercase tracking-widest text-on-surface-variant sm:block">
+                                                    Location
+                                                </div>
+                                                <div className="col-span-4 font-geist text-xs uppercase tracking-widest text-on-surface-variant sm:col-span-2">
+                                                    Data Center
+                                                </div>
+                                                <div className="col-span-3 text-right font-geist text-xs uppercase tracking-widest text-on-surface-variant sm:col-span-2">
+                                                    Actions
+                                                </div>
+                                            </div>
+
+                                            {filteredFiles.map((file, index) => {
+                                                const {icon, color} = getFileIcon(file.name);
+                                                const isLast = index === filteredFiles.length - 1;
+                                                const isDeleting = deletingId === file.id;
+
+                                                return (
+                                                    <div
+                                                        key={file.id}
+                                                        className={`group grid grid-cols-12 items-center gap-2 p-3 px-4 transition-colors hover:bg-surface-container-low/30 ${
+                                                            isLast ? "" : "border-b border-outline-variant/5"
+                                                        }`}
+                                                    >
+                                                        {/* File Name & Mobile Metadata */}
+                                                        <div className="col-span-5 flex items-center gap-3 sm:col-span-4">
+                                                            <span className={`material-symbols-outlined text-[20px] ${color}`} aria-hidden="true">
+                                                                {icon}
+                                                            </span>
+                                                            <div className="min-w-0">
+                                                                <p className="truncate text-sm text-on-surface transition-colors group-hover:text-primary">
+                                                                    {file.name}
+                                                                </p>
+                                                                <p className="mt-0.5 text-xs text-on-surface-variant sm:hidden">
+                                                                    {formatFileSize(file.size)} • {formatDate(file.modified_at)}
+                                                                </p>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Desktop File Size */}
+                                                        <div className="col-span-2 hidden font-mono text-xs text-on-surface-variant sm:block">
+                                                            {formatFileSize(file.size)}
+                                                        </div>
+
+                                                        {/* Location */}
+                                                        <div className="col-span-2 hidden truncate text-sm text-on-surface-variant sm:block">
+                                                            {file.directory || "Root"}
+                                                        </div>
+
+                                                        {/* Data Center */}
+                                                        <div className="col-span-4 sm:col-span-2">
+                                                            <span className="inline-block max-w-full truncate rounded-full bg-primary/10 px-2 py-0.5 font-geist text-xs text-primary">
+                                                                {file.data_center || "—"}
+                                                            </span>
+                                                        </div>
+
+                                                        {/* Actions */}
+                                                        <div className="col-span-3 flex justify-end gap-1 opacity-100 transition-opacity sm:col-span-2 sm:opacity-0 sm:group-hover:opacity-100">
+                                                            {isTrash ? (
+                                                                <>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => restoreItem(file.id)}
+                                                                        title="Restore File"
+                                                                        className="rounded-lg p-1.5 text-on-surface-variant hover:bg-primary/10 hover:text-primary"
+                                                                    >
+                                                                        <span className="material-symbols-outlined text-[18px]">restore</span>
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => deleteFile(file.id, file.name, true)}
+                                                                        title="Delete Permanently"
+                                                                        className="rounded-lg p-1.5 text-on-surface-variant hover:bg-error/10 hover:text-error"
+                                                                    >
+                                                                        <span className="material-symbols-outlined text-[18px]">delete_forever</span>
+                                                                    </button>
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => startStreaming(file)}
+                                                                        title="Stream / View file"
+                                                                        className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-primary/10 hover:text-primary"
+                                                                    >
+                                                                        <span className="material-symbols-outlined text-[18px]">
+                                                                            play_circle
+                                                                        </span>
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => downloadFile(file.id)}
+                                                                        title="Download"
+                                                                        className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-primary/10 hover:text-primary"
+                                                                    >
+                                                                        <span className="material-symbols-outlined text-[18px]">
+                                                                            download
+                                                                        </span>
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => deleteFile(file.id, file.name, false)}
+                                                                        disabled={isDeleting}
+                                                                        title="Move to Trash"
+                                                                        className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-error/10 hover:text-error disabled:opacity-50"
+                                                                    >
+                                                                        <span className="material-symbols-outlined text-[18px]">
+                                                                            {isDeleting ? "progress_activity" : "delete"}
+                                                                        </span>
+                                                                    </button>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
                                         </div>
                                     </div>
+                                )
+                            )}
+                        </>
+                    )}
+                </main>
+            </div>
 
-                                    <div className="col-span-3 hidden truncate text-sm text-on-surface-variant sm:block">
-                                        {file.directory || "Root"}
-                                    </div>
+            {streamData && (
+                <StreamModal 
+                    file={streamData.file} 
+                    streamUrl={streamData.url} 
+                    onClose={() => setStreamData(null)} 
+                />
+            )}
 
-                                    <div className="col-span-3 sm:col-span-2">
-                              <span
-                                  className="inline-block max-w-full truncate rounded-full bg-primary/10 px-2 py-0.5 font-geist text-xs text-primary">
-                                {file.data_center || "—"}
-                              </span>
-                                    </div>
-
-                                    <div
-                                        className="col-span-3 flex justify-end gap-1 opacity-100 transition-opacity sm:col-span-2 sm:opacity-0 sm:group-hover:opacity-100">
-                                        <button
-                                            type="button"
-                                            onClick={() => downloadFile(file.id, file.name)}
-                                            title="Download"
-                                            aria-label={`Download ${file.name}`}
-                                            className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-primary/10 hover:text-primary"
-                                        >
-                                <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                                  download
-                                </span>
-                                        </button>
-
-                                        <button
-                                            type="button"
-                                            onClick={() => deleteFile(file.id, file.name)}
-                                            disabled={isDeleting}
-                                            title="Delete"
-                                            aria-label={`Delete ${file.name}`}
-                                            className="rounded-lg p-1.5 text-on-surface-variant transition-colors hover:bg-error/10 hover:text-error disabled:opacity-50"
-                                        >
-                                <span className="material-symbols-outlined text-[18px]" aria-hidden="true">
-                                  {isDeleting ? "progress_activity" : "delete"}
-                                </span>
-                                        </button>
-                                    </div>
-                                </div>);
-                            })}
-                        </div>
-                    </div>))}
-                </>)}
-            </main>
+            {showFolderModal && (
+                <CreateFolderModal
+                    targetPath={currentFolder}
+                    onClose={() => setShowFolderModal(false)}
+                    onCreate={createFolder}
+                />
+            )}
         </div>
-
-        {showFolderModal && (<CreateFolderModal
-            targetPath={currentFolder}
-            onClose={() => setShowFolderModal(false)}
-            onCreate={createFolder}
-        />)}
-    </div>);
+    );
 }

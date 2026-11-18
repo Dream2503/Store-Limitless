@@ -3,9 +3,8 @@ from base64 import b64encode
 from aiohttp import ClientSession
 
 from backend.database import github_cursor_get_repo_id, github_cursor_get_used, github_cursor_increment_repo_id, github_cursor_set_used
-from core.config import getenv
 from core.data_center import ConfigMeta, DataCenter
-from core.utils import write_log
+from core.utils import Progress, getenv, write_log
 
 
 class GitHub(DataCenter, metaclass=ConfigMeta):
@@ -16,7 +15,7 @@ class GitHub(DataCenter, metaclass=ConfigMeta):
     MAX_REPO_SIZE: int = 5 * 1024 * 1024 * 1024
 
     @staticmethod
-    async def upload(chunk: bytes, filename: str) -> str:
+    async def upload(chunk: bytes, filename: str, progress: Progress) -> str:
         repo_id: int = github_cursor_get_repo_id()
         used: int = github_cursor_get_used()
         headers: dict[str, str] = {

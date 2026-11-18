@@ -1,132 +1,62 @@
-from asyncio import Semaphore, create_task, as_completed, Task
+from asyncio import Task
 from pathlib import Path
 from traceback import format_exc
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Callable, cast
+from urllib.parse import urlparse, ParseResult
 
-from backend.database import add_file, File, get_file, get_user, User
-from core import TRANSFER_PATH, get_transfer_path, DataCenter, write_log
+from backend.database import File, add_file, get_user, User
+from core.data_center import DataCenter
+from core.utils import write_log, Progress, upload_growing_file
 
 
-async def upload(file: File) -> AsyncGenerator[float | int, None]:
-    user: User | None = get_user(username=file.username)
+async def file_upload(file: File, file_path: Path, upload_task: Task[None] | None = None,
+                      intermediate: bool = False) -> AsyncGenerator[Progress, None]:
     data_center: DataCenter = DataCenter(file.data_center)
-
-    if not user:
-        return
-
-    write_log("INFO", data_center, "UPLOAD", user.username, f"Got file: {file}")
+    write_log("INFO", data_center, "UPLOAD", file.username, f"Got file: {file}")
 
     try:
-        if get_file(name=file.name, username=file.username):
-            path: Path = Path(file.name)
-            stem, extension = path.stem, path.suffix
-            i = 1
+        write_log("INFO", data_center, "UPLOAD", file.username, f"Found local file: {file_path.name}")
+        progress = Progress("Uploading File", 0)
 
-            while get_file(name=file.name, username=file.username):
-                file.name = f"{stem}({i}){extension}"
-                i += 1
+        async for progress_value in upload_growing_file(file=file, path=file_path, data_center=data_center, progress=progress, producer=upload_task):
+            yield progress_value
 
-        file_path: Path = get_transfer_path(file.username, file.directory, file.name)
+        if not intermediate:
+            add_file(file)
+            write_log("INFO", data_center, "UPLOAD", file.username, f"Upload complete `{file_path.name}`")
 
-        if not file_path.is_relative_to(TRANSFER_PATH.resolve()):
-            write_log("ERROR", data_center, "UPLOAD", user.username, f"Illegal file path attempted: {file.name}")
-            return
+        file_path.unlink(missing_ok=True)
 
-        if not file_path.exists():
-            write_log("ERROR", data_center, "UPLOAD", user.username, f"Local file not found: {file_path}")
-            return
+    except Exception as e:
+        write_log("ERROR", data_center, "UPLOAD", file.username, f"Unhandled exception: {e}\n{format_exc()}")
 
-        write_log("INFO", data_center, "UPLOAD", user.username, f"Found local file: {file_path.name}")
-        file_size: int = file_path.stat().st_size
-        total_parts: int = (file_size + data_center.MAX_SIZE - 1) // data_center.MAX_SIZE
-        write_log("INFO", data_center, "UPLOAD", user.username, f"Starting upload `{file_path.name}` ({total_parts} parts)")
 
-        with file_path.open("rb") as f:
-            chunks: list[tuple[int, bytes, str]] = []
+async def link_upload(file: File, link: str) -> AsyncGenerator[Progress, None]:
+    from core.utils.download_ import download_google_drive, download_youtube
+    user: User = cast(User, get_user(username=file.username))
+    data_center: DataCenter = DataCenter(file.data_center)
+    write_log("INFO", data_center, "DOWNLOAD", user.username, f"Got link: {link}")
 
-            for i in range(1, total_parts + 1):
-                chunk: bytes = f.read(data_center.MAX_SIZE)
+    try:
+        write_log("INFO", data_center, "DOWNLOAD", user.username, f"Starting download from `{link}`")
+        parsed: ParseResult = urlparse(link)
+        host: str = cast(str, parsed.netloc.lower().removeprefix("www."))
 
-                if not chunk:
-                    break
+        if host == "drive.google.com":
+            downloader: Callable = download_google_drive
 
-                filename: str = f"{file_path.name}{'' if total_parts == 1 else f'.part{i:03d}'}"
-                chunks.append((i, chunk, filename))
+        elif host in {"youtube.com", "youtu.be", "m.youtube.com"}:
+            downloader: Callable = download_youtube
 
-            semaphore = Semaphore(8)
+        else:
+            raise ValueError(f"Unsupported link: {link}")
 
-            async def upload_part(i: int, chunk: bytes, filename: str) -> tuple[int, str]:
-                async with semaphore:
-                    while True:
-                        try:
-                            msg_id: str = await data_center.upload(chunk, filename)
-                            return i, msg_id
-
-                        except OSError as e:
-                            write_log("ERROR", data_center, "UPLOAD", user.username, f"Network error part {i}/{total_parts}, retrying: {e}")
-
-            tasks: list[Task[tuple[int, str]]] = [create_task(upload_part(i, chunk, filename)) for i, chunk, filename in chunks]
-            results: dict[int, str] = {}
-
-            for task in as_completed(tasks):
-                i, msg_id = await task
-                results[i] = msg_id
-                progress: float | int = round((len(results) / total_parts) * 100, 2)
-                write_log("INFO", data_center, "UPLOAD", user.username, f"Uploaded {len(results)}/{total_parts} ({progress:.1f}%)")
-                yield progress
-
-            file.links = [results[i] for i in range(1, total_parts + 1)]
+        async for progress in downloader(file, link):
+            yield progress
 
         add_file(file)
-        write_log("INFO", data_center, "UPLOAD", user.username, f"Upload complete `{file_path.name}`")
-        file_path.unlink()
+        write_log("INFO", data_center, "DOWNLOAD", user.username, f"Download and upload complete `{file.name}`")
 
     except Exception as e:
-        write_log("ERROR", data_center, "UPLOAD", user.username, f"Unhandled exception: {e}\n{format_exc()}")
-
-
-async def download(file: File) -> AsyncGenerator[float | int, None]:
-    data_center: DataCenter = DataCenter(file.data_center)
-    write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Got file: {file}")
-
-    try:
-        total_parts: int = len(file.links)
-
-        if total_parts == 0:
-            write_log("ERROR", data_center, "DOWNLOAD", str(file.username), "File has no parts")
-            return
-
-        file_path: Path = get_transfer_path(file.username, file.directory, file.name)
-
-        if not file_path.is_relative_to(TRANSFER_PATH.resolve()):
-            write_log("ERROR", data_center, "DOWNLOAD", str(file.username), f"Illegal file path attempted: {file.name}")
-            return
-
-        write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Starting download `{file.name}` ({total_parts} parts)")
-
-        with file_path.open("wb") as output:
-            for i, flink in enumerate(file.links):
-                part: bytes | None = await DataCenter.get_cached_part(str(file.username), i)
-
-                if part is None:
-                    while True:
-                        try:
-                            chunk: bytes = await data_center.download(flink)
-                            break
-
-                        except OSError as e:
-                            write_log("ERROR", data_center, "DOWNLOAD", str(file.username),
-                                      f"Network error part {i + 1}/{total_parts}, retrying: {e}")
-
-                    await DataCenter.cache_part(str(file.username), i, chunk)
-                    part = chunk
-
-                output.write(part)
-                progress: float | int = round(((i + 1) / total_parts) * 100, 2)
-                write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Downloaded {i + 1}/{total_parts} ({progress:.1f}%)")
-                yield progress
-
-        write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Download complete `{file_path.name}`")
-
-    except Exception as e:
-        write_log("ERROR", data_center, "DOWNLOAD", str(file.username), f"Unhandled exception: {e}\n{format_exc()}")
+        write_log("ERROR", data_center, "DOWNLOAD", user.username, f"Unhandled exception: {e}\n{format_exc()}")
+        raise

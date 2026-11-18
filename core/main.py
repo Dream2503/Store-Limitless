@@ -3,8 +3,9 @@ from threading import Thread
 
 from uvicorn import Config, Server
 
-from core import discord_utils, telegram_utils
 from core.data_center import DataCenter
+from core.utils.discord_ import Discord
+from core.utils.telegram_ import Telegram
 
 
 async def run_server() -> None:
@@ -15,8 +16,8 @@ async def run_server() -> None:
 
 async def main() -> None:
     await DataCenter.initialize_cache()
-    await telegram_utils.Telegram.initialize()
-    discord_thread: Thread = Thread(target=discord_utils.Discord.main, daemon=True)
+    await Telegram.main()
+    discord_thread: Thread = Thread(target=Discord.main, daemon=True)
     server_task: Task[None] = create_task(run_server())
     discord_thread.start()
 
@@ -29,7 +30,7 @@ async def main() -> None:
     finally:
         server_task.cancel()
         await gather(server_task, return_exceptions=True)
-        await telegram_utils.Telegram.shutdown()
+        await Telegram.exit()
         discord_thread.join(timeout=5)
 
 

@@ -10,7 +10,7 @@ psycopg2-binary
 pydantic
 python-dotenv
 python-jose
-python-telegram-bot
+telethon
 requests
 uvicorn
 yt-dlp

@@ -1,40 +1,43 @@
+from __future__ import annotations
+
+from logging import INFO, WARNING, basicConfig, getLogger
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from dotenv import load_dotenv
+from filelock import FileLock
 
+if TYPE_CHECKING:
+    from core.utils import Progress
+
+# Paths
 BASE_DIR: Path = Path(__file__).resolve().parent.parent
-
 DATABASE_PATH: Path = BASE_DIR / "backend" / "database" / "database.db"
 LOG_PATH: Path = BASE_DIR / "logs.txt"
+LOG_LOCK_PATH: Path = BASE_DIR / "logs.lock"
+TELEGRAM_SESSION: Path = BASE_DIR / "telegram_bot"
 TRANSFER_PATH: Path = BASE_DIR / "transfer"
-TRANSFER_PATH.mkdir(exist_ok=True)
 
-SUPPORTED_DOMAIN: list[str] = ["drive.google.com", ]
-
-
-def get_transfer_path(username: str, directory: str, filename: str) -> Path:
-    path: Path = TRANSFER_PATH / username
-
-    if directory:
-        path = path / directory
-
-    return path / filename
-
-
+# Environment
 load_dotenv()
 
-LOG_HANDLER: TextIO = open(LOG_PATH, 'a')
+# Application constants
+SUPPORTED_DOMAIN: tuple[str, ...] = (
+    "drive.google.com",
+    "youtube.com",
+    "youtu.be",
+    "m.youtube.com",
+)
 
+# Runtime state
+UPLOAD_JOBS: dict[str, Progress] = {}
 
-def getenv(key: str) -> str:
-    import os
-    value: str | None = os.getenv(key)
+# Files and locks
+TRANSFER_PATH.mkdir(exist_ok=True)
+LOG_HANDLER: TextIO = open(LOG_PATH, "a")
+LOCK: FileLock = FileLock(LOG_LOCK_PATH)
 
-    if value is None or not value.strip():
-        raise RuntimeError(f"Environment variable '{key}' is missing or empty. Check your .env file or system environment.")
-
-    return value
-
-
-GOOGLE_API_KEY: str = getenv("GOOGLE_API_KEY")
+# Logging
+basicConfig(level=INFO, filename=LOG_PATH, filemode="a", format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s", )
+getLogger("httpx").setLevel(WARNING)
+getLogger("telethon").setLevel(WARNING)

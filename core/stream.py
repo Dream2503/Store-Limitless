@@ -2,7 +2,7 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from typing import AsyncGenerator
 
-from core import DataCenter
+from core.data_center import DataCenter
 
 
 @dataclass(frozen=True)
@@ -71,10 +71,6 @@ def get_chunks(flinks: list[str], file_size: int) -> list[FileChunk]:
     ]
 
 
-def find_chunk(chunks: list[FileChunk], position: int) -> int:
-    return bisect_right([chunk.start for chunk in chunks], position) - 1
-
-
 class ChunkCache:
     def __init__(self, fid: str, data_center: str):
         self.fid: str = fid
@@ -96,7 +92,7 @@ class ChunkCache:
 
 
 async def stream_range(chunks: list[FileChunk], byte_range: ByteRange, cache: ChunkCache) -> AsyncGenerator[bytes, None]:
-    index: int = find_chunk(chunks, byte_range.start)
+    index: int = bisect_right([chunk.start for chunk in chunks], byte_range.start) - 1
     position: int = byte_range.start
 
     while position <= byte_range.end:

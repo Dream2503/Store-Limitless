@@ -46,11 +46,3 @@ class File(BaseModel):
             f"links={self.links!r}, "
             f"username={self.username})"
         )
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-
-    def __repr__(self) -> str:
-        return f"LoginRequest(username={self.username!r})"

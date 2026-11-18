@@ -1,11 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 
 from backend.database import get_user, User
-from core.config import getenv
+from core.utils import getenv
 
 OAuth2_scheme: OAuth2PasswordBearer = OAuth2PasswordBearer(tokenUrl="/login")
 SECRET_KEY: str = getenv("SECRET_KEY")
@@ -13,12 +13,10 @@ ALGORITHM: str = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
 
-def create_access_token(data: dict[str, str], expires_delta: timedelta = None) -> str:
+def create_access_token(data: dict[str, str], expires_delta: timedelta | None = None) -> str:
     to_encode: dict[str, str | datetime] = data.copy()
-    expire: datetime = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
-    encode: str = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encode
+    to_encode.update({"exp": datetime.now(UTC) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def verify_token(token: str) -> str | None:

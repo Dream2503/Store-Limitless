@@ -2,10 +2,12 @@
 __pycache__
 core/.env
 core/transfer
-core/logs.txt.lock
+logs.lock
 frontend/node_modules
 .env
 .venv
 .python-version
-/transfer
+transfer
 *.pyc
+backend/database/database.db
+telegram_bot.session

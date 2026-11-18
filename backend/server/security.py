@@ -5,6 +5,7 @@ import json
 
 from passlib.context import CryptContext
 
+from backend.database import File
 from backend.server.jwt_handler import SECRET_KEY
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -18,8 +19,8 @@ def verify_password(password: str, hashed_password: str) -> bool:
     return pwd_context.verify(password, hashed_password)
 
 
-def create_public_stream_token(file_id: int, username: str) -> str:
-    payload = {"file_id": file_id, "username": username}
+def create_public_stream_token(file: File, username: str) -> str:
+    payload = {"directory": file.directory, "file_id": file.id, "username": username}
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     encoded_payload = base64.urlsafe_b64encode(payload_bytes).rstrip(b"=")
     signature = hmac.new(SECRET_KEY.encode(), encoded_payload, hashlib.sha256).digest()
@@ -39,7 +40,7 @@ def verify_public_stream_token(token: str) -> dict[str, int]:
         payload = base64.urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4))
         data = json.loads(payload)
 
-        if not isinstance(data["file_id"], int) or not isinstance(data["username"], str):
+        if not isinstance(data["directory"], str) or not isinstance(data["file_id"], int) or not isinstance(data["username"], str):
             raise ValueError("Invalid payload")
 
         return data

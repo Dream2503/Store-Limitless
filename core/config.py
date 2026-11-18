@@ -15,6 +15,7 @@ load_dotenv()
 
 LOG_HANDLER: TextIO = open(LOG_PATH, 'a')
 
+
 def getenv(key: str) -> str:
     value: str | None = os.getenv(key)
 
@@ -22,3 +23,6 @@ def getenv(key: str) -> str:
         raise RuntimeError(f"Environment variable '{key}' is missing or empty. Check your .env file or system environment.")
 
     return value
+
+
+GOOGLE_API_KEY: str = getenv("GOOGLE_API_KEY")

@@ -1,5 +1,6 @@
 from datetime import datetime
 from json import loads, dumps
+from sqlite3 import Row
 
 from core.data_center import Database
 from core.utils import write_log
@@ -32,61 +33,38 @@ def get_user(username: str) -> User | None:
         """,
         (username,),
     )
-
-    write_log(
-        "INFO",
-        Database,
-        "GET USER",
-        username,
-        f"Select query executed for {username}.",
-    )
-
-    row = CURSOR.fetchone()
+    write_log("INFO", Database, "GET USER", username, f"Select query executed for {username}.")
+    row: Row | None = CURSOR.fetchone()
 
     if row:
-        user = dict(row)
-
-        user["created_at"] = datetime.fromisoformat(
-            user["created_at"]
-        )
-
+        user: dict[str, str] = dict(row)
+        user["created_at"] = datetime.fromisoformat(user["created_at"])
         return User(**user)
 
-    write_log(
-        "ERROR",
-        Database,
-        "GET USER",
-        "",
-        "User not found in the database",
-    )
-
+    write_log("ERROR", Database, "GET USER", "", "User not found in the database")
     return None
+
 
 def update_user(user: User):
     try:
         CURSOR.execute(
             """
             UPDATE users
-            SET password = ?,
+            SET password   = ?,
                 first_name = ?,
-                last_name = ?
+                last_name  = ?
             WHERE username = ?;
             """,
-            (
-                user.password,
-                user.first_name,
-                user.last_name,
-                user.username,
-            ),
+            (user.password, user.first_name, user.last_name, user.username),
         )
         CURSOR.connection.commit()
-        write_log("INFO",Database,"UPDATE USER",user.username,"User successfully updated.",)
+        write_log("INFO", Database, "UPDATE USER", user.username, "User successfully updated.")
 
     except Exception as e:
         CURSOR.connection.rollback()
         write_log("ERROR", Database, "UPDATE USER", user.username, f"Failed to update user: {e}")
         raise
-        
+
 
 def add_file(file: File) -> None:
     user: User | None = get_user(username=file.username)
@@ -97,53 +75,26 @@ def add_file(file: File) -> None:
     try:
         CURSOR.execute(
             """
-            INSERT INTO files (
-                directory,
-                name,
-                type,
-                size,
-                modified_at,
-                data_center,
-                links,
-                username
-            )
+            INSERT INTO files (directory,
+                               name,
+                               type,
+                               size,
+                               modified_at,
+                               data_center,
+                               links,
+                               username)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """,
-            (
-                file.directory,
-                file.name,
-                file.type,
-                file.size,
-                file.modified_at.isoformat(),
-                file.data_center,
-                dumps(file.links),
-                file.username,
-            ),
+            (file.directory, file.name, file.type, file.size, file.modified_at.isoformat(), file.data_center, dumps(file.links), file.username),
         )
-
         CURSOR.connection.commit()
-
-        write_log(
-            "INFO",
-            Database,
-            "INSERT FILES",
-            file.username,
-            f"File `{file.name}` saved to database with "
-            f"{len(file.links)} part(s).",
-        )
+        write_log("INFO", Database, "INSERT FILES", file.username, f"File `{file.name}` saved to database with {len(file.links)} part(s).")
 
     except Exception as e:
         CURSOR.connection.rollback()
-
-        write_log(
-            "ERROR",
-            Database,
-            "INSERT FILES",
-            file.username,
-            f"Failed to insert file: {e}",
-        )
-
+        write_log("ERROR", Database, "INSERT FILES", file.username, f"Failed to insert file: {e}")
         raise
+
 
 def get_file(*, file_id: int | None = None, name: str | None = None, username: str | None = None) -> File | None:
     if file_id is not None:
@@ -153,7 +104,7 @@ def get_file(*, file_id: int | None = None, name: str | None = None, username: s
                    directory,
                    name,
                    type,
-                   "size",
+                   size,
                    modified_at,
                    data_center,
                    links,
@@ -171,7 +122,7 @@ def get_file(*, file_id: int | None = None, name: str | None = None, username: s
                    directory,
                    name,
                    type,
-                   "size",
+                   size,
                    modified_at,
                    data_center,
                    links,
@@ -188,9 +139,10 @@ def get_file(*, file_id: int | None = None, name: str | None = None, username: s
         return None
 
     write_log("INFO", Database, "GET FILE", "", f"Select query executed for {attribute}={value}.")
-    file: dict[str, int | str | list[str]] | None = CURSOR.fetchone()
+    row: Row | None = CURSOR.fetchone()
 
-    if file:
+    if row:
+        file: dict[str, int | str] = dict(row)
         file["links"] = loads(file["links"])
         file["modified_at"] = datetime.fromisoformat(file["modified_at"])
         return File(**file)
@@ -199,13 +151,19 @@ def get_file(*, file_id: int | None = None, name: str | None = None, username: s
     return None
 
 
-def get_files(*,directory: str | None = None,username: str | None = None,) -> list[File] | None:
-
+def get_files(*, directory: str | None = None, username: str | None = None) -> list[File] | None:
     if directory is not None:
         CURSOR.execute(
             """
-            SELECT id, directory, name, type, "size",
-                   modified_at, data_center, links, username
+            SELECT id,
+                   directory,
+                   name,
+                   type,
+                   size,
+                   modified_at,
+                   data_center,
+                   links,
+                   username
             FROM files
             WHERE directory = ?;
             """,
@@ -216,8 +174,15 @@ def get_files(*,directory: str | None = None,username: str | None = None,) -> li
     elif username is not None:
         CURSOR.execute(
             """
-            SELECT id, directory, name, type, "size",
-                   modified_at, data_center, links, username
+            SELECT id,
+                   directory,
+                   name,
+                   type,
+                   size,
+                   modified_at,
+                   data_center,
+                   links,
+                   username
             FROM files
             WHERE username = ?;
             """,
@@ -226,128 +191,63 @@ def get_files(*,directory: str | None = None,username: str | None = None,) -> li
         attribute, value = "username", username
 
     else:
-        write_log(
-            "ERROR",
-            Database,
-            "GET FILES",
-            "",
-            "No valid search parameter provided.",
-        )
+        write_log("ERROR", Database, "GET FILES", "", "No valid search parameter provided.")
         return None
 
-    rows = CURSOR.fetchall()
+    write_log("INFO", Database, "GET FILES", "", f"Select query executed for {attribute}={value}.")
+    files: list[File] = []
 
-    if rows:
-        files: list[File] = []
+    for row in CURSOR.fetchall():
+        file: dict[str, int | str] = dict(row)
+        file["links"] = loads(file["links"])
+        file["modified_at"] = datetime.fromisoformat(file["modified_at"])
+        files.append(File(**file))
 
-        for row in rows:
-            file = dict(row)  # Important
+    return files
 
-            file["links"] = loads(file["links"])
-            file["modified_at"] = datetime.fromisoformat(
-                file["modified_at"]
-            )
-
-            files.append(File(**file))
-
-        return files
-    
-    write_log("INFO",Database,"GET FILES","",f"Select query executed for {attribute}={value}.")
-    return None
 
 def update_file(file: File) -> None:
-    if file.id is None:
-        raise ValueError("File ID is missing")
-
     try:
         CURSOR.execute(
             """
             UPDATE files
-            SET directory = ?,
-                name = ?,
-                type = ?,
-                size = ?,
-                modified_at = ?,
-                data_center = ?,
-                links = ?
+            SET directory   = ?,
+                name        = ?,
+                type        = ?,
+                modified_at = ?
             WHERE id = ?
               AND username = ?;
             """,
-            (
-                file.directory,
-                file.name,
-                file.type,
-                file.size,
-                file.modified_at.isoformat(),
-                file.data_center,
-                dumps(file.links),
-                file.id,
-                file.username,
-            ),
+            (file.directory, file.name, file.type, file.modified_at.isoformat(), file.id, file.username),
         )
-
         CURSOR.connection.commit()
-
-        write_log(
-            "INFO",
-            Database,
-            "UPDATE FILE",
-            file.username,
-            f"File `{file.name}` successfully updated.",
-        )
+        write_log("INFO", Database, "UPDATE FILE", file.username, f"File `{file.name}` successfully updated.")
 
     except Exception as e:
         CURSOR.connection.rollback()
-
-        write_log(
-            "ERROR",
-            Database,
-            "UPDATE FILE",
-            file.username,
-            f"Failed to update file: {e}",
-        )
-
+        write_log("ERROR", Database, "UPDATE FILE", file.username, f"Failed to update file: {e}")
         raise
 
-def delete_file(file: File) -> None:
-    if file.id is None:
-        raise ValueError("File ID is missing")
 
+def delete_file(file: File) -> None:
     try:
         CURSOR.execute(
             """
-            DELETE FROM files
+            DELETE
+            FROM files
             WHERE id = ?
               AND username = ?;
             """,
-            (
-                file.id,
-                file.username,
-            ),
+            (file.id, file.username),
         )
-
         CURSOR.connection.commit()
-
-        write_log(
-            "INFO",
-            Database,
-            "DELETE FILE",
-            file.username,
-            f"File `{file.name}` successfully deleted.",
-        )
+        write_log("INFO", Database, "DELETE FILE", file.username, f"File `{file.name}` successfully deleted.")
 
     except Exception as e:
         CURSOR.connection.rollback()
-
-        write_log(
-            "ERROR",
-            Database,
-            "DELETE FILE",
-            file.username,
-            f"Failed to delete file: {e}",
-        )
-
+        write_log("ERROR", Database, "DELETE FILE", file.username, f"Failed to delete file: {e}")
         raise
+
 
 def github_cursor_get_repo_id() -> int:
     CURSOR.execute(
@@ -356,7 +256,7 @@ def github_cursor_get_repo_id() -> int:
         FROM github_cursor;
         """,
     )
-    data: dict[str, int] | None = CURSOR.fetchone()
+    data: Row | None = CURSOR.fetchone()
 
     if data:
         return data["repo_id"]
@@ -383,7 +283,7 @@ def github_cursor_get_used() -> int:
         FROM github_cursor;
         """,
     )
-    data: dict[str, int] | None = CURSOR.fetchone()
+    data: Row | None = CURSOR.fetchone()
 
     if data:
         return data["used"]

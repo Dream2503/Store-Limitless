@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.server.routers import auth
 
-
 app = FastAPI()
 
 origins = [

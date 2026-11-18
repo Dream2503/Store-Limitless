@@ -1,7 +1,6 @@
-from datetime import datetime,timezone
+from datetime import datetime, timezone
 
-from core.data_center import DataCenter
-from pydantic import BaseModel, ConfigDict,Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class User(BaseModel):
@@ -35,7 +34,7 @@ class File(BaseModel):
 
     def __repr__(self) -> str:
         return (
-            f"File(fid={self.id}, "
+            f"File(id={self.id}, "
             f"directory={self.directory!r}, "
             f"name={self.name!r}, "
             f"type={self.type}, "

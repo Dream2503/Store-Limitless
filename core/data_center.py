@@ -15,7 +15,7 @@ class DataCenter:
     MAX_SIZE: int = 10 * 1024 * 1024
 
     CACHE_DIR: Path = TRANSFER_PATH / Path("cached")
-    CACHE_LIMIT: int = 64 * 1024 * 1024
+    CACHE_LIMIT: int = 512 * 1024 * 1024
 
     _cache: OrderedDict[str, tuple[int, float]] = OrderedDict()
     _cache_size: int = 0

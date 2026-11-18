@@ -20,8 +20,13 @@ async def upload(file: File) -> AsyncGenerator[float | int, None]:
 
     try:
         if get_file(name=file.name, username=file.username):
-            write_log("ERROR", data_center, "UPLOAD", user.username, f"File `{file.name}` already exists.")
-            return
+            path: Path = Path(file.name)
+            stem, extension = path.stem, path.suffix
+            i = 1
+
+            while get_file(name=file.name, username=file.username):
+                file.name = f"{stem}({i}){extension}"
+                i += 1
 
         file_path: Path = (TRANSFER_PATH / file.username / Path(file.name)).resolve()
 

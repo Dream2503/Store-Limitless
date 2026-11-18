@@ -652,6 +652,12 @@ JavaScript. To use the modern folder picker and disk-backed resumable downloads 
 
 ---
 
+### Centralized upload and download managers
+
+All storage uploads pass through the Redis-backed upload manager and its shared FIFO lease. Only one file is uploaded at a time across ingestion sources and backend workers; each provider can still upload that file's storage parts concurrently up to its configured `MAX_PARALLEL_UPLOADS` limit. Direct links, YouTube imports, browser uploads, torrent files, Google Drive folder imports, and video-processing derivatives use the same upload coordination path.
+
+Downloads from remote storage use a separate bounded download manager. It fetches up to **eight storage-part links concurrently** and yields the parts in their original order, allowing ordinary file streams and streamed ZIP downloads to combine bytes correctly without staging entire files or archives on disk. The eight-way limit is shared across active download streams; it does not increase the provider's upload concurrency.
+
 ### Streaming multi-file ZIP downloads
 
 Select at least two active files in the dashboard, open the context menu, choose **Download as ZIP**, and enter the archive filename in the app's

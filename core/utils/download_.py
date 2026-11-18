@@ -31,6 +31,12 @@ from core.utils.download_utils import (
 )
 from core.utils.env import GOOGLE_API_KEY
 from core.utils.progress import Progress, upload_growing_file
+from core.utils.upload_manager import (
+    IngestionUploadTicket,
+    cancel_ingestion_upload,
+    enqueue_ingestion_upload,
+    ingestion_upload_slot,
+)
 
 
 async def download_processed_link(file: File, link: str, selected_torrent_files: set[int] | None = None, ) -> AsyncGenerator[Progress, None]:
@@ -105,6 +111,8 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
     temp_dir.mkdir(parents=True, exist_ok=True)
     download_task: Task[Any] | None = None
     response: Response | None = None
+    ticket: IngestionUploadTicket | None = None
+    upload_finished: bool = False
     temp_dir / "pending-download"
     response_type: str | None = None
 
@@ -176,6 +184,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             url_name: str = unquote(urlparse(response.url).path.rstrip("/").rsplit("/", 1)[-1])
             file.name = safe_filename(header_name or url_name or file.name)
             response_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip() or None
+            file.type = guess_type(file.name)[0] or response_type or file.type
 
             if response_type == "text/html" and not header_name and Path(file.name).suffix.lower() not in {".html", ".htm"}:
                 raise ValueError("The URL returned an HTML page rather than a direct file download")
@@ -191,32 +200,76 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             download_response: Response = cast(Response, response)
             download_task = create_task(to_thread(stream_response, download_response, output, link))
 
+        file.type = guess_type(file.name)[0] or response_type or file.type or "application/octet-stream"
         progress: Progress = Progress(file.name, "Downloading and uploading file", total_size)
         progress.download_active = True
         progress.download_total = total_size
+        ticket = await enqueue_ingestion_upload(file.name, file.username)
+        write_log(
+            "INFO", data_center, "UPLOAD", file.username,
+            f"Direct-link import ready for queued upload name={file.name!r} source_host={urlparse(link).hostname!r}.",
+        )
 
-        async for progress_value in upload_growing_file(
-                file,
-                output,
-                data_center,
-                progress,
-                download_task,
-                total_size,
-                track_download=True,
-                download_total=total_size,
-                download_from_path=True,
-        ):
-            yield progress_value
+        async def source_ready(source_path: Path) -> None:
+            """Start FFmpeg preparation as soon as the complete local download is available."""
+
+            from backend.database.models.file import is_video_file
+            from backend.server.video_processing import start_local_video_preprocessing
+
+            if not is_video_file(file.name, file.type):
+                return
+            try:
+                await start_local_video_preprocessing(file, source_path)
+            except Exception as error:
+                write_log(
+                    "ERROR", data_center, "VIDEO PROCESSING", file.username,
+                    f"Could not stage local processing source for link import {file.name!r}: {error}",
+                )
+
+        try:
+            async with ingestion_upload_slot(ticket):
+                async for progress_value in upload_growing_file(
+                        file,
+                        output,
+                        data_center,
+                        progress,
+                        download_task,
+                        total_size,
+                        track_download=True,
+                        download_total=total_size,
+                        download_from_path=True,
+                        source_ready=source_ready,
+                ):
+                    yield progress_value
+        finally:
+            if ticket is not None and not ticket.claimed:
+                await cancel_ingestion_upload(ticket)
 
         file.size = output.stat().st_size
         file.type = guess_type(file.name)[0] or response_type or "application/octet-stream"
         file.modified_at = datetime.now(timezone.utc)
+        write_log(
+            "INFO", data_center, "UPLOAD", file.username,
+            f"Direct-link original chunks uploaded name={file.name!r} size={file.size}.",
+        )
+        upload_finished = True
 
     except Exception as error:
-        write_log("ERROR", data_center, "UPLOAD", file.username, f"Remote download failed: {sanitize_sensitive_urls(f"{error}\n{format_exc()}")}")
+        from backend.server.video_processing import abort_local_video_preparation
+
+        await abort_local_video_preparation(file, str(error))
+        write_log(
+            "ERROR", data_center, "UPLOAD", file.username,
+            f"Remote download/upload failed name={file.name!r}: "
+            f"{sanitize_sensitive_urls(str(error) + chr(10) + format_exc())}",
+        )
         raise
 
     finally:
+        if not upload_finished:
+            from backend.server.video_processing import abort_local_video_preparation
+
+            await abort_local_video_preparation(file, "Direct-link upload ended before the original file was saved.")
         try:
             if response is not None:
                 response.close()

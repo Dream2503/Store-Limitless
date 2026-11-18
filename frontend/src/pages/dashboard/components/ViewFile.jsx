@@ -103,6 +103,25 @@ function parseSubtitleText(source) {
     return cues.sort((left, right) => left.start - right.start);
 }
 
+/**
+ * FFmpeg may emit timestamps relative to a clipped subtitle window or to the
+ * original media timeline. Detect window-relative cues and move them onto the
+ * video timeline so captions continue rendering after the first segment.
+ */
+function alignSubtitleCueTimes(cues, segmentStart, segmentDuration) {
+    if (!cues.length || segmentStart <= 0) return cues;
+
+    const latestCueStart = Math.max(...cues.map((cue) => cue.start));
+    const timestampsAreWindowRelative = latestCueStart <= segmentDuration + 0.05;
+    if (!timestampsAreWindowRelative) return cues;
+
+    return cues.map((cue) => ({
+        ...cue,
+        start: cue.start + segmentStart,
+        end: cue.end + segmentStart,
+    }));
+}
+
 const ctrlBtn = "flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[#fafafa]/90 transition-colors " + "hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]";
 
 /**
@@ -447,7 +466,11 @@ function VideoPlayer({file, streamUrl, publicToken, heightClass = "h-[70vh]"}) {
                             // Parse received bytes immediately so captions can appear while
                             // FFmpeg continues scanning the source video for later cues.
                             if (trimmed.startsWith("WEBVTT")) {
-                                const receivedCues = parseSubtitleText(subtitleText);
+                                const receivedCues = alignSubtitleCueTimes(
+                                    parseSubtitleText(subtitleText),
+                                    subtitleSegmentIndex * subtitleWindowSeconds,
+                                    subtitleWindowSeconds,
+                                );
                                 if (receivedCues.length) setSubtitleCues(receivedCues);
                             }
                         }
@@ -461,7 +484,11 @@ function VideoPlayer({file, streamUrl, publicToken, heightClass = "h-[70vh]"}) {
 
                     // An interval without dialogue is valid. Keep the last parsed cues;
                     // timestamps determine whether they are visible at the current position.
-                    const extractedCues = parseSubtitleText(subtitleText);
+                    const extractedCues = alignSubtitleCueTimes(
+                        parseSubtitleText(subtitleText),
+                        subtitleSegmentIndex * subtitleWindowSeconds,
+                        subtitleWindowSeconds,
+                    );
                     if (extractedCues.length) setSubtitleCues(extractedCues);
                     setSubtitleLoadError("");
                     return;

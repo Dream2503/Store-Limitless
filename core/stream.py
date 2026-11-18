@@ -144,58 +144,46 @@ class Stream:
         return data
 
     async def stream(self) -> AsyncGenerator[bytes, None]:
-        """Yield at most 1 MiB at a time while prefetching the next chunk in the background."""
+        """Yield bytes in order while fetching up to eight storage links concurrently."""
+
+        from core.utils.download_manager import ordered_parallel_downloads
 
         byte_range: Stream.ByteRange = self.byte_range
-        index: int = bisect_right(self._chunk_starts, byte_range.start) - 1
+        first_index: int = bisect_right(self._chunk_starts, byte_range.start) - 1
+        last_index: int = bisect_right(self._chunk_starts, byte_range.end) - 1
         position: int = byte_range.start
-        prefetched_index: int | None = None
-        prefetched_task: Task[bytes] | None = None
 
-        try:
-            while position <= byte_range.end:
-                chunk: Stream.FileChunk = self.chunks[index]
+        async for index, data in _indexed_parallel_chunks(
+            ordered_parallel_downloads(
+                range(first_index, last_index + 1),
+                self._load_chunk,
+            ),
+            first_index,
+        ):
+            chunk: Stream.FileChunk = self.chunks[index]
+            expected_size: int = chunk.end - chunk.start + 1
+            if len(data) != expected_size:
+                raise OSError(f"Stored chunk {chunk.flink} has {len(data)} bytes; expected {expected_size}")
 
-                if prefetched_task is not None and prefetched_index == index:
-                    data = await prefetched_task
-                    prefetched_task = None
-                    prefetched_index = None
+            local_start: int = max(0, position - chunk.start)
+            local_end: int = min(byte_range.end, chunk.end) - chunk.start
+            remaining: int = local_end - local_start + 1
+            while remaining > 0:
+                size: int = min(1024 * 1024, remaining)
+                part: bytes = data[local_start:local_start + size]
+                if not part:
+                    raise OSError(f"Chunk ended early: {chunk.flink}")
+                yield part
+                local_start += len(part)
+                remaining -= len(part)
 
-                else:
-                    data = await self._load_chunk(index)
+            position = chunk.end + 1
 
-                expected_size: int = chunk.end - chunk.start + 1
 
-                if len(data) != expected_size:
-                    raise OSError(f"Stored chunk {chunk.flink} has {len(data)} bytes; expected {expected_size}")
+async def _indexed_parallel_chunks(stream, first_index: int):
+    """Attach monotonically increasing chunk indices to ordered download results."""
 
-                next_index: int = index + 1
-
-                if prefetched_task is None and next_index < len(self.chunks) and chunk.end < byte_range.end:
-                    prefetched_index = next_index
-                    prefetched_task = create_task(self._load_chunk(next_index))
-
-                local_start: int = position - chunk.start
-                local_end: int = min(byte_range.end, chunk.end) - chunk.start
-                remaining: int = local_end - local_start + 1
-
-                while remaining > 0:
-                    size: int = min(1024 * 1024, remaining)
-                    part: bytes = data[local_start:local_start + size]
-
-                    if not part:
-                        raise OSError(f"Chunk ended early: {chunk.flink}")
-
-                    yield part
-                    local_start += len(part)
-                    remaining -= len(part)
-
-                position = chunk.end + 1
-                index += 1
-
-        finally:
-            if prefetched_task is not None and not prefetched_task.done():
-                prefetched_task.cancel()
-
-            if prefetched_task is not None:
-                await gather(prefetched_task, return_exceptions=True)
+    index = first_index
+    async for data in stream:
+        yield index, data
+        index += 1

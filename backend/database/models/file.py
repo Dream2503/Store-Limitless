@@ -76,6 +76,13 @@ class File(BaseModel):
 
             self.name = f"{stem}({i}){extension}"
 
+        video_file: bool = is_video_file(self.name, self.type)
+        has_local_preparation: bool = False
+        if video_file:
+            from backend.server.video_processing import has_local_video_preparation
+
+            has_local_preparation = has_local_video_preparation(self)
+
         with POOL.connection() as connection:
             try:
                 self.id = cast(dict[str, int], connection.execute(
@@ -97,20 +104,33 @@ class File(BaseModel):
                     ),
                 ).fetchone())["id"]
 
-                # Queue registration shares the original-file transaction, so all
-                # ingestion paths converge here after the provider upload has finished.
-                if self.id is not None and is_video_file(self.name, self.type):
-                    connection.execute(
-                        """
-                        INSERT INTO video_processing_jobs (file_id)
-                        VALUES (%s)
-                        ON CONFLICT (file_id) DO NOTHING;
-                        """,
-                        (self.id,),
-                    )
-
                 connection.commit()
                 await Redis.set(f"user:{self.username}:files", self)
+
+                if self.id is not None and video_file:
+                    from backend.server.video_processing import (
+                        enqueue_video_processing_job,
+                        notify_video_file_saved,
+                    )
+
+                    await enqueue_video_processing_job(
+                        int(self.id),
+                        status="preparing" if has_local_preparation else "queued",
+                        message=(
+                            "Preparing a local streaming copy alongside the original upload."
+                            if has_local_preparation else "Waiting for video processing."
+                        ),
+                        source_size=self.size,
+                        username=self.username,
+                        name=self.name,
+                    )
+                    write_log(
+                        "INFO", Database, "VIDEO PROCESSING", self.username,
+                        f"Original file saved file_id={self.id} name={self.name!r} size={self.size} "
+                        f"chunks={len(self.links)}; local_preparation={has_local_preparation}.",
+                    )
+                    if has_local_preparation:
+                        await notify_video_file_saved(self)
 
             except Exception as e:
                 connection.rollback()
@@ -244,6 +264,9 @@ class File(BaseModel):
                 )
                 connection.commit()
                 await Redis.delete(f"user:{self.username}:files {self.id}", "File")
+                from backend.server.video_processing import delete_video_processing_job
+
+                await delete_video_processing_job(int(self.id))
 
             except Exception as e:
                 connection.rollback()
@@ -288,8 +311,12 @@ class File(BaseModel):
                 )
                 connection.commit()
 
+                from backend.server.video_processing import delete_video_processing_job
+
                 for file in expired:
                     await Redis.delete(f"user:{username}:files {file.id}", "File")
+                    if file.id is not None:
+                        await delete_video_processing_job(int(file.id))
 
             except Exception as e:
                 connection.rollback()

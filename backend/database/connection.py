@@ -71,35 +71,7 @@ try:
                         REFERENCES users (username)
             );
 
-            CREATE TABLE IF NOT EXISTS video_processing_jobs (
-                file_id BIGINT PRIMARY KEY,
-                status TEXT NOT NULL DEFAULT 'queued',
-                stage TEXT NOT NULL DEFAULT 'queued',
-                progress DOUBLE PRECISION NOT NULL DEFAULT 0,
-                message TEXT NOT NULL DEFAULT 'Waiting for video processing.',
-                processed_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
-                duration DOUBLE PRECISION NOT NULL DEFAULT 0,
-                bytes_downloaded BIGINT NOT NULL DEFAULT 0,
-                source_size BIGINT NOT NULL DEFAULT 0,
-                completed_segments INTEGER NOT NULL DEFAULT 0,
-                total_segments INTEGER NOT NULL DEFAULT 0,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                error TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                started_at TIMESTAMPTZ,
-                finished_at TIMESTAMPTZ,
-                CONSTRAINT fk_video_processing_job_file
-                    FOREIGN KEY (file_id)
-                        REFERENCES files (id)
-                        ON UPDATE CASCADE
-                        ON DELETE CASCADE,
-                CONSTRAINT chk_video_processing_status
-                    CHECK (status IN ('queued', 'processing', 'ready', 'failed'))
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_video_processing_jobs_queue
-                ON video_processing_jobs (status, created_at, file_id);
+            -- Video processing progress and queue state are maintained in Redis.
 
             CREATE TABLE IF NOT EXISTS processed_videos (
                 id BIGINT PRIMARY KEY,

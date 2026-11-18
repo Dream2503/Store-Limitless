@@ -33,7 +33,7 @@ from core.config import TRANSFER_PATH
 from core.data_center import DataCenter
 from core.utils import sanitize_sensitive_urls, write_log
 from core.utils.progress import Progress
-from core.utils.ingestion_queue import (
+from core.utils.upload_manager import (
     IngestionUploadTicket,
     cancel_ingestion_upload,
     enqueue_ingestion_upload,
@@ -1097,7 +1097,7 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
                     "status": "waiting_upload",
                     "message": "Downloaded · waiting for upload",
                 })
-                ticket = await enqueue_ingestion_upload()
+                ticket = await enqueue_ingestion_upload(str(item.get("path") or item.get("name") or f"folder-file-{index}"), file.username)
                 tickets[index] = ticket
                 await ready_queue.put((index, actual_path, target_directory, item, ticket))
             except CancelledError:
@@ -1149,7 +1149,7 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
                         "download_transfer": local_size,
                         "download_total": local_size,
                     })
-                    async with aclosing(file_upload(remote_file, local_path, intermediate=True)) as upload_stream:
+                    async with aclosing(file_upload(remote_file, local_path, intermediate=True, queue_slot_held=True)) as upload_stream:
                         async for upload_progress in upload_stream:
                             transferred = min(local_size, max(0, int(upload_progress.transfer or 0)))
                             item.update({
@@ -1386,7 +1386,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                     "status": "uploading",
                     "message": "Uploading",
                 })
-                async with aclosing(file_upload(torrent_file, local_path, intermediate=True)) as upload_stream:
+                async with aclosing(file_upload(torrent_file, local_path, intermediate=True, queue_slot_held=True)) as upload_stream:
                     async for upload_progress in upload_stream:
                         transferred: int = min(local_size, max(0, int(upload_progress.transfer or 0)))
                         item.update({
@@ -1690,7 +1690,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                 )
                 # Enter the global FIFO immediately after the on-disk file is verified.
                 # Only a bounded number of local coroutines wait for/acquire upload slots.
-                ticket = await enqueue_ingestion_upload()
+                ticket = await enqueue_ingestion_upload(relative_display_path, file.username)
                 pending_uploads[index] = (
                     torrent_file,
                     candidate_path,

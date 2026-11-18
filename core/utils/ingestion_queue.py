@@ -9,6 +9,8 @@ from typing import AsyncIterator
 from uuid import uuid4
 
 from backend.database.redis_server import Redis
+from core.data_center import Database
+from core.utils import write_log
 
 _QUEUE = "ingestion:upload:queue"
 _SEQUENCE = "ingestion:upload:sequence"
@@ -78,6 +80,8 @@ class IngestionUploadTicket:
     heartbeat: Task[None] | None = None
     claimed: bool = False
     closed: bool = False
+    label: str = "upload"
+    username: str = ""
 
 
 async def _keep_ticket_alive(ticket: IngestionUploadTicket) -> None:
@@ -97,15 +101,24 @@ async def _keep_ticket_alive(ticket: IngestionUploadTicket) -> None:
         return
 
 
-async def enqueue_ingestion_upload() -> IngestionUploadTicket:
-    """Atomically append a file to the shared Redis FIFO and keep its ticket alive."""
+async def enqueue_ingestion_upload(label: str = "upload", username: str = "") -> IngestionUploadTicket:
+    """Atomically append a named file to the shared Redis FIFO and keep its ticket alive."""
 
     ticket_id = uuid4().hex
-    ticket = IngestionUploadTicket(ticket_id, f"{_PREFIX}{ticket_id}")
+    ticket = IngestionUploadTicket(
+        ticket_id,
+        f"{_PREFIX}{ticket_id}",
+        label=str(label or "upload")[:160],
+        username=str(username or ""),
+    )
     await Redis.redis.eval(
         _ENQUEUE, 3, _QUEUE, _SEQUENCE, ticket.key, ticket_id, _TICKET_TTL
     )
     ticket.heartbeat = create_task(_keep_ticket_alive(ticket), name=f"ingestion-ticket-{ticket_id}")
+    write_log(
+        "INFO", Database, "UPLOAD QUEUE", ticket.username or "system",
+        f"Queued ticket={ticket.ticket_id} name={ticket.label!r}; waiting for the shared upload slot.",
+    )
     return ticket
 
 
@@ -116,6 +129,10 @@ async def cancel_ingestion_upload(ticket: IngestionUploadTicket) -> None:
         return
     ticket.closed = True
     await Redis.redis.eval(_CANCEL, 2, _QUEUE, ticket.key, ticket.ticket_id)
+    write_log(
+        "WARNING", Database, "UPLOAD QUEUE", ticket.username or "system",
+        f"Cancelled unclaimed ticket={ticket.ticket_id} name={ticket.label!r}.",
+    )
     if ticket.heartbeat is not None:
         ticket.heartbeat.cancel()
         await gather(ticket.heartbeat, return_exceptions=True)
@@ -157,6 +174,10 @@ async def ingestion_upload_slot(ticket: IngestionUploadTicket) -> AsyncIterator[
             if result == 1:
                 acquired = True
                 ticket.claimed = True
+                write_log(
+                    "INFO", Database, "UPLOAD QUEUE", ticket.username or "system",
+                    f"Acquired upload slot ticket={ticket.ticket_id} name={ticket.label!r}.",
+                )
                 break
             if result < 0:
                 raise RuntimeError("The ingestion upload ticket expired before it reached the front of the queue")
@@ -185,5 +206,9 @@ async def ingestion_upload_slot(ticket: IngestionUploadTicket) -> AsyncIterator[
             await gather(lock_heartbeat, return_exceptions=True)
         if acquired:
             await Redis.redis.eval(_RELEASE_LOCK, 1, _LOCK, ticket.ticket_id)
+            write_log(
+                "INFO", Database, "UPLOAD QUEUE", ticket.username or "system",
+                f"Released upload slot ticket={ticket.ticket_id} name={ticket.label!r}.",
+            )
         else:
             await Redis.redis.eval(_CANCEL, 2, _QUEUE, ticket.key, ticket.ticket_id)

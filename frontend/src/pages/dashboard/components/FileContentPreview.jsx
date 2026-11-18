@@ -1,10 +1,10 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import * as pdfjsLib from "pdfjs-dist/build/pdf.mjs";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 import {API_URL} from "../../../api.js";
 import {endAuthSession} from "../utils.js";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 /** @param {{message: string}} props */
 function PreviewMessage({message}) {
@@ -336,6 +336,7 @@ function PDFDocumentViewer({streamUrl, fileName}) {
     const canvasRef = useRef(null);
     const documentRef = useRef(null);
     const renderTaskRef = useRef(null);
+    const renderedScaleRef = useRef(1);
 
     useEffect(() => {
         let cancelled = false;
@@ -436,6 +437,7 @@ function PDFDocumentViewer({streamUrl, fileName}) {
                     : 1;
                 const scale = fitToWidth ? fittedScale : zoom;
                 const viewport = page.getViewport({scale});
+                renderedScaleRef.current = scale;
                 const canvas = canvasRef.current;
                 const context = canvas && canvas.getContext("2d", {alpha: false});
                 if (!canvas || !context) throw new Error("Your browser could not create a PDF rendering surface.");
@@ -491,7 +493,7 @@ function PDFDocumentViewer({streamUrl, fileName}) {
     const changeZoom = useCallback((amount) => {
         setFitToWidth(false);
         setZoom((current) => {
-            const base = fitToWidth ? 1 : current;
+            const base = fitToWidth ? renderedScaleRef.current : current;
             return Math.max(0.5, Math.min(3, Math.round((base + amount) * 100) / 100));
         });
     }, [fitToWidth]);

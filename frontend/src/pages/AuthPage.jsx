@@ -55,6 +55,9 @@ export default function AuthPage() {
             if (isLogin) {
                 localStorage.setItem("token", data.access_token);
                 navigate("/dashboard");
+            } else {
+                setIsLogin(true);
+                setMessage("Registration successful. Please login.");
             }
 
         } catch (error) {

@@ -1,38 +1,78 @@
-from asyncio import get_running_loop
+from asyncio import AbstractEventLoop, get_running_loop, run_coroutine_threadsafe, wrap_future
+from io import BytesIO
 from traceback import format_exc
 
-import core.discord_utils.transfer
-from core.data_center import Discord
-from core.discord_utils.setup import app, app
+import discord
+from discord import Intents, Message, TextChannel
+from discord.ext.commands import Bot
+
+from core.data_center import ConfigMeta, DataCenter
+from core.settings import getenv
 from core.utils import write_log
 
 
-@app.event
-async def on_ready():
-    try:
-        Discord.FILE_DUMP = app.get_channel(Discord.FILE_DUMP_ID)
-        Discord.LOOP = get_running_loop()
+class Discord(DataCenter, metaclass=ConfigMeta):
+    NAME: str = "Discord"
+    TOKEN: str = getenv("DISCORD_TOKEN")
+    ADMIN: int = int(getenv("DISCORD_ADMIN"))
+    FILE_DUMP_ID: int = int(getenv("DISCORD_FILE_DUMP_ID"))
 
-        if Discord.FILE_DUMP:
-            write_log("INFO", Discord, "INIT", str(app.user), f"FILE_DUMP channel initialized: {Discord.FILE_DUMP.name} (id={Discord.FILE_DUMP.id}).")
+    FILE_DUMP: TextChannel
+    LOOP: AbstractEventLoop
 
-        else:
-            write_log(
-                    "ERROR", Discord, "INIT", str(app.user),
-                    f"Failed to fetch FILE_DUMP channel with ID {Discord.FILE_DUMP_ID}. Check bot permissions.",
-            )
+    INTENTS: Intents = Intents.default()
+    INTENTS.messages = True
+    INTENTS.message_content = True
 
-        write_log("INFO", Discord, "INIT", str(app.user), f"Bot online and ready (id={app.user.id}).")
+    app: Bot = Bot(command_prefix="!", intents=INTENTS, help_command=None, heartbeat_timeout=36_000, )
 
-    except Exception as e:
-        write_log("ERROR", Discord, "INIT", "", f"Initialization failure: {e}\n{format_exc()}")
+    @staticmethod
+    async def upload(chunk: bytes, filename: str) -> str:
+        return str(
+                (await wrap_future(
+                        run_coroutine_threadsafe(
+                                Discord.FILE_DUMP.send(file=discord.File(BytesIO(chunk), filename=filename)),
+                                Discord.LOOP,
+                        ),
+                )).id,
+        )
 
+    @staticmethod
+    async def download(flink: str) -> bytes:
+        message: Message = await wrap_future(run_coroutine_threadsafe(Discord.FILE_DUMP.fetch_message(int(flink)), Discord.LOOP))
 
-def main() -> None:
-    try:
-        write_log("INFO", Discord, "MAIN", "", "Starting Store Limitless Bot...")
-        app.run(Discord.TOKEN)
+        if not message.attachments:
+            raise OSError(f"No attachment found in Discord message {flink}")
 
-    except Exception as e:
-        write_log("ERROR", Discord, "MAIN", "", f"Critical startup failure: {e}\n{format_exc()}")
-        raise
+        return await wrap_future(run_coroutine_threadsafe(message.attachments[0].read(), Discord.LOOP, ), )
+
+    @staticmethod
+    @app.event
+    async def on_ready():
+        try:
+            Discord.FILE_DUMP = Discord.app.get_channel(Discord.FILE_DUMP_ID)
+            Discord.LOOP = get_running_loop()
+
+            if Discord.FILE_DUMP:
+                write_log(
+                        "INFO", Discord, "INIT", str(Discord.app.user),
+                        f"FILE_DUMP channel initialized: {Discord.FILE_DUMP.name} (id={Discord.FILE_DUMP.id}).", )
+            else:
+                write_log(
+                        "ERROR", Discord, "INIT", "",
+                        f"Failed to fetch FILE_DUMP channel with ID {Discord.FILE_DUMP_ID}. Check bot permissions.", )
+
+            write_log("INFO", Discord, "INIT", str(Discord.app.user), f"Bot online and ready (id={Discord.app.user.id}).", )
+
+        except Exception as e:
+            write_log("ERROR", Discord, "INIT", "", f"Initialization failure: {e}\n{format_exc()}", )
+
+    @staticmethod
+    def main() -> None:
+        try:
+            write_log("INFO", Discord, "MAIN", "", "Starting Store Limitless Bot...", )
+            Discord.app.run(Discord.TOKEN)
+
+        except Exception as e:
+            write_log("ERROR", Discord, "MAIN", "", f"Critical startup failure: {e}\n{format_exc()}", )
+            raise

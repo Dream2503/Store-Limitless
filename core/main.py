@@ -6,16 +6,17 @@ from core import discord_utils, telegram_utils
 
 
 def main() -> None:
-    fastapi_thread = Thread(target=lambda: uvicorn.run("backend.server.app:app", host="0.0.0.0", port=8000, log_level="info"), daemon=True)
-    discord_thread: Thread = Thread(target=discord_utils.main, daemon=True)
-    telegram_thread: Thread = Thread(target=telegram_utils.main, daemon=True)
+    threads: list[Thread] = [
+        Thread(target=lambda: uvicorn.run("backend.server.app:app", host="0.0.0.0", port=8000, log_level="info"), daemon=True),
+        Thread(target=discord_utils.Discord.main, daemon=True),
+        Thread(target=telegram_utils.Telegram.main, daemon=True),
+    ]
 
-    fastapi_thread.start()
-    discord_thread.start()
-    telegram_thread.start()
-    fastapi_thread.join()
-    discord_thread.join()
-    telegram_thread.join()
+    for thread in threads:
+        thread.start()
+
+    for thread in threads:
+        thread.join()
 
 
 if __name__ == "__main__":

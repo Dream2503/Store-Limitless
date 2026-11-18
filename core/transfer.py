@@ -1,25 +1,21 @@
-from asyncio import run_coroutine_threadsafe
-from io import BytesIO
 from pathlib import Path
-from time import sleep
 from traceback import format_exc
-from typing import Any, AsyncGenerator, Generator
-
-import discord
+from typing import AsyncGenerator
 
 from backend.database import add_file, File, get_file, get_user, User
-from core.data_center import DataCenter, Discord, Telegram
+from core.data_center import DataCenter
 from core.settings import TRANSFER_PATH
 from core.utils import write_log
 
 
-async def upload(file: File) -> AsyncGenerator[float, None]:
+async def upload(file: File) -> AsyncGenerator[float | int, None]:
     user: User | None = get_user(uid=file.uid)
     data_center: type[DataCenter] = DataCenter(file.data_center)
-    write_log("INFO", data_center, "UPLOAD", user.username, f"Got file: {file}")
 
     if not user:
         return
+
+    write_log("INFO", data_center, "UPLOAD", user.username, f"Got file: {file}")
 
     try:
         if get_file(fname=file.fname, uid=file.uid):
@@ -37,24 +33,13 @@ async def upload(file: File) -> AsyncGenerator[float, None]:
             return
 
         write_log("INFO", data_center, "UPLOAD", user.username, f"Found local file: {file_path.name}")
-
-        match file.data_center:
-            case Discord.NAME:
-                max_size: int = Discord.MAX_SIZE
-
-            case Telegram.NAME:
-                max_size: int = Telegram.MAX_SIZE
-
-            case _:
-                raise ValueError("Unknown data center")
-
         file_size: int = file_path.stat().st_size
-        total_parts: int = (file_size + max_size - 1) // max_size
+        total_parts: int = (file_size + data_center.MAX_SIZE - 1) // data_center.MAX_SIZE
         write_log("INFO", data_center, "UPLOAD", user.username, f"Starting upload `{file_path.name}` ({total_parts} parts)", )
 
         with file_path.open("rb") as f:
             for i in range(1, total_parts + 1):
-                chunk: bytes = f.read(max_size)
+                chunk: bytes = f.read(data_center.MAX_SIZE)
 
                 if not chunk:
                     break
@@ -63,31 +48,14 @@ async def upload(file: File) -> AsyncGenerator[float, None]:
 
                 while True:
                     try:
-                        match file.data_center:
-                            case Discord.NAME:
-                                msg_id: int = run_coroutine_threadsafe(
-                                        Discord.FILE_DUMP.send(file=discord.File(BytesIO(chunk), filename=filename)),
-                                        Discord.LOOP,
-                                ).result().id
-
-                            case Telegram.NAME:
-                                msg_id = (await Telegram.FILE_DUMP.send_document(
-                                        chat_id=Telegram.FILE_DUMP_ID,
-                                        document=BytesIO(chunk),
-                                        filename=filename,
-                                        write_timeout=36_000,
-                                        read_timeout=36_000,
-                                        connect_timeout=60,
-                                        pool_timeout=36_000,
-                                )).id
-
+                        msg_id: str = await data_center.upload(chunk, filename)
                         break
 
                     except OSError as e:
                         write_log("ERROR", data_center, "UPLOAD", user.username, f"Network error part {i}/{total_parts}, retrying: {e}")
 
-                file.flinks.append(str(msg_id))
-                progress: float = (i / total_parts) * 100
+                file.flinks.append(msg_id)
+                progress: float | int = round((i / total_parts) * 100, 2)
                 write_log("INFO", data_center, "UPLOAD", user.username, f"Uploaded {i}/{total_parts} ({progress:.1f}%)")
                 yield progress
 
@@ -99,16 +67,42 @@ async def upload(file: File) -> AsyncGenerator[float, None]:
         write_log("ERROR", data_center, "UPLOAD", user.username if user else "", f"Unhandled exception: {e}\n{format_exc()}")
 
 
-def download(file: File) -> Generator[float, Any, None]:
-    write_log("INFO", DataCenter(file.data_center), "DOWNLOAD", str(file.uid), f"Got file: {file}")
+async def download(file: File) -> AsyncGenerator[float | int, None]:
+    data_center: type[DataCenter] = DataCenter(file.data_center)
+    write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Got file: {file}")
 
-    match file.data_center:
-        case Discord.NAME:
-            pass
+    try:
+        total_parts: int = len(file.flinks)
 
-        case Telegram.NAME:
-            pass
+        if total_parts == 0:
+            write_log("ERROR", data_center, "DOWNLOAD", str(file.uid), "File has no parts")
+            return
 
-    for i in range(10):
-        sleep(0.5)
-        yield float(i)
+        file_path: Path = (TRANSFER_PATH / Path(file.fname).name).resolve()
+
+        if not file_path.is_relative_to(TRANSFER_PATH.resolve()):
+            write_log("ERROR", data_center, "DOWNLOAD", str(file.uid), f"Illegal file path attempted: {file.fname}")
+            return
+
+        write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Starting download `{file.fname}` ({total_parts} parts)")
+
+        with file_path.open("wb") as output:
+            for i, flink in enumerate(file.flinks, 1):
+
+                while True:
+                    try:
+                        chunk: bytes = await data_center.download(flink)
+                        break
+
+                    except OSError as e:
+                        write_log("ERROR", data_center, "DOWNLOAD", str(file.uid), f"Network error part {i}/{total_parts}, retrying: {e}")
+
+                output.write(chunk)
+                progress: float | int = round((i / total_parts) * 100, 2)
+                write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Downloaded {i}/{total_parts} ({progress:.1f}%)")
+                yield progress
+
+        write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Download complete `{file_path.name}`")
+
+    except Exception as e:
+        write_log("ERROR", data_center, "DOWNLOAD", str(file.uid), f"Unhandled exception: {e}\n{format_exc()}")

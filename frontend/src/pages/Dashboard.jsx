@@ -1,197 +1,110 @@
 import {useEffect, useState} from "react";
+import {useNavigate} from "react-router-dom";
 
-export default function Dashboard() {
-
+export default function DashboardPage() {
+    const navigate = useNavigate();
     const [files, setFiles] = useState([]);
-    const [showUpload, setShowUpload] = useState(false);
-    const [contextMenu, setContextMenu] = useState(null);
-    const [file, setFile] = useState(null);
-    const [dataCenter, setDataCenter] = useState("Discord");
 
-    const [uploading, setUploading] = useState(false);
-    const [progress, setProgress] = useState(0);
+    const fetchFiles = async () => {
+        try {
+            const res = await fetch("http://127.0.0.1:8000/auth/files", {
+                headers: {
+                    Authorization: `Bearer ${localStorage.getItem("token")}`
+                }
+            });
+
+            const data = await res.json();
+            setFiles(data);
+
+        } catch (err) {
+            console.error("Failed to fetch files", err);
+        }
+    };
 
     useEffect(() => {
         fetchFiles();
     }, []);
 
-    const fetchFiles = async () => {
-        const res = await fetch("http://127.0.0.1:8000/auth/files");
-        const data = await res.json();
-        setFiles(data);
-    };
-
-    const handleUpload = () => {
-
-        if (!file) {
-            alert("Please select a file first");
-            return;
-        }
-
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("data_center", dataCenter);
-        formData.append("uid", 1);
-
-        const xhr = new XMLHttpRequest();
-
-        setUploading(true);
-        setProgress(0);
-
-        xhr.upload.onprogress = (e) => {
-
-            if (e.lengthComputable) {
-                const percent = Math.round((e.loaded / e.total) * 100);
-                setProgress(percent);
+    const downloadFile = async (fid, fname) => {
+        const res = await fetch(`http://127.0.0.1:8000/auth/download/${fid}`, {
+            headers: {
+                Authorization: `Bearer ${localStorage.getItem("token")}`
             }
-
-        };
-
-        xhr.onload = () => {
-
-            if (xhr.status === 200) {
-                setUploading(false);
-                setProgress(100);
-                setShowUpload(false);
-                setFile(null);
-                fetchFiles();
-            } else {
-                alert("Upload failed");
-                setUploading(false);
-            }
-
-        };
-
-        xhr.onerror = () => {
-            alert("Upload failed");
-            setUploading(false);
-        };
-
-        xhr.open("POST", "http://127.0.0.1:8000/auth/upload");
-        xhr.send(formData);
-    };
-
-    const handleRightClick = (e) => {
-        e.preventDefault();
-
-        setContextMenu({
-            x: e.pageX, y: e.pageY
         });
+
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fname;
+        a.click();
+        window.URL.revokeObjectURL(url);
     };
 
-    const closeContextMenu = () => {
-        setContextMenu(null);
-    };
+    return (<div className="h-screen flex bg-gradient-to-br from-[#0f172a] to-[#020617] text-white">
 
-    return (<div
-        className="min-h-screen bg-gray-100 p-6"
-        onClick={closeContextMenu}
-        onContextMenu={handleRightClick}
-    >
+        <aside className="w-64 bg-[#020617]/80 backdrop-blur border-r border-gray-800 p-6">
+            <h2 className="text-xl font-semibold mb-8 tracking-wide">
+                🚀 DriveBot
+            </h2>
 
-        <div className="flex justify-between mb-6">
+            <div className="space-y-3 text-gray-400 text-sm">
+                <p className="text-white">📁 Files</p>
 
-            <h1 className="text-3xl font-bold">
-                Dashboard
-            </h1>
-
-            <button
-                onClick={() => setShowUpload(true)}
-                className="bg-indigo-600 text-white px-4 py-2 rounded-lg"
-            >
-                + New
-            </button>
-
-        </div>
-
-        <div className="bg-white rounded-xl shadow p-6 grid grid-cols-5 gap-4">
-
-            {files.map((file) => (<div
-                key={file.id}
-                className="p-4 border rounded-lg hover:bg-gray-100 cursor-pointer"
-            >
-                <p className="text-lg">📄</p>
-                <p className="text-sm truncate">{file.name}</p>
-            </div>))}
-
-        </div>
-
-        {contextMenu && (<div
-            className="absolute bg-white shadow rounded-lg p-2"
-            style={{
-                top: contextMenu.y, left: contextMenu.x
-            }}
-        >
-            <button
-                className="block px-4 py-2 hover:bg-gray-100 w-full text-left"
-                onClick={() => setShowUpload(true)}
-            >
-                Upload File
-            </button>
-        </div>)}
-
-        {showUpload && (<div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center">
-
-            <div className="bg-white p-6 rounded-xl w-96">
-
-                <h2 className="text-xl font-bold mb-4">
-                    Upload File
-                </h2>
-
-                <input
-                    type="file"
-                    onChange={(e) => setFile(e.target.files[0])}
-                    className="mb-4"
-                />
-
-                <select
-                    value={dataCenter}
-                    onChange={(e) => setDataCenter(e.target.value)}
-                    className="border p-2 rounded mb-4 w-full"
+                <p
+                    onClick={() => navigate("/upload")}
+                    className="hover:text-white cursor-pointer"
                 >
-                    <option value="Discord">Discord</option>
-                    <option value="Telegram">Telegram</option>
-                </select>
+                    ⬆ Upload
+                </p>
 
-                <div className="flex justify-end gap-3">
+                <p className="hover:text-white cursor-pointer">Settings</p>
+            </div>
+        </aside>
 
-                    <button
-                        onClick={() => setShowUpload(false)}
-                        className="px-4 py-2 border rounded"
-                    >
-                        Cancel
-                    </button>
+        <main className="flex-1 p-10 overflow-y-auto">
 
-                    <button
-                        onClick={handleUpload}
-                        disabled={uploading}
-                        className="px-4 py-2 bg-indigo-600 text-white rounded disabled:opacity-50"
-                    >
-                        {uploading ? "Uploading..." : "Upload"}
-                    </button>
+            <div className="flex justify-between items-center mb-8">
+                <h1 className="text-3xl font-semibold tracking-tight">
+                    Your Files
+                </h1>
 
-                </div>
-
-                {uploading && (<div className="mt-4">
-
-                    <div className="w-full bg-gray-200 rounded-full h-3">
-
-                        <div
-                            className="bg-indigo-600 h-3 rounded-full transition-all duration-300"
-                            style={{width: `${progress}%`}}
-                        />
-
-                    </div>
-
-                    <p className="text-sm text-gray-500 mt-1">
-                        {progress.toFixed(0)}%
-                    </p>
-
-                </div>)}
-
+                <button
+                    onClick={() => navigate("/upload")}
+                    className="bg-indigo-600 px-5 py-2 rounded-lg hover:bg-indigo-700"
+                >
+                    Upload File
+                </button>
             </div>
 
-        </div>)}
 
+            {files.length === 0 ? (<p className="text-gray-400">No files uploaded</p>) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+
+                    {files.map(file => (<div
+                        key={file.fid}
+                        className="bg-[#020617] border border-gray-800 p-5 rounded-xl hover:border-indigo-500 transition"
+                    >
+                        <div className="text-3xl mb-3">📄</div>
+
+                        <p className="truncate font-medium">
+                            {file.fname}
+                        </p>
+
+                        <p className="text-xs text-gray-500 mb-3">
+                            {file.data_center}
+                        </p>
+
+                        <button
+                            onClick={() => downloadFile(file.fid, file.fname)}
+                            className="text-indigo-400 text-sm hover:underline"
+                        >
+                            Download
+                        </button>
+                    </div>))}
+
+                </div>)}
+        </main>
     </div>);
 }

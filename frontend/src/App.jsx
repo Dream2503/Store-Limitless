@@ -160,7 +160,10 @@ function PersistentRoutePages() {
     // The dashboard stays mounted to preserve its cached state and upload tray. A
     // file viewer is intentionally route-scoped: leaving it fully unmounts PDF.js,
     // media elements, and its full-screen layer before the directory is shown again.
-    const shouldMountView = isViewRoute && (hasStoredSession || isPublicViewRoute);
+    const [keepViewMounted, setKeepViewMounted] = useState(() => (
+        Boolean(localStorage.getItem("token")) && isViewRoute
+    ) || isPublicViewRoute);
+    const shouldMountView = isPublicViewRoute || (hasStoredSession && (keepViewMounted || isViewRoute));
 
     useEffect(() => {
         const syncSession = () => {
@@ -169,6 +172,7 @@ function PersistentRoutePages() {
             if (!sessionActive) {
                 // A new login must not revive a viewer that belonged to the previous session.
                 setKeepDashboardMounted(false);
+                setKeepViewMounted(false);
             }
         };
         const handleStorage = (event) => {
@@ -191,6 +195,7 @@ function PersistentRoutePages() {
     useEffect(() => {
         setHasSession(Boolean(localStorage.getItem("token")));
         if (hasSession && isDashboardRoute) setKeepDashboardMounted(true);
+        if (isViewRoute && (hasSession || isPublicViewRoute)) setKeepViewMounted(true);
     }, [hasSession, isDashboardRoute, isViewRoute, isPublicViewRoute, location.pathname, location.search]);
 
     return (<>

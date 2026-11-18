@@ -1,4 +1,5 @@
-from core.module import Database
+from core.data_center import Database
+
 from core.utils import write_log
 from .connection import CURSOR
 from .schema import File, User
@@ -169,17 +170,3 @@ def get_files(*, fname: str | None = None, data_center: str | None = None, uid: 
 
     write_log("ERROR", Database, "GET FILES", "", f"No files found for {attribute}={value}.")
     return None
-
-
-def clear_file() -> None:
-    """SHOULD BE REMOVED AFTER TESTING / DEBUG"""
-
-    CURSOR.execute(
-            """
-            TRUNCATE TABLE files
-                RESTART IDENTITY;
-            """,
-    )
-    write_log("INFO", Database, "CLEAR", "", f"Truncate query executed.")
-    CURSOR.connection.commit()
-    write_log("INFO", Database, "CLEAR", "", f"Truncated the files table.")

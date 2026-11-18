@@ -1,8 +1,10 @@
 bcrypt==4.0.1
 discord
 fastapi[all]
+filelock
 passlib[bcrypt]==1.7.4
 psycopg2-binary
+pydantic
 python-dotenv
 python-jose
 python-telegram-bot

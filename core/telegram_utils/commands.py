@@ -1,11 +1,11 @@
 from time import perf_counter
 from traceback import format_exc
 
-from backend import database
-from core.module import Telegram
-from core.utils import write_log
 from telegram import Message, Update, User
 from telegram.ext import ContextTypes
+
+from core.data_center import Telegram
+from core.utils import write_log
 
 
 async def on_ready(app):
@@ -49,8 +49,6 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except ValueError:
             write_log("ERROR", Telegram, "CLEAR", username, f"Invalid limit provided: '{context.args[0]}'")
             return
-
-        database.clear_file()
 
         for i in range(limit):
             try:

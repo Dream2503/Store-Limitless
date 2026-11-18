@@ -1,6 +1,7 @@
+from telegram.ext import Application, ApplicationBuilder, CommandHandler
+
 from core.telegram_utils.commands import *
 from core.telegram_utils.transfer import *
-from telegram.ext import Application, ApplicationBuilder, CommandHandler
 
 
 def main() -> None:

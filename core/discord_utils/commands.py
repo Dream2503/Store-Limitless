@@ -1,10 +1,10 @@
 from traceback import format_exc
 
-import backend.database as database
-from core.discord_utils.setup import app
-from core.module import Discord
-from core.utils import write_log
 from discord.ext.commands import Context
+
+from core.data_center import Discord
+from core.discord_utils.setup import app
+from core.utils import write_log
 
 
 @app.event
@@ -16,7 +16,10 @@ async def on_ready():
             write_log("INFO", Discord, "INIT", str(app.user), f"FILE_DUMP channel initialized: {Discord.FILE_DUMP.name} (id={Discord.FILE_DUMP.id}).")
 
         else:
-            write_log("ERROR", Discord, "INIT", str(app.user), f"Failed to fetch FILE_DUMP channel with ID {Discord.FILE_DUMP_ID}. Check bot permissions.")
+            write_log(
+                    "ERROR", Discord, "INIT", str(app.user),
+                    f"Failed to fetch FILE_DUMP channel with ID {Discord.FILE_DUMP_ID}. Check bot permissions.",
+            )
 
         write_log("INFO", Discord, "INIT", str(app.user), f"Bot online and ready (id={app.user.id}).")
 
@@ -36,8 +39,6 @@ async def clear(ctx: Context, limit: int = Discord.MAX_DELETE_LIMIT) -> None:
         return
 
     try:
-        database.clear_file()
-
         async for msg in ctx.channel.history(limit=limit):
             if msg.author in {ctx.author, app.user}:
                 try:

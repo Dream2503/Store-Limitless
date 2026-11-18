@@ -2,8 +2,8 @@ from traceback import format_exc
 
 import core.discord_utils.commands
 import core.discord_utils.transfer
+from core.data_center import Discord
 from core.discord_utils.setup import app
-from core.module import Discord
 from core.utils import write_log
 
 

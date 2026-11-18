@@ -1,9 +1,10 @@
-from core.settings import getenv
 from discord import TextChannel
 from telegram import ChatFullInfo
 
+from core.settings import getenv
 
-class Module:
+
+class DataCenter:
     pass
 
 
@@ -15,11 +16,17 @@ class ConfigMeta(type):
         return cls.__name__
 
 
-class Database(Module, metaclass=ConfigMeta):
+class Database(DataCenter, metaclass=ConfigMeta):
+    NAME: str = "Database"
     pass
 
 
-class Discord(Module, metaclass=ConfigMeta):
+class BackEnd(Database, metaclass=ConfigMeta):
+    NAME: str = "BackEnd"
+    pass
+
+
+class Discord(DataCenter, metaclass=ConfigMeta):
     NAME: str = "Discord"
     TOKEN: str = getenv("DISCORD_TOKEN")
     ADMIN: int = int(getenv("DISCORD_ADMIN"))
@@ -29,7 +36,7 @@ class Discord(Module, metaclass=ConfigMeta):
     FILE_DUMP: TextChannel | None = None
 
 
-class Telegram(Module, metaclass=ConfigMeta):
+class Telegram(DataCenter, metaclass=ConfigMeta):
     NAME: str = "Telegram"
     TOKEN: str = getenv("TELEGRAM_TOKEN")
     ADMIN: int = int(getenv("TELEGRAM_ADMIN"))

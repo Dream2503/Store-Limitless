@@ -2,12 +2,13 @@ from io import BytesIO
 from pathlib import Path
 from traceback import format_exc
 
-from backend import database
-from core.module import Telegram
-from core.settings import TRANSFER_PATH
-from core.utils import write_log
 from telegram import File, Message, Update
 from telegram.ext import ContextTypes
+
+from backend import database
+from core.data_center import Telegram
+from core.settings import TRANSFER_PATH
+from core.utils import write_log
 
 
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

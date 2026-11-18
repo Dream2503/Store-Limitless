@@ -905,7 +905,7 @@ export default function ViewFile({active = true} = {}) {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [active, navigate]);
+    }, [active, kind, navigate]);
 
     const createPublicShareId = useCallback(async () => {
         if (!fileId) throw new Error("Open an owned file to create a public link.");

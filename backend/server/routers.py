@@ -1,9 +1,16 @@
-from fastapi import APIRouter, HTTPException, UploadFile, Form
+from json import dumps
+from os import listdir
+from pathlib import Path
+from typing import AsyncGenerator
 
-from backend.database.schema import File
-from backend.database import add_user, get_user, LoginRequest, User
+from fastapi import APIRouter, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
+
+from backend.database import add_user, File, get_user, LoginRequest, User
 from backend.server.jwt_handler import create_access_token
 from backend.server.security import hash_password, verify_password
+from core.data_center import BackEnd
+from core.settings import TRANSFER_PATH
 from core.transfer import upload
 
 router: APIRouter = APIRouter(prefix="/auth")
@@ -29,26 +36,33 @@ def login(credentials: LoginRequest) -> dict[str, str]:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     access_token: str = create_access_token(data={"sub": user.username})
-
     return {
         "Message": "Login successful",
         "access_token": access_token,
         "token_type": "bearer",
     }
 
+
 @router.post("/upload")
-async def upload_route(
-    file: UploadFile,data_center: str = Form(...),uid: int = Form(...)
-):
-    
-    contents = await file.read()
-    
-    file_job = File(
-        fname=file.filename,
-        flinks=[],
-        data_center=data_center,
-        uid=uid
-    )
-    upload(file_job)
-    
-    return {"message": "File uploaded successfully"}
+async def upload_route(file: UploadFile, data_center: str = Form(...), uid: int = Form(...)) -> StreamingResponse:
+    if not file.filename:
+        raise ValueError("No file name provided in /upload")
+
+    file_path: Path = TRANSFER_PATH / file.filename
+
+    with open(file_path, "wb") as buffer:
+        while chunk := await file.read(BackEnd.MAX_SIZE):
+            buffer.write(chunk)
+
+    file_job: File = File(fname=file.filename, flinks=[], data_center=data_center, uid=uid)
+
+    async def progress_stream() -> AsyncGenerator[str, None]:
+        async for progress in upload(file_job):
+            yield dumps({"progress": progress}) + "\n"
+
+    return StreamingResponse(progress_stream(), media_type="text/plain")
+
+
+@router.get("/files")
+def get_files() -> list[dict[str, int | str]]:
+    return [{"id": i, "name": filename} for i, filename in enumerate(listdir(TRANSFER_PATH))]

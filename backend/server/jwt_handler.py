@@ -13,9 +13,9 @@ ALGORITHM: str = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
 
-def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+def create_access_token(data: dict[str, str], expires_delta: timedelta = None) -> str:
+    to_encode: dict[str, str | datetime] = data.copy()
+    expire: datetime = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
     encode: str = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encode
@@ -29,7 +29,7 @@ def verify_token(token: str) -> str | None:
         return None
 
 
-def get_current_user(token: str = Depends(OAuth2_scheme)):
+def get_current_user(token: str = Depends(OAuth2_scheme)) -> User:
     username: str | None = verify_token(token)
 
     if username is None:

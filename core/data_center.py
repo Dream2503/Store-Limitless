@@ -1,11 +1,27 @@
+from asyncio import AbstractEventLoop
+
 from discord import TextChannel
-from telegram import ChatFullInfo
+from telegram.ext import Application
 
 from core.settings import getenv
 
 
 class DataCenter:
-    pass
+    def __new__(cls, name: str):
+        match name:
+            case Discord.NAME:
+                return Discord
+
+            case Telegram.NAME:
+                return Telegram
+
+            case Database.NAME:
+                return Database
+
+            case BackEnd.NAME:
+                return BackEnd
+
+        return None
 
 
 class ConfigMeta(type):
@@ -18,12 +34,11 @@ class ConfigMeta(type):
 
 class Database(DataCenter, metaclass=ConfigMeta):
     NAME: str = "Database"
-    pass
 
 
 class BackEnd(Database, metaclass=ConfigMeta):
     NAME: str = "BackEnd"
-    pass
+    MAX_SIZE: int = 10_000_000
 
 
 class Discord(DataCenter, metaclass=ConfigMeta):
@@ -31,9 +46,10 @@ class Discord(DataCenter, metaclass=ConfigMeta):
     TOKEN: str = getenv("DISCORD_TOKEN")
     ADMIN: int = int(getenv("DISCORD_ADMIN"))
     FILE_DUMP_ID: int = int(getenv("DISCORD_FILE_DUMP_ID"))
-    MAX_SIZE: int = int(getenv("DISCORD_MAX_SIZE"))
-    MAX_DELETE_LIMIT: int = int(getenv("DISCORD_MAX_DELETE_LIMIT"))
-    FILE_DUMP: TextChannel | None = None
+    MAX_SIZE: int = 10_000_000
+    MAX_DELETE_LIMIT: int = 100
+    FILE_DUMP: TextChannel
+    LOOP: AbstractEventLoop
 
 
 class Telegram(DataCenter, metaclass=ConfigMeta):
@@ -41,6 +57,6 @@ class Telegram(DataCenter, metaclass=ConfigMeta):
     TOKEN: str = getenv("TELEGRAM_TOKEN")
     ADMIN: int = int(getenv("TELEGRAM_ADMIN"))
     FILE_DUMP_ID: int = int(getenv("TELEGRAM_FILE_DUMP_ID"))
-    MAX_SIZE: int = int(getenv("TELEGRAM_MAX_SIZE"))
-    MAX_DELETE_LIMIT: int = int(getenv("TELEGRAM_MAX_DELETE_LIMIT"))
-    FILE_DUMP: ChatFullInfo | None = None
+    MAX_SIZE: int = 10_000_000
+    MAX_DELETE_LIMIT: int = 100
+    FILE_DUMP: Application

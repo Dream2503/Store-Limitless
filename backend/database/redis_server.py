@@ -211,6 +211,7 @@ class Redis:
                             data_center=cast("str", record["data_center"]),
                             links=cast("list[str]", record["links"]),
                             username=cast("str", record["username"]),
+                            public_slug=str(record.get("public_slug") or ""),
                         )
                         for record in records
                     ]
@@ -376,7 +377,8 @@ class Redis:
                            data_center,
                            links,
                            deleted_at,
-                           username
+                           username,
+                           public_slug
                     FROM files
                     WHERE username = %s;
                     """,
@@ -440,6 +442,7 @@ class Redis:
                         "data_center": value.data_center,
                         "links": value.links,
                         "username": value.username,
+                        "public_slug": value.public_slug,
                     },
                     default=str,
                 ),

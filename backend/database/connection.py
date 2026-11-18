@@ -18,7 +18,8 @@ try:
     FileDict: TypeAlias = dict[str, int | str | datetime | list[str] | None]
 
     POOL: ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]] = cast(
-        "ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]]", cast("object", ConnectionPool(
+        "ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]]",
+        cast("object", ConnectionPool(
             DATABASE_URL,
             kwargs={"row_factory": dict_row},
         ))
@@ -60,8 +61,11 @@ try:
                 data_center  TEXT        NOT NULL,
                 links        TEXT[]      NOT NULL,
                 deleted_at   TIMESTAMPTZ,
-                username     TEXT        NOT NULL,
                 public_slug  TEXT        NOT NULL DEFAULT replace(gen_random_uuid()::text, '-', ''),
+                username     TEXT        NOT NULL,
+
+                CONSTRAINT ck_files_public_slug_format
+                    CHECK (length(public_slug) = 32 AND public_slug ~ '^[0-9a-f]+$'),
 
                 CONSTRAINT fk_files_directory
                     FOREIGN KEY (directory_id)
@@ -72,11 +76,12 @@ try:
                         REFERENCES users (username)
             );
 
-            -- Move existing public share IDs onto their file rows before removing the old table.
+            -- Upgrade databases that already have the files table.
             ALTER TABLE files ADD COLUMN IF NOT EXISTS public_slug TEXT;
             ALTER TABLE files
                 ALTER COLUMN public_slug SET DEFAULT replace(gen_random_uuid()::text, '-', '');
 
+            -- If an older deployment still has public_links, copy its current IDs first.
             DO $public_link_migration$
             BEGIN
                 IF to_regclass('public.public_links') IS NOT NULL THEN
@@ -88,18 +93,26 @@ try:
                           AND pl.username = f.username
                     ';
                 END IF;
-            END
+            END;
             $public_link_migration$;
 
-            -- Every old file without a previously-issued link receives one now.
+            -- Give every file one canonical 32-character lowercase hexadecimal slug.
             UPDATE files
             SET public_slug = replace(gen_random_uuid()::text, '-', '')
-            WHERE public_slug IS NULL OR public_slug = '';
+            WHERE public_slug IS NULL
+               OR length(public_slug) <> 32
+               OR public_slug !~ '^[0-9a-f]+$';
 
             ALTER TABLE files ALTER COLUMN public_slug SET NOT NULL;
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug ON files (public_slug);
-            DROP TABLE IF EXISTS public_links;
 
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_files_public_slug
+                ON files (public_slug);
+
+            ALTER TABLE files DROP CONSTRAINT IF EXISTS ck_files_public_slug_format;
+            ALTER TABLE files ADD CONSTRAINT ck_files_public_slug_format
+                CHECK (length(public_slug) = 32 AND public_slug ~ '^[0-9a-f]+$');
+
+            DROP TABLE IF EXISTS public_links;
             """
         )
         connection.commit()

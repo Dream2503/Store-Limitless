@@ -28,6 +28,7 @@ class File(BaseModel):
     data_center: str
     links: list[str]
     username: str
+    public_slug: str = ""
 
     def __repr__(self) -> str:
         """Return a readable representation of the file metadata."""
@@ -42,7 +43,8 @@ class File(BaseModel):
             f"deleted_at={self.deleted_at}, "
             f"data_center={self.data_center!r}, "
             f"links={self.links!r}, "
-            f"username={self.username!r})"
+            f"username={self.username!r}, "
+            f"public_slug={self.public_slug!r})"
         )
 
     async def save(self) -> None:
@@ -63,11 +65,11 @@ class File(BaseModel):
 
         with POOL.connection() as connection:
             try:
-                self.id = cast("dict[str, int]", connection.execute(
+                inserted = connection.execute(
                     """
                     INSERT INTO files (directory_id, name, type, size, modified_at, data_center, links, deleted_at, username)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id;
+                    RETURNING id, public_slug;
                     """,
                     (
                         self.directory_id,
@@ -80,7 +82,13 @@ class File(BaseModel):
                         self.deleted_at,
                         self.username,
                     ),
-                ).fetchone())["id"]
+                ).fetchone()
+
+                if inserted is None:
+                    raise RuntimeError("PostgreSQL did not return the inserted file ID and public slug")
+
+                self.id = int(inserted["id"])
+                self.public_slug = str(inserted["public_slug"])
 
                 connection.commit()
                 await Redis.set(f"user:{self.username}:files", self)
@@ -156,18 +164,19 @@ class File(BaseModel):
 
         with POOL.connection() as connection:
             try:
-                connection.execute(
+                updated = connection.execute(
                     """
                     UPDATE files
                     SET directory_id = %s,
                         name         = %s,
                         type         = %s,
-                        size         = %s,
+                        size          = %s,
                         modified_at  = %s,
                         deleted_at   = %s,
                         data_center  = %s,
                         links        = %s
-                    WHERE id = %s;
+                    WHERE id = %s
+                    RETURNING public_slug;
                     """,
                     (
                         self.directory_id,
@@ -180,7 +189,11 @@ class File(BaseModel):
                         self.links,
                         self.id,
                     ),
-                )
+                ).fetchone()
+
+                if updated is not None:
+                    self.public_slug = str(updated["public_slug"])
+
                 connection.commit()
                 await Redis.set(f"user:{self.username}:files", self)
 

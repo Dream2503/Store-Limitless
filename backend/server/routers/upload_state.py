@@ -491,12 +491,32 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
             await Redis.redis.srem(index_key, batch_id)
             continue
 
-        # Self-heal batches that stayed "uploading" because the browser never received the
-        # child's terminal status or could not send its final batch PATCH.
+        # The browser normally publishes current_job_id, but a frontend hot reload
+        # can interrupt that PATCH after the backend has already registered the child.
+        # Recover it from the batch's persisted child list instead of relying on UI memory.
         if metadata.get("kind") == "link" and metadata.get("status") in {"queued", "uploading"}:
-            child_job_id = str(metadata.get("current_job_id") or "")
-            if child_job_id:
-                await reconcile_completed_link_batch(batch_id, username, child_job_id)
+            current_child_id = str(metadata.get("current_job_id") or "")
+            child_ids = [str(value) for value in metadata.get("child_job_ids", []) if str(value)]
+            candidates = ([current_child_id] if current_child_id else []) + [
+                child_id for child_id in reversed(child_ids) if child_id != current_child_id
+            ]
+
+            for candidate_id in candidates:
+                child_metadata = await get_upload_job_metadata(candidate_id)
+                if (
+                        child_metadata is not None
+                        and child_metadata.get("username") == username
+                        and str(child_metadata.get("batch_id") or "") == batch_id
+                        and child_metadata.get("kind") == "link"
+                ):
+                    if current_child_id != candidate_id:
+                        metadata["current_job_id"] = candidate_id
+                        await Redis.set_json(upload_batch_key(batch_id), metadata)
+                    current_child_id = candidate_id
+                    break
+
+            if current_child_id:
+                await reconcile_completed_link_batch(batch_id, username, current_child_id)
                 metadata = await get_upload_batch_metadata(batch_id) or metadata
 
         total_items = max(1, int(metadata.get("total_items") or 0))
@@ -520,6 +540,8 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
         is_youtube_source = source_host in {"youtube.com", "youtu.be"} or source_host.endswith(".youtube.com")
         source_path_name = (parsed_source.path.rstrip("/").rsplit("/", 1)[-1] if parsed_source else "")
         placeholder_names = {"", "link", "upload", "torrent", "watch", "shorts", "embed", "live", "video", "update_name_from_backend"}
+
+        items_changed = False
 
         if current_job_id:
             try:
@@ -549,10 +571,107 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                     else:
                         current_message = progress_message
 
+                # Terminal child outcomes must update the parent batch even when
+                # the browser-side polling loop vanished during HMR or navigation.
+                child_metadata = await get_upload_job_metadata(current_job_id)
+                child_status = resolve_upload_job_status(
+                    progress_message,
+                    child_metadata if child_metadata and child_metadata.get("username") == username else {},
+                )
+                if (
+                        child_metadata
+                        and child_metadata.get("username") == username
+                        and str(child_metadata.get("batch_id") or "") == batch_id
+                        and child_status in {"error", "cancelled"}
+                        and metadata.get("status") in {"queued", "uploading"}
+                ):
+                    metadata["status"] = child_status
+                    metadata["message"] = progress_message or (
+                        "Upload cancelled" if child_status == "cancelled" else "Upload failed"
+                    )
+                    active_seen = False
+                    for item in items:
+                        if item.get("status") in {"downloading", "uploading"}:
+                            if child_status == "cancelled":
+                                item["status"] = "cancelled"
+                                item["message"] = "Cancelled"
+                            elif not active_seen:
+                                item["status"] = "error"
+                                item["message"] = metadata["message"]
+                                active_seen = True
+                            else:
+                                item["status"] = "skipped"
+                                item["message"] = "Not started after failure"
+                            items_changed = True
+                        elif child_status == "cancelled" and item.get("status") == "queued":
+                            item["status"] = "cancelled"
+                            item["message"] = "Cancelled"
+                            items_changed = True
+                        elif child_status == "error" and item.get("status") == "queued":
+                            item["status"] = "skipped"
+                            item["message"] = "Not started after failure"
+                            items_changed = True
+                    metadata["completed_items"] = sum(1 for item in items if item.get("status") == "completed")
+                    items_changed = True
+
+                # The child process is the source of truth for torrent file-level progress.
+                # Rebuild the tray items from Redis on every batch poll so a frontend reload
+                # or hot-module replacement cannot strand the tray at its last browser PATCH.
+                child_items = getattr(child_progress, "torrent_items", []) or []
+                if child_items and str(metadata.get("kind") or "") == "link":
+                    child_by_index = {
+                        int(child_item["file_index"]): child_item
+                        for child_item in child_items
+                        if isinstance(child_item, dict) and child_item.get("file_index") is not None
+                    }
+                    for item in items:
+                        if item.get("file_index") is None:
+                            continue
+                        try:
+                            child_item = child_by_index.get(int(item["file_index"]))
+                        except (TypeError, ValueError):
+                            child_item = None
+                        if child_item is None:
+                            continue
+
+                        child_status = str(child_item.get("status") or item.get("status") or "queued")
+                        child_transfer = max(0, int(child_item.get("transfer") or 0))
+                        child_total = max(0, int(child_item.get("total") or item.get("size") or 0))
+                        child_name = str(child_item.get("name") or item.get("name") or "")
+                        child_message = str(child_item.get("message") or child_status.title())
+                        if (
+                                item.get("status") != child_status
+                                or int(item.get("transfer") or 0) != child_transfer
+                                or int(item.get("total") or item.get("size") or 0) != child_total
+                                or item.get("name") != child_name
+                                or item.get("message") != child_message
+                        ):
+                            item.update({
+                                "status": child_status,
+                                "transfer": child_transfer,
+                                "total": child_total,
+                                "size": child_total,
+                                "name": child_name,
+                                "message": child_message,
+                            })
+                            items_changed = True
+
+                    completed_from_child = sum(1 for item in items if item.get("status") == "completed")
+                    if int(metadata.get("completed_items") or 0) != completed_from_child:
+                        metadata["completed_items"] = completed_from_child
+                        items_changed = True
+
+                    active_item = next(
+                        (item for item in items if item.get("status") in {"downloading", "uploading"}),
+                        None,
+                    )
+                    if active_item is not None:
+                        current_name = str(active_item.get("name") or current_name)
+                        current_message = str(active_item.get("message") or current_message)
+
             except KeyError:
                 pass
 
-        items_changed = False
 
         if str(metadata.get("kind") or "") == "link" and current_name and 0 <= current_index < len(items):
             submitted_name = str(items[current_index].get("name") or "")
@@ -565,6 +684,10 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
             metadata["items"] = items
             await Redis.set_json(upload_batch_key(batch_id), metadata)
 
+        # The child progress above may have completed another torrent file during
+        # this poll. Re-read the reconciled count before calculating the batch bar,
+        # rather than displaying the previous poll's completed-file count.
+        completed_items = max(0, min(int(metadata.get("completed_items") or 0), total_items))
         current_fraction = min(1.0, current_transfer / current_total) if current_total else 0.0
         status = str(metadata.get("status") or "queued")
         progress = 100.0 if status == "completed" else min(99.0, ((completed_items + current_fraction) / total_items) * 100.0)

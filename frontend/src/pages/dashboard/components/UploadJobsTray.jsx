@@ -137,30 +137,44 @@ function formatEta(seconds) {
  * progress-detail markup. Brief status changes and a quiet polling interval should
  * not throw away the last useful rate estimate.
  */
-function useTransferMetrics(transfer, total) {
-    const [speed, setSpeed] = useState(0);
-    const previous = useRef({transfer: num(transfer), at: Date.now()});
+function useTransferMetrics(transfer, total, metricKey) {
+    const key = String(metricKey || "upload-tray:unknown");
+    const currentTransfer = num(transfer);
+    const [speed, setSpeed] = useState(() => {
+        const cache = window.__storeLimitlessTransferMetrics;
+        return num(cache instanceof Map ? cache.get(key)?.speed : 0);
+    });
+    const previous = useRef(null);
 
     useEffect(() => {
-        const now = Date.now();
-        const currentTransfer = num(transfer);
-        const prior = previous.current;
-        const elapsed = (now - prior.at) / 1000;
-
-        if (currentTransfer < prior.transfer) {
-            // A new transfer phase or resumed transfer reset its byte counter.
-            setSpeed(0);
-        } else if (elapsed >= 0.25 && currentTransfer > prior.transfer) {
-            const measuredSpeed = (currentTransfer - prior.transfer) / elapsed;
-            setSpeed((currentSpeed) => currentSpeed > 0
-                ? currentSpeed * 0.7 + measuredSpeed * 0.3
-                : measuredSpeed);
+        // Keep display metrics on window so remounts and frontend HMR preserve the
+        // last sample while the server continues the real transfer.
+        if (!(window.__storeLimitlessTransferMetrics instanceof Map)) {
+            window.__storeLimitlessTransferMetrics = new Map();
         }
 
-        previous.current = {transfer: currentTransfer, at: now};
-    }, [transfer]);
+        const cache = window.__storeLimitlessTransferMetrics;
+        const now = Date.now();
+        const prior = previous.current || cache.get(key) || {transfer: currentTransfer, at: now, speed: 0};
+        const elapsed = Math.max(0, (now - prior.at) / 1000);
+        let nextSpeed = num(prior.speed);
 
-    const remaining = Math.max(0, num(total) - num(transfer));
+        if (currentTransfer < prior.transfer) {
+            nextSpeed = 0;
+        } else if (elapsed >= 0.25 && currentTransfer > prior.transfer) {
+            const measuredSpeed = (currentTransfer - prior.transfer) / elapsed;
+            nextSpeed = nextSpeed > 0 ? nextSpeed * 0.7 + measuredSpeed * 0.3 : measuredSpeed;
+        } else if (elapsed >= 4 && currentTransfer <= prior.transfer) {
+            nextSpeed = 0;
+        }
+
+        const sample = {transfer: currentTransfer, at: now, speed: nextSpeed};
+        previous.current = sample;
+        cache.set(key, sample);
+        setSpeed(nextSpeed);
+    }, [currentTransfer, key]);
+
+    const remaining = Math.max(0, num(total) - currentTransfer);
     const eta = speed > 0 && remaining > 0 ? remaining / speed : null;
     return {speed, eta, remaining};
 }
@@ -184,12 +198,12 @@ function TransferDetails({transfer, total, status, compact = false, speed = 0, e
 }
 
 /** A single file/item line, shared by torrent panels and plain multi-item batches. */
-function ItemRow({item, status}) {
+function ItemRow({item, status, metricKey}) {
     const meta = ITEM_STATUS[status] || ITEM_STATUS.queued;
     const {size, percent} = getItemProgress(item, status);
     const transfer = status === "completed" ? size : num(item.transfer);
-    const {speed, eta} = useTransferMetrics(transfer, size);
     const name = getFileName(item);
+    const {speed, eta} = useTransferMetrics(transfer, size, metricKey || `item:${normalizePath(item?.path || name)}`);
     const showPercent = meta.transferring && size > 0;
 
     return <div className="min-w-0 rounded-md px-2 py-1.5 transition-colors hover:bg-white/[0.03]">
@@ -247,7 +261,9 @@ function TorrentLinkPanel({torrent, items, parentStatus, index}) {
         {selectedCount > 0 && <ProgressBar percent={percent} className="rounded-none"/>}
         <div className="space-y-0.5 p-1.5">
             {files.length ? files.map((file, i) => <ItemRow key={`${file.file_index ?? file.index ?? getFileName(file)}-${i}`}
-                                                            item={file} status={String(file.status || (selectedCount ? "queued" : "available"))}/>) :
+                                                            item={file}
+                                                            metricKey={`torrent:${torrent?.link || title}:${file.file_index ?? file.index ?? i}`}
+                                                            status={String(file.status || (selectedCount ? "queued" : "available"))}/>) :
                 <p className="px-2 py-2 text-[11px] text-[#718477]">Waiting for torrent file selection.</p>}
         </div>
     </section>;
@@ -568,7 +584,13 @@ function describeJob(job) {
     const usableCurrent = currentName && !isUnresolvedName(rawCurrentName, sourceIsYouTube) ? currentName : "";
     const singleName = singleItem ? getFileName(singleItem) : "";
     const usableItem = singleName && !isUnresolvedName(rawItemName, sourceIsYouTube) ? singleName : "";
-    const title = singleItem ? usableCurrent || usableItem || (sourceIsYouTube ? "YouTube video" : singleName || job.name || "Upload task") : job.kind === "link" && (itemCount > 1 || torrents.length > 1) ? "Link import" : job.name || "Upload task";
+    const torrentName = String(torrents[0]?.name || "").trim();
+    const firstItemName = items.length ? getFileName(items[0]) : "";
+    const title = singleItem
+        ? usableCurrent || usableItem || (sourceIsYouTube ? "YouTube video" : singleName || job.name || "Upload task")
+        : job.kind === "link"
+            ? usableCurrent || torrentName || firstItemName || job.name || "Upload task"
+            : job.name || "Upload task";
 
     /*
      * Prefer item-level byte counts when available. This gives multi-file tasks a
@@ -580,12 +602,10 @@ function describeJob(job) {
     const hasDetailedItems = items.length > 0 && items.some((item) => num(item.size) > 0 || num(item.total) > 0);
     const itemTotal = hasDetailedItems ? items.reduce((sum, item) => sum + (num(item.size) || num(item.total)), 0) : 0;
 
-    // Torrent files are downloaded to the server before they are uploaded to the
-    // selected storage provider. During the upload phase, `downloaded` means the
-    // source download is ready, not that the file has been stored. Count only
-    // completed storage uploads plus the bytes of the currently uploading file.
-    // While the torrent itself is still downloading, keep using its download
-    // progress so the parent bar remains useful during that earlier phase.
+    // Each torrent file is uploaded as soon as it finishes downloading. During
+    // storage upload, count completed files plus the bytes transferred for the
+    // currently uploading file; do not count a fully downloaded-but-not-yet-stored
+    // file as completed upload progress.
     const torrentUploadPhase = hasTorrentItems && items.some((item) => item.status === "uploading" || item.status === "completed");
     const itemTransfer = hasDetailedItems ? items.reduce((sum, item) => {
         const size = num(item.size) || num(item.total);
@@ -612,7 +632,14 @@ function describeJob(job) {
     const itemsLabel = `${itemCount} items`;
 
     let statusText;
-    if (isComplete) statusText = singleItem ? "Completed" : `Completed · ${itemsLabel}`; else if (isError) statusText = job.message || "Some items failed"; else if (isCancelled) statusText = "Cancelled"; else if (isQueued) statusText = singleItem ? "Queued" : `Queued · ${itemsLabel}`; else if (stageText) statusText = stageText; else if (singleItem) statusText = sourceIsYouTube ? "Processing video" : "Uploading"; else statusText = `${finished} of ${itemCount} complete${currentName && !isHttpUrl(rawCurrentName) ? ` · ${currentName}` : ""}`;
+    if (isComplete) statusText = singleItem ? "Completed" : `Completed · ${itemsLabel}`; else if (isError) statusText = job.message || "Some items failed"; else if (isCancelled) statusText = "Cancelled"; else if (isQueued) statusText = singleItem ? "Queued" : `Queued · ${itemsLabel}`; else if (stageText) statusText = stageText; else if (singleItem) statusText = sourceIsYouTube ? "Processing video" : "Uploading"; else {
+        const headingName = String(title || "").trim().toLocaleLowerCase();
+        const currentNameKey = String(currentName || "").trim().toLocaleLowerCase();
+        const leafNameKey = leafOf(title).toLocaleLowerCase();
+        const repeatedCurrentName = currentNameKey && (currentNameKey === headingName || currentNameKey === leafNameKey);
+        const currentNameSuffix = currentName && !repeatedCurrentName && !isHttpUrl(rawCurrentName) ? ` · ${currentName}` : "";
+        statusText = `${finished} of ${itemCount} complete${currentNameSuffix}`;
+    }
 
     const tone = isError || isCancelled ? "danger" : isComplete ? "success" : "muted";
     const icon = isError ? "error" : isCancelled ? "cancel" : isComplete ? "check_circle" : isQueued ? "schedule" : "upload_file";
@@ -623,7 +650,7 @@ function describeJob(job) {
 
 function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
     const {isQueued, isActive, itemCount, title, statusText, statusTone, icon, iconTone, percent, transfer, total} = describeJob(job);
-    const {speed, eta} = useTransferMetrics(transfer, total);
+    const {speed, eta} = useTransferMetrics(transfer, total, `batch:${job.jobId}`);
     const torrents = job.torrentFiles || [];
     const items = Array.isArray(job.items) ? job.items : [];
     const hasPicker = torrents.length === 1 && job.status === "queued";
@@ -655,7 +682,7 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
 
 
                 {itemCount > 1 && items.length > 0 && <div className="mt-2.5 space-y-0.5 rounded-lg border border-[#29362e] bg-black/10 p-1.5">
-                    {items.map((item, i) => <ItemRow key={`${getFileName(item)}-${i}`} item={item} status={String(item.status || "queued")}/>)}
+                    {items.map((item, i) => <ItemRow key={`${getFileName(item)}-${i}`} item={item} metricKey={`batch:${job.jobId}:item:${item.file_index ?? item.name}:${i}`} status={String(item.status || "queued")}/>)}
                 </div>}
             </div>
 

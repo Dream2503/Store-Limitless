@@ -9,12 +9,15 @@ import UploadTrayPage from "./pages/dashboard/components/UploadTrayPage.jsx";
 
 
 /**
- * Reload the current page after an intentional upward wheel gesture or downward
- * touch pull at the top of the entire scroll chain, including nested scroll areas.
+ * Reload the current page after a deliberate downward touch pull at the top
+ * of the entire scroll chain, including nested scroll areas.
  */
 function installTopEdgeRefresh() {
-    let wheelDistance = 0;
-    let lastWheelAt = 0;
+    // Pull-to-refresh is a phone gesture, not a desktop trackpad/mouse interaction.
+    // Keep the listener entirely off desktop and coarse-pointer devices with a
+    // viewport wider than a typical phone.
+    const mobilePhoneQuery = window.matchMedia("(max-width: 767px) and (pointer: coarse)");
+    let listenersInstalled = false;
     let touchStartY = 0;
     let touchDistance = 0;
     let touchEligible = false;
@@ -39,24 +42,6 @@ function installTopEdgeRefresh() {
 
     const refresh = () => {
         window.location.reload();
-    };
-
-    const handleWheel = (event) => {
-        if (event.deltaY >= 0 || !isAtTopOfScrollChain(event.target)) {
-            wheelDistance = 0;
-            lastWheelAt = 0;
-            return;
-        }
-
-        const now = performance.now();
-        if (now - lastWheelAt > 350) wheelDistance = 0;
-        lastWheelAt = now;
-        wheelDistance += Math.abs(event.deltaY);
-
-        if (wheelDistance >= 90) {
-            wheelDistance = 0;
-            refresh();
-        }
     };
 
     const handleTouchStart = (event) => {
@@ -91,18 +76,38 @@ function installTopEdgeRefresh() {
         touchDistance = 0;
     };
 
-    window.addEventListener("wheel", handleWheel, {passive: true});
-    window.addEventListener("touchstart", handleTouchStart, {passive: true});
-    window.addEventListener("touchmove", handleTouchMove, {passive: true});
-    window.addEventListener("touchend", handleTouchEnd, {passive: true});
-    window.addEventListener("touchcancel", handleTouchEnd, {passive: true});
+    const addTouchListeners = () => {
+        if (listenersInstalled) return;
+        listenersInstalled = true;
+        window.addEventListener("touchstart", handleTouchStart, {passive: true});
+        window.addEventListener("touchmove", handleTouchMove, {passive: true});
+        window.addEventListener("touchend", handleTouchEnd, {passive: true});
+        window.addEventListener("touchcancel", handleTouchEnd, {passive: true});
+    };
 
-    return () => {
-        window.removeEventListener("wheel", handleWheel);
+    const removeTouchListeners = () => {
+        if (!listenersInstalled) return;
+        listenersInstalled = false;
         window.removeEventListener("touchstart", handleTouchStart);
         window.removeEventListener("touchmove", handleTouchMove);
         window.removeEventListener("touchend", handleTouchEnd);
         window.removeEventListener("touchcancel", handleTouchEnd);
+        touchEligible = false;
+        touchTriggered = false;
+        touchDistance = 0;
+    };
+
+    const syncDeviceListeners = () => {
+        if (mobilePhoneQuery.matches) addTouchListeners();
+        else removeTouchListeners();
+    };
+
+    syncDeviceListeners();
+    mobilePhoneQuery.addEventListener("change", syncDeviceListeners);
+
+    return () => {
+        mobilePhoneQuery.removeEventListener("change", syncDeviceListeners);
+        removeTouchListeners();
     };
 }
 

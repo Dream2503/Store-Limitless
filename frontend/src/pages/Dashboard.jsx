@@ -76,6 +76,18 @@ function replacePathPrefix(pathValue, oldPath, newPath) {
 }
 
 /**
+ * Match the case-insensitive lexical ordering used by the backend models.
+ * @param {string | undefined | null} left
+ * @param {string | undefined | null} right
+ * @returns {number}
+ */
+function compareCaseInsensitive(left, right) {
+    const a = String(left ?? "").toLowerCase();
+    const b = String(right ?? "").toLowerCase();
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
  * Render file browsing, search, selection, and file-management interactions.
  * @returns {import("react").ReactElement}
  */
@@ -1132,7 +1144,7 @@ export default function DashboardPage() {
             if (!path.startsWith(`${currentFolder}/`)) return false;
             const remainder = path.slice(currentFolder.length + 1);
             return remainder && !remainder.includes("/");
-        });
+        }).sort((a, b) => compareCaseInsensitive(a.path, b.path));
     }, [folders, currentFolder, isTrash]);
 
     const visibleFiles = useMemo(() => {
@@ -1140,7 +1152,7 @@ export default function DashboardPage() {
             if (file.name === ".__folder__") return false;
             if (isTrash) return Boolean(file.is_deleted);
             return !file.is_deleted && (file.directory || "") === currentFolder;
-        });
+        }).sort((a, b) => compareCaseInsensitive(a.name, b.name));
     }, [files, currentFolder, isTrash]);
 
     const isSearching = Boolean(searchQuery.trim());

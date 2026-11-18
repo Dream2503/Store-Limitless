@@ -810,7 +810,7 @@ async def download_torrent_to_disk(
 
 
 async def download_torrent(file: File, link: str, selected_indices: set[int] | None = None) -> AsyncGenerator[Progress, None]:
-    """Download selected magnet files, then upload them sequentially."""
+    """Upload each selected torrent file as soon as it finishes downloading."""
 
     from core.transfer import file_upload
 
@@ -828,106 +828,256 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
     temp_dir: Path = TRANSFER_PATH / file.username / "torrent-download" / uuid4().hex
     temp_dir.mkdir(parents=True, exist_ok=True)
     progress: Progress = Progress(file.name or "Torrent", "Connecting to torrent network", 0)
+    torrent_session: Any | None = None
+    handle: Any | None = None
 
     try:
         write_log("INFO", data_center, "TORRENT", file.username, f"Starting magnet download: {safe_link}")
-        download_result: dict[str, Any] = {}
+        torrent_session = libtorrent.session({
+            "listen_interfaces": "0.0.0.0:0",
+            "enable_dht": True,
+            "enable_lsd": True,
+            "enable_upnp": True,
+            "enable_natpmp": True,
+        })
+        handle = torrent_session.add_torrent({"url": link, "save_path": str(temp_dir)})
 
-        async for progress_value in download_torrent_to_disk(
-                link, temp_dir, progress, file.name or "Torrent", download_result, selected_indices
-        ):
+        async for progress_value in wait_for_torrent_metadata(handle, progress, file.name or "Torrent"):
             yield progress_value
 
-        if not download_result:
-            raise RuntimeError("Torrent downloader did not return its completed metadata")
+        torrent_info: Any = handle.torrent_file()
+        torrent_files: Any = torrent_info.files()
+        torrent_name_raw: str = str(torrent_info.name())
+        torrent_name_parts: tuple[str, ...] = torrent_relative_parts(torrent_name_raw)
 
-        torrent_files: Any = download_result["torrent_files"]
-        torrent_name_raw: str = str(download_result["torrent_name_raw"])
-        torrent_name: str = str(download_result["torrent_name"])
-        downloadable_files: list[tuple[int, Path, tuple[str, ...]]] = get_downloadable_torrent_files(
-            torrent_files,
-            temp_dir,
-            torrent_name_raw,
-            torrent_name,
-            selected_indices,
+        if len(torrent_name_parts) != 1:
+            raise ValueError("Torrent root name must be a single safe path component")
+
+        torrent_name_raw = torrent_name_parts[0]
+        torrent_name: str = safe_torrent_component(torrent_name_raw)
+        file_count: int = int(torrent_files.num_files())
+        padding_check: Callable = cast(Callable, getattr(torrent_files, "pad_file_at", None))
+        selected: set[int] = set(selected_indices) if selected_indices is not None else {
+            index for index in range(file_count)
+            if not callable(padding_check) or not padding_check(index)
+        }
+
+        if not selected or any(index < 0 or index >= file_count for index in selected):
+            raise ValueError("Torrent file selection is empty or contains invalid file indexes")
+
+        priorities = [4 if index in selected else 0 for index in range(file_count)]
+        handle.prioritize_files(priorities)
+
+        selected_order: list[int] = sorted(
+            index for index in selected
+            if not (callable(padding_check) and padding_check(index))
         )
+        if not selected_order:
+            raise OSError("Torrent selection did not contain any uploadable files")
 
-        if not downloadable_files:
-            raise OSError("Torrent completed but did not contain any uploadable files")
+        file_sizes = {index: int(torrent_files.file_size(index)) for index in selected_order}
+        total_upload_bytes: int = sum(file_sizes.values())
+        progress.name = torrent_name
+        progress.total = total_upload_bytes
+        progress.transfer = 0
+        progress.message = "Torrent metadata received; downloading selected files"
 
-        total_upload_bytes: int = sum(path.stat().st_size for _, path, _ in downloadable_files)
+        tray_items: list[dict[str, Any]] = []
+        for index in selected_order:
+            raw_path = str(torrent_files.file_path(index))
+            parts = torrent_relative_parts(raw_path)
+            display_parts = parts[1:] if len(parts) > 1 and parts[0] == torrent_name_raw else parts
+            tray_items.append({
+                "file_index": index,
+                "name": "/".join(display_parts) or Path(raw_path).name,
+                "transfer": 0,
+                "total": file_sizes[index],
+                "status": "queued",
+                "message": "Waiting for download",
+            })
+
+        progress.torrent_items = [dict(item) for item in tray_items]
+        yield progress
+
+        processed_indices: set[int] = set()
         saved_count: int = 0
         first_saved_id: int | None = None
-        tray_items: list[dict[str, Any]] = [
-            {
-                "file_index": torrent_file_index,
-                "name": "/".join(target_parts),
-                "transfer": path.stat().st_size,
-                "total": path.stat().st_size,
-                "status": "downloaded",
-                "message": "Downloaded · waiting to upload",
-            }
-            for torrent_file_index, path, target_parts in downloadable_files
-        ]
-        progress.torrent_items = [dict(item) for item in tray_items]
+        completed_bytes: int = 0
 
-        for item_number, (torrent_file_index, local_path, target_parts) in enumerate(downloadable_files, start=1):
-            target_directory: Directory = await ensure_torrent_directory(file.username, base_directory, target_parts[:-1])
-            target_name: str = target_parts[-1]
-            local_size: int = local_path.stat().st_size
+        while len(processed_indices) < len(selected_order):
+            status: Any = handle.status()
+            raise_torrent_error(status)
+            raw_file_progress = handle.file_progress()
+            file_progress = [max(0, int(value)) for value in raw_file_progress]
+            downloaded_bytes = 0
 
-            if saved_count == 0:
-                torrent_file: File = file
-                torrent_file.directory_id = cast(int, target_directory.id)
-                torrent_file.name = target_name
-                torrent_file.type = guess_type(target_name)[0] or "application/octet-stream"
-                torrent_file.size = local_size
-                torrent_file.modified_at = datetime.now(timezone.utc)
-                torrent_file.links = []
+            for item in tray_items:
+                index = int(item["file_index"])
+                size = file_sizes[index]
+                downloaded = min(size, file_progress[index]) if index < len(file_progress) else 0
+                if index not in processed_indices:
+                    item["transfer"] = downloaded
+                    item["status"] = "downloading" if downloaded > 0 else "queued"
+                    item["message"] = "Downloading" if downloaded > 0 else "Waiting for download"
+                elif item["status"] == "completed":
+                    downloaded = size
 
-            else:
-                torrent_file = File(
-                    directory_id=cast(int, target_directory.id),
-                    name=target_name,
-                    type=guess_type(target_name)[0] or "application/octet-stream",
-                    size=local_size,
-                    modified_at=datetime.now(timezone.utc),
-                    links=[],
-                    data_center=file.data_center,
-                    username=file.username,
+                downloaded_bytes += downloaded
+
+            # Do not wait for the torrent's global completion state. As soon as one
+            # selected file is fully present on disk, upload it before checking the
+            # remaining files again. file_upload removes the local file after success.
+            ready_index: int | None = None
+            ready_path: Path | None = None
+            ready_target_parts: tuple[str, ...] | None = None
+
+            for index in selected_order:
+                if index in processed_indices:
+                    continue
+
+                size = file_sizes[index]
+                downloaded = file_progress[index] if index < len(file_progress) else 0
+                if downloaded < size:
+                    continue
+
+                try:
+                    resolved = get_downloadable_torrent_files(
+                        torrent_files,
+                        temp_dir,
+                        torrent_name_raw,
+                        torrent_name,
+                        {index},
+                    )
+                except FileNotFoundError:
+                    continue
+
+                if not resolved:
+                    continue
+
+                candidate_index, candidate_path, target_parts = resolved[0]
+                if candidate_index != index or not candidate_path.is_file() or candidate_path.stat().st_size < size:
+                    continue
+
+                ready_index = index
+                ready_path = candidate_path
+                ready_target_parts = target_parts
+                break
+
+            if ready_index is not None and ready_path is not None and ready_target_parts is not None:
+                item = next(item for item in tray_items if int(item["file_index"]) == ready_index)
+                target_directory: Directory = await ensure_torrent_directory(
+                    file.username, base_directory, ready_target_parts[:-1]
                 )
+                target_name: str = ready_target_parts[-1]
+                relative_display_path: str = "/".join(ready_target_parts)
+                local_size: int = ready_path.stat().st_size
 
-            relative_display_path: str = "/".join(target_parts)
-            write_log(
-                "INFO",
-                data_center,
-                "TORRENT",
-                file.username,
-                f"Uploading torrent file {item_number}/{len(downloadable_files)}: {relative_display_path}",
-            )
-            tray_items[item_number - 1].update({"file_index": torrent_file_index, "transfer": 0, "status": "uploading", "message": "Uploading"})
+                if saved_count == 0:
+                    torrent_file: File = file
+                    torrent_file.directory_id = cast(int, target_directory.id)
+                    torrent_file.name = target_name
+                    torrent_file.type = guess_type(target_name)[0] or "application/octet-stream"
+                    torrent_file.size = local_size
+                    torrent_file.modified_at = datetime.now(timezone.utc)
+                    torrent_file.links = []
+                else:
+                    torrent_file = File(
+                        directory_id=cast(int, target_directory.id),
+                        name=target_name,
+                        type=guess_type(target_name)[0] or "application/octet-stream",
+                        size=local_size,
+                        modified_at=datetime.now(timezone.utc),
+                        links=[],
+                        data_center=file.data_center,
+                        username=file.username,
+                    )
 
-            async for upload_progress in file_upload(torrent_file, local_path, intermediate=True):
-                upload_progress.name = relative_display_path
-                upload_progress.message = f"Uploading file {item_number}/{len(downloadable_files)}"
-                upload_progress.transfer = min(local_size, max(0, int(upload_progress.transfer or 0)))
-                upload_progress.total = local_size
-                tray_items[item_number - 1].update({
-                    "transfer": upload_progress.transfer,
+                write_log(
+                    "INFO",
+                    data_center,
+                    "TORRENT",
+                    file.username,
+                    f"Uploading completed torrent file {saved_count + 1}/{len(selected_order)}: {relative_display_path}",
+                )
+                item.update({
+                    "name": relative_display_path,
+                    "transfer": 0,
                     "total": local_size,
                     "status": "uploading",
-                    "message": f"Uploading · {upload_progress.transfer * 100 / local_size:.1f}%" if local_size else "Uploading",
+                    "message": "Uploading",
                 })
-                upload_progress.torrent_items = [dict(item) for item in tray_items]
-                yield upload_progress
+                progress.name = relative_display_path
+                progress.message = f"Uploading file {saved_count + 1}/{len(selected_order)}"
+                progress.transfer = completed_bytes
+                progress.total = total_upload_bytes
+                progress.torrent_items = [dict(value) for value in tray_items]
+                yield progress
 
-            await torrent_file.save()
-            tray_items[item_number - 1].update({"transfer": local_size, "total": local_size, "status": "completed", "message": "Completed"})
+                async for upload_progress in file_upload(torrent_file, ready_path, intermediate=True):
+                    item.update({
+                        "transfer": min(local_size, max(0, int(upload_progress.transfer or 0))),
+                        "total": local_size,
+                        "status": "uploading",
+                        "message": (
+                            f"Uploading · {min(local_size, max(0, int(upload_progress.transfer or 0))) * 100 / local_size:.1f}%"
+                            if local_size else "Uploading"
+                        ),
+                    })
+                    progress.name = relative_display_path
+                    progress.message = f"Uploading file {saved_count + 1}/{len(selected_order)}"
+                    progress.transfer = completed_bytes + item["transfer"]
+                    progress.total = total_upload_bytes
+                    progress.torrent_items = [dict(value) for value in tray_items]
+                    yield progress
 
-            if first_saved_id is None:
-                first_saved_id = torrent_file.id
+                await torrent_file.save()
+                item.update({
+                    "transfer": local_size,
+                    "total": local_size,
+                    "status": "completed",
+                    "message": "Completed",
+                })
+                if first_saved_id is None:
+                    first_saved_id = torrent_file.id
 
-            saved_count += 1
+                processed_indices.add(ready_index)
+                saved_count += 1
+                completed_bytes += local_size
+                progress.transfer = completed_bytes
+                progress.total = total_upload_bytes
+                progress.torrent_items = [dict(value) for value in tray_items]
+                progress.message = f"Uploaded {saved_count} of {len(selected_order)} torrent files"
+                yield progress
+                continue
+
+            progress.name = torrent_name
+            progress.transfer = min(total_upload_bytes, downloaded_bytes)
+            progress.total = total_upload_bytes
+            peers = int(getattr(status, "num_peers", 0) or 0)
+            seeds = int(getattr(status, "num_seeds", 0) or 0)
+            is_finished = bool(getattr(status, "is_finished", False))
+            is_seeding = bool(getattr(status, "is_seeding", False))
+            if peers:
+                progress.message = f"Downloading torrent files ({peers} peers, {seeds} seeds)"
+            else:
+                progress.message = "Searching for peers"
+
+            progress.torrent_items = [dict(item) for item in tray_items]
+            yield progress
+
+            if is_finished or is_seeding:
+                missing = [index for index in selected_order if index not in processed_indices]
+                if missing and all(
+                        index < len(file_progress) and file_progress[index] >= file_sizes[index]
+                        for index in missing
+                ):
+                    # libtorrent may report completion just before the final file becomes
+                    # visible on disk. Give its storage writer a brief chance to flush.
+                    await sleep(0.25)
+                elif missing:
+                    raise RuntimeError("Torrent reported completion before every selected file finished downloading")
+
+            await sleep(0.5)
 
         file.id = first_saved_id
         final_progress: Progress = Progress(torrent_name, f"Upload Complete: {saved_count} torrent file(s)", total_upload_bytes)
@@ -948,4 +1098,13 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
         raise
 
     finally:
+        if torrent_session is not None and handle is not None:
+            try:
+                try:
+                    handle.pause()
+                finally:
+                    torrent_session.remove_torrent(handle)
+            except Exception:
+                pass
+
         rmtree(temp_dir, ignore_errors=True)

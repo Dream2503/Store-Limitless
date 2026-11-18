@@ -13,6 +13,7 @@ core/transfer/
 build.log
 logs.log
 logs.lock
+busy.sh
 
 frontend/node_modules/
 

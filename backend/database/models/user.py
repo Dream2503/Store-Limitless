@@ -1,21 +1,28 @@
+"""
+User model and database operations. User records are stored in PostgreSQL and read through the Redis cache; a new user is also given a default /home
+directory.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
+from fastapi import HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
 from backend.database.connection import POOL, UserDict
 from backend.database.redis_server import Redis
 from core.data_center import Database
 from core.utils import write_log
-from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field
 from .directory import Directory
 
 
 class User(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    """Represent an account and provide validation and persistence operations for it."""
 
+    model_config = ConfigDict(from_attributes=True)
     username: str
     password: str
     first_name: str
@@ -23,6 +30,8 @@ class User(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __repr__(self) -> str:
+        """Return a readable representation of the user without exposing the password."""
+
         return (
             f"User(username={self.username!r}, "
             f"first_name={self.first_name!r}, "
@@ -31,6 +40,8 @@ class User(BaseModel):
         )
 
     async def save(self) -> None:
+        """Insert the user and its default /home directory in one database transaction. Roll back and log the error if either insert fails."""
+
         with POOL.connection() as connection:
             try:
                 connection.execute(
@@ -56,10 +67,14 @@ class User(BaseModel):
 
     @property
     async def home(self) -> Directory:
+        """Return the user’s default /home directory from the directory model."""
+
         return cast(Directory, await Directory.get(self.username, path=Path("/home")))
 
     @classmethod
     async def get(cls, username: str) -> User | None:
+        """Retrieve a user from Redis when cached, otherwise query PostgreSQL and cache the result. Return None when the username does not exist."""
+
         try:
             return cast(User, await Redis.get(f"user:{username}", "User"))
 
@@ -84,6 +99,8 @@ class User(BaseModel):
         return user
 
     def update(self) -> None:
+        """Persist the user’s password and profile-name fields to PostgreSQL. Roll back and log failures."""
+
         with POOL.connection() as connection:
             try:
                 connection.execute(
@@ -104,6 +121,8 @@ class User(BaseModel):
                 raise
 
     def verify(self) -> None:
+        """Validate the username, first name, and last name, raising HTTPException when a field is invalid."""
+
         if not self.username or len(self.username) < 3 or len(self.username) > 32 or not self.username.replace("_", "").replace("-", "").isalnum():
             raise HTTPException(status_code=400, detail="Invalid username")
 

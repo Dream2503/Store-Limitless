@@ -1,193 +1,154 @@
+"""Data-center provider factory and bounded on-disk cache for remote file chunks."""
+
 from __future__ import annotations
 
 import os
-from asyncio import Lock, to_thread
-from collections import OrderedDict
+from asyncio import to_thread
 from pathlib import Path
-from shutil import rmtree
-from time import monotonic
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from core.config import TRANSFER_PATH
+from core.utils_ import part_path, reset_cache, update_cache_entry
 
 if TYPE_CHECKING:
     from core.utils.progress import Progress
 
 
 class DataCenter:
+    """Factory base for storage providers and owner of the shared chunk cache."""
+
     NAME: str
     TOKEN: str
     FILE_DUMP_ID: int
     MAX_SIZE: int = 10 * 1024 * 1024
-
-    CACHE_DIR: Path = TRANSFER_PATH / Path("cached")
+    CACHE_DIR: Path = TRANSFER_PATH / "cached"
     CACHE_LIMIT: int = 256 * 1024 * 1024
 
-    _cache: OrderedDict[str, tuple[int, float | int]] = OrderedDict()
-    _cache_size: int = 0
-    _cache_lock: Lock | None = None
+    def __new__(cls, name: str) -> type[DataCenter] | None:
+        """Resolve a configured provider name to its provider class."""
 
-    def __new__(cls, name: str):
         from core.utils.discord_ import Discord
         from core.utils.telegram_ import Telegram
 
-        match name:
-            case Discord.NAME:
-                return Discord
-
-            case Telegram.NAME:
-                return Telegram
-
-            case Database.NAME:
-                return Database
-
-            case BackEnd.NAME:
-                return BackEnd
-
-        return None
-
-    @staticmethod
-    def _lock() -> Lock:
-        if DataCenter._cache_lock is None:
-            DataCenter._cache_lock = Lock()
-
-        return cast(Lock, DataCenter._cache_lock)
-
-    @staticmethod
-    def _part_path(fid: str, part: int) -> Path:
-        return DataCenter.CACHE_DIR / fid / f"part_{part:08d}"
+        providers: dict[str, type[DataCenter]] = {
+            Discord.NAME: Discord,
+            Telegram.NAME: Telegram,
+            Database.NAME: Database,
+            BackEnd.NAME: BackEnd,
+            Binaries.NAME: Binaries,
+        }
+        return providers.get(name)
 
     @staticmethod
     async def cache_part(fid: str, part: int, data: bytes) -> Path:
-        path: Path = DataCenter._part_path(fid, part)
+        """Atomically write a downloaded part and account for it in the LRU cache."""
+
+        path: Path = part_path(DataCenter.CACHE_DIR, fid, part)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp: Path = path.with_suffix(".tmp")
-        await to_thread(temp.write_bytes, data)
-        os.replace(temp, path)
-        key: str = str(path)
-        new_size: int = len(data)
+        temp: Path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
 
-        async with DataCenter._lock():
-            old: tuple[int, float | int] | None = DataCenter._cache.pop(key, None)
+        try:
+            await to_thread(temp.write_bytes, data)
+            os.replace(temp, path)
 
-            if old:
-                DataCenter._cache_size -= old[0]
+        finally:
+            temp.unlink(missing_ok=True)
 
-            DataCenter._cache[key] = (new_size, monotonic())
-            DataCenter._cache_size += new_size
-            await DataCenter._evict()
-
+        await update_cache_entry(str(path), len(data), DataCenter.CACHE_LIMIT)
         return path
 
     @staticmethod
     async def get_cached_part(fid: str, part: int) -> bytes | None:
-        path: Path = DataCenter._part_path(fid, part)
+        """Read a cached part and refresh its recency in the LRU index."""
+
+        path: Path = part_path(DataCenter.CACHE_DIR, fid, part)
 
         if not path.is_file() or path.stat().st_size <= 0:
+            await DataCenter.touch_cache(str(path))
             return None
 
-        data: bytes = await to_thread(path.read_bytes)
-        key: str = str(path)
-        size: int = len(data)
+        try:
+            data: bytes = await to_thread(path.read_bytes)
 
-        async with DataCenter._lock():
-            old: tuple[int, float | int] | None = DataCenter._cache.pop(key, None)
+        except FileNotFoundError:
+            await DataCenter.touch_cache(str(path))
+            return None
 
-            if old:
-                DataCenter._cache_size -= old[0]
-
-            DataCenter._cache[key] = (size, monotonic())
-            DataCenter._cache_size += size
-
-        return data
+        await update_cache_entry(str(path), len(data), DataCenter.CACHE_LIMIT)
+        return data if path.is_file() else None
 
     @staticmethod
     async def has_cached_part(fid: str, part: int) -> bool:
-        path: Path = DataCenter._part_path(fid, part)
+        """Return whether a non-empty cached part exists and refresh its recency."""
+
+        path: Path = part_path(DataCenter.CACHE_DIR, fid, part)
 
         if not path.is_file() or path.stat().st_size <= 0:
+            await DataCenter.touch_cache(str(path))
             return False
 
-        await DataCenter.touch_cache(str(path))
-        return True
+        return await DataCenter.touch_cache(str(path))
 
     @staticmethod
     async def touch_cache(path: str) -> bool:
-        if not os.path.isfile(path):
-            async with DataCenter._lock():
-                old: tuple[int, float | int] | None = DataCenter._cache.pop(path, None)
+        """Refresh or remove one cache-index entry and enforce the configured size limit."""
 
-                if old:
-                    DataCenter._cache_size -= old[0]
+        cache_path: Path = Path(path)
 
+        if not cache_path.is_file():
+            await update_cache_entry(path, None, DataCenter.CACHE_LIMIT)
             return False
 
-        size: int = os.path.getsize(path)
-
-        async with DataCenter._lock():
-            old: tuple[int, float | int] | None = DataCenter._cache.pop(path, None)
-
-            if old:
-                DataCenter._cache_size -= old[0]
-
-            DataCenter._cache[path] = (size, monotonic())
-            DataCenter._cache_size += size
-
-        return True
-
-    @staticmethod
-    async def _evict() -> None:
-        while DataCenter._cache_size > DataCenter.CACHE_LIMIT and DataCenter._cache:
-            key: str
-            size: int
-            key, (size, _) = DataCenter._cache.popitem(last=False)
-            path: Path = Path(key)
-
-            try:
-                path.unlink(missing_ok=True)
-
-                try:
-                    path.parent.rmdir()
-
-                except OSError:
-                    pass
-
-            finally:
-                DataCenter._cache_size -= size
+        await update_cache_entry(path, cache_path.stat().st_size, DataCenter.CACHE_LIMIT)
+        return cache_path.is_file()
 
     @staticmethod
     async def initialize_cache() -> None:
-        async with DataCenter._lock():
-            if DataCenter.CACHE_DIR.exists():
-                await to_thread(rmtree, DataCenter.CACHE_DIR)
+        """Recreate the disposable chunk cache and reset its in-memory accounting."""
 
-            DataCenter.CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            DataCenter._cache_size = 0
+        await reset_cache(DataCenter.CACHE_DIR)
 
     @staticmethod
     async def upload(chunk: bytes, filename: str, progress: Progress) -> str:
-        pass
+        """Upload one chunk; concrete storage providers must implement this operation."""
+
+        raise NotImplementedError("DataCenter subclasses must implement upload().")
 
     @staticmethod
     async def download(flink: str) -> bytes:
-        pass
+        """Download one chunk; concrete storage providers must implement this operation."""
+
+        raise NotImplementedError("DataCenter subclasses must implement download().")
 
 
 class ConfigMeta(type):
-    def __str__(cls):
+    """Display provider classes by their configured names in logs and diagnostics."""
+
+    def __str__(cls) -> str:
+        """Return the class name as its display value."""
+
         return cls.__name__
 
-    def __repr__(cls):
+    def __repr__(cls) -> str:
+        """Return the class name as its representation."""
+
         return cls.__name__
 
 
 class Database(DataCenter, metaclass=ConfigMeta):
+    """Marker provider representing database-backed storage operations."""
+
     NAME: str = "Database"
 
 
 class BackEnd(Database, metaclass=ConfigMeta):
+    """Marker provider used for backend-owned files and operations."""
+
     NAME: str = "BackEnd"
 
 
 class Binaries(Database, metaclass=ConfigMeta):
+    """Log source for dependency installers and system binary management."""
+
     NAME: str = "Binaries"

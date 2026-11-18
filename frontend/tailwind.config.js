@@ -1,8 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-    content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
-    darkMode: "class",
-    theme: {
+    content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"], darkMode: "class", theme: {
         extend: {
             colors: {
                 "on-error-container": "#ffdad6",
@@ -52,12 +50,9 @@ export default {
                 "on-secondary-fixed": "#2f1500",
                 "secondary-container": "#d97707",
                 "primary-fixed": "#e1e0ff",
-            },
-            fontFamily: {
-                inter: ["Inter", "sans-serif"],
-                geist: ["Geist", "monospace"],
+            }, fontFamily: {
+                inter: ["Inter", "sans-serif"], geist: ["Geist", "monospace"],
             },
         },
-    },
-    plugins: [],
+    }, plugins: [],
 };

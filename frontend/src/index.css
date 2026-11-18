@@ -1,3 +1,4 @@
+/* Global Tailwind layers, reusable component utilities, and the app-wide font. */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -17,4 +18,86 @@
 
 * {
     font-family: 'Inter', sans-serif;
+}
+
+/* --------------------------------------------------
+   Global scrollbar theme
+   Applies to the page and nested scrollable elements.
+-------------------------------------------------- */
+
+* {
+    scrollbar-width: thin;
+    scrollbar-color: #355343 transparent;
+}
+
+*::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+    background: transparent;
+    border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: #355343;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background-clip: padding-box;
+    transition: background-color 180ms ease;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background: #3ecf8e;
+    background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:active {
+    background: #65e6ab;
+    background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* Keep nested scrolling contained instead of chaining to the page. */
+.overflow-y-auto,
+.overflow-auto,
+.overflow-scroll,
+.overflow-x-auto,
+.overflow-x-scroll {
+    overscroll-behavior: contain;
+}
+
+html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 5rem;
+}
+
+body {
+    margin: 0;
+    min-width: 320px;
+    background: #0b0e0c;
+}
+
+:focus-visible {
+    outline-offset: 3px;
+}
+
+/* Respect users who prefer reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+    html {
+        scroll-behavior: auto;
+    }
+
+    *,
+    *::before,
+    *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
 }

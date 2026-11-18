@@ -1,3 +1,8 @@
+"""
+Database connection setup and PostgreSQL schema initialization. This module defines the shared connection pool and row type aliases, then creates
+the users, directories, and files tables when imported.
+"""
+
 from datetime import datetime
 from typing import cast
 
@@ -11,13 +16,13 @@ try:
     UserDict = dict[str, str | datetime]
     DirectoryDict = dict[str, int | str | datetime | None]
     FileDict = dict[str, int | str | datetime | list[str] | None]
-    GitHubCursorDict = dict[str, int]
 
     POOL: ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]] = cast(
         ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]], cast(object, ConnectionPool(
             DATABASE_URL,
             kwargs={"row_factory": dict_row},
-        )))
+        ))
+    )
 
     with POOL.connection() as connection:
         connection.execute(
@@ -53,7 +58,7 @@ try:
                 size         BIGINT      NOT NULL,
                 modified_at  TIMESTAMPTZ NOT NULL,
                 data_center  TEXT        NOT NULL,
-                links        TEXT []     NOT NULL,
+                links        TEXT[]      NOT NULL,
                 deleted_at   TIMESTAMPTZ,
                 username     TEXT        NOT NULL,
 
@@ -64,11 +69,6 @@ try:
                 CONSTRAINT fk_files_user
                     FOREIGN KEY (username)
                         REFERENCES users (username)
-            );
-
-            CREATE TABLE IF NOT EXISTS github_cursor (
-                repo_id BIGINT PRIMARY KEY,
-                used    BIGINT NOT NULL
             );
             """
         )

@@ -1,9 +1,11 @@
+"""Redis connection and serialization helpers for cached users, directories, files, progress records, and JSON-based application state."""
+
 from __future__ import annotations
 
 from datetime import datetime
 from json import dumps, loads
 from pathlib import Path
-from typing import Literal, cast, TYPE_CHECKING
+from typing import Any, Literal, cast, TYPE_CHECKING
 
 import redis.asyncio
 
@@ -15,21 +17,53 @@ if TYPE_CHECKING:
 
 
 class Redis:
+    """Manage the shared asynchronous Redis client and serialize application model objects to and from Redis keys and hashes."""
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> Redis:
+        """Prevent instantiation because Redis exposes class-level operations only."""
+
+        raise TypeError("Redis cannot be instantiated")
+
     ValueTypes = Literal["Progress", "Directory", "File", "User"]
     redis: redis.asyncio.Redis
 
     @classmethod
     async def initialize(cls) -> None:
+        """Create the asynchronous Redis client and verify connectivity with PING. Existing Redis data is intentionally preserved."""
+
         cls.redis = redis.asyncio.Redis.from_url("redis://localhost:6379", decode_responses=True)
         await cls.redis.ping()
-        await cls.redis.flushall()
 
     @classmethod
     async def close(cls) -> None:
+        """Close the asynchronous Redis client connection pool."""
+
         await cls.redis.aclose()
 
     @classmethod
+    async def get_json(cls, key: str) -> Any | None:
+        """Read an arbitrary JSON-serializable value stored under a Redis key."""
+
+        value: str | None = await cls.redis.get(key)
+        return loads(value) if value is not None else None
+
+    @classmethod
+    async def set_json(cls, key: str, value: Any, *, ex: int | None = None, nx: bool = False) -> bool:
+        """Store JSON data, optionally with an expiry or SET-NX semantics."""
+
+        result = await cls.redis.set(key, dumps(value, default=str), ex=ex, nx=nx)
+        return bool(result)
+
+    @classmethod
+    async def delete_key(cls, key: str) -> None:
+        """Delete a raw Redis key regardless of its stored value type."""
+
+        await cls.redis.delete(key)
+
+    @classmethod
     async def exists(cls, key: str, type: ValueTypes) -> bool:
+        """Check whether a supported Redis key or a specific hash entry exists."""
+
         match type:
             case "Progress" | "User":
                 return bool(await cls.redis.exists(key))
@@ -43,6 +77,8 @@ class Redis:
 
     @classmethod
     async def get(cls, key: str, type: ValueTypes) -> Progress | Directory | list[Directory] | File | list[File] | User:
+        """Load a supported value from Redis, returning one record or a collection for hash-backed models."""
+
         from backend.database.models import User, Directory, File
 
         match type:
@@ -56,78 +92,57 @@ class Redis:
                 progress.transfer = int(data["transfer"])
                 return progress
 
-            case "Directory":
-                if " " in key:
-                    did: str
-                    key, did = key.rsplit(" ", 1)
-                    value: str | None = await cls.redis.hget(key, did)
+            case "Directory" | "File":
+                single: bool = " " in key
+                values: list[str]
+
+                if single:
+                    key, item_id = key.rsplit(" ", 1)
+                    value: str | None = await cls.redis.hget(key, item_id)
 
                     if value is None:
-                        raise KeyError(did)
+                        raise KeyError(item_id)
 
-                    data: list[str] = [value]
-                    single: bool = True
-
-                else:
-                    data: list[str] = list((await cls.redis.hgetall(key)).values())
-                    single: bool = False
-
-                    if not data:
-                        return []
-
-                directories: list[Directory] = []
-                value: str
-
-                for value in data:
-                    directory: dict[str, int | str | None] = loads(value)
-                    directories.append(Directory(
-                        id=cast(int, directory["id"]),
-                        path=Path(cast(str, directory["path"])),
-                        modified_at=datetime.fromisoformat(cast(str, directory["modified_at"])),
-                        deleted_at=datetime.fromisoformat(cast(str, directory["deleted_at"])) if directory["deleted_at"] else None,
-                        username=cast(str, directory["username"])
-                    ))
-
-                return directories[0] if single else directories
-
-            case "File":
-                if " " in key:
-                    fid: str
-                    key, fid = key.rsplit(" ", 1)
-                    value: str | None = await cls.redis.hget(key, fid)
-
-                    if value is None:
-                        raise KeyError(fid)
-
-                    data: list[str] = [value]
-                    single: bool = True
+                    values = [value]
 
                 else:
-                    data: list[str] = list((await cls.redis.hgetall(key)).values())
-                    single: bool = False
+                    values = list((await cls.redis.hgetall(key)).values())
 
-                    if not data:
+                    if not values:
                         return []
 
-                files: list[File] = []
-                value: str
+                records: list[dict[str, Any]] = [loads(value) for value in values]
 
-                for value in data:
-                    file: dict[str, int | str | list[str] | None] = loads(value)
-                    files.append(File(
-                        id=cast(int, file["id"]),
-                        directory_id=cast(int, file["directory_id"]),
-                        name=cast(str, file["name"]),
-                        type=cast(str, file["type"]),
-                        size=cast(int, file["size"]),
-                        modified_at=datetime.fromisoformat(cast(str, file["modified_at"])),
-                        deleted_at=datetime.fromisoformat(cast(str, file["deleted_at"])) if file["deleted_at"] else None,
-                        data_center=cast(str, file["data_center"]),
-                        links=cast(list[str], file["links"]),
-                        username=cast(str, file["username"])
-                    ))
+                if type == "Directory":
+                    items: list[Directory] | list[File] = [
+                        Directory(
+                            id=cast(int, record["id"]),
+                            path=Path(cast(str, record["path"])),
+                            modified_at=datetime.fromisoformat(cast(str, record["modified_at"])),
+                            deleted_at=datetime.fromisoformat(cast(str, record["deleted_at"])) if record["deleted_at"] else None,
+                            username=cast(str, record["username"]),
+                        )
+                        for record in records
+                    ]
 
-                return files[0] if single else files
+                else:
+                    items = [
+                        File(
+                            id=cast(int, record["id"]),
+                            directory_id=cast(int, record["directory_id"]),
+                            name=cast(str, record["name"]),
+                            type=cast(str, record["type"]),
+                            size=cast(int, record["size"]),
+                            modified_at=datetime.fromisoformat(cast(str, record["modified_at"])),
+                            deleted_at=datetime.fromisoformat(cast(str, record["deleted_at"])) if record["deleted_at"] else None,
+                            data_center=cast(str, record["data_center"]),
+                            links=cast(list[str], record["links"]),
+                            username=cast(str, record["username"]),
+                        )
+                        for record in records
+                    ]
+
+                return items[0] if single else items
 
             case "User":
                 data: dict[str, str] = await cls.redis.hgetall(key)
@@ -145,6 +160,8 @@ class Redis:
 
     @classmethod
     async def delete(cls, key: str, type: ValueTypes) -> None:
+        """Delete a Redis key or a single Directory/File hash entry according to the supplied value type."""
+
         match type:
             case "Progress" | "User":
                 await cls.redis.delete(key)
@@ -161,6 +178,11 @@ class Redis:
 
     @classmethod
     async def set(cls, key: str, value: Progress | User | Directory | File) -> None:
+        """
+        Serialize a Progress, User, Directory, or File object into Redis. Saving a User also refreshes the user’s directory and file cache hashes from
+        PostgreSQL.
+        """
+
         from backend.database.models import User, Directory, File
 
         if isinstance(value, Progress):

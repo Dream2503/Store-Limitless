@@ -1,3 +1,5 @@
+"""Password hashing and signed public stream token helpers."""
+
 import hmac
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from hashlib import sha256
@@ -13,14 +15,20 @@ pwd_context: CryptContext = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def hash_password(password: str) -> str:
+    """Hash a plaintext password using the configured password context."""
+
     return pwd_context.hash(password)
 
 
 def verify_password(password: str, hashed_password: str) -> bool:
+    """Check a plaintext password against its stored hash."""
+
     return pwd_context.verify(password, hashed_password)
 
 
 def create_public_stream_token(file: File, username: str) -> str:
+    """Create a signed token binding a public stream to a file and owner."""
+
     encoded_payload: bytes = urlsafe_b64encode(
         dumps({"file_id": file.id, "username": username}, separators=(",", ":"), sort_keys=True).encode()
     ).rstrip(b"=")
@@ -29,6 +37,8 @@ def create_public_stream_token(file: File, username: str) -> str:
 
 
 def verify_public_stream_token(token: str) -> dict[str, str | int]:
+    """Verify a public stream token signature and return its decoded payload."""
+
     try:
         encoded_payload: str
         encoded_signature: str

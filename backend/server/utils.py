@@ -1,24 +1,23 @@
+"""Input validation helpers shared by the StoreLimitless API."""
+
 from typing import Literal
 from urllib.parse import ParseResult, urlparse
 
 from fastapi import HTTPException
 
-from core.config import POSSIBLE_DATACENTERS
+from core.config import AVAILABLE_DATACENTERS
 
-ValueType = Literal[
-    "data_center",
-    "directory",
-    "file_name",
-    "link",
-]
+ValueType = Literal["data_center", "directory", "file_name", "link"]
 
 
 def perform_validation(value: str, value_type: ValueType) -> str:
+    """Normalize and validate a supported API input value."""
+
     value = value.strip()
 
     match value_type:
         case "data_center":
-            if value not in POSSIBLE_DATACENTERS:
+            if value not in AVAILABLE_DATACENTERS:
                 raise HTTPException(status_code=400, detail="Invalid data center")
 
         case "directory":

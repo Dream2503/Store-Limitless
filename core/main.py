@@ -1,12 +1,15 @@
-import subprocess
+"""Application entry point coordinating API, frontend, FTP, Redis, and storage bots."""
+
+from __future__ import annotations
+
 import sys
 from asyncio import CancelledError, Task, create_task, gather, get_running_loop, run, sleep, to_thread
-from os import environ, execv
+from os import environ
 from pathlib import Path
 from shutil import rmtree
-from socket import AF_INET, SOCK_DGRAM, socket
-from subprocess import Popen, TimeoutExpired, DEVNULL
+from subprocess import DEVNULL, Popen, run as subprocess_run
 from threading import Thread
+from typing import cast
 
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn import Config, Server
@@ -15,46 +18,55 @@ from backend.database.redis_server import Redis
 from backend.ftp.server import StoreLimitlessFTPServer
 from backend.server.app import app
 from backend.server.frontend import frontend_app
-from core.config import TRANSFER_PATH, HOST
+from core.config import HOST, TRANSFER_PATH
 from core.data_center import DataCenter
-from core.utils.binaries import start_redis_server, start_cloudflare_tunnel
+from core.utils.binaries import start_cloudflare_tunnel, start_redis_server
 from core.utils.discord_ import Discord
 from core.utils.telegram_ import Telegram
+from core.utils_ import get_local_ip, stop_process, ensure_frontend_dependencies
 
 
 async def main() -> None:
-    subprocess.run(["clear"], check=False)
+    """Start all StoreLimitless services and cleanly stop them on exit."""
 
-    redis_process: Popen | None = start_redis_server()
-    frontend_process: Popen | None = None
+    subprocess_run("cls" if sys.platform == "win32" else "clear", shell=True)
+    frozen: bool = bool(getattr(sys, "frozen", False))
+    frontend_dir: Path | None = None
+
+    if not frozen:
+        frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+        await to_thread(ensure_frontend_dependencies, cast(Path, frontend_dir))
+
+    redis_process: Popen[bytes] | None = start_redis_server()
+    frontend_process: Popen[bytes] | None = None
     frontend_server: Server | None = None
     frontend_task: Task[None] | None = None
-    cloudflare_processes: list[Popen] = []
-    restart: bool = False
-    frozen: bool = getattr(sys, "frozen", False)
+    server: Server | None = None
+    server_task: Task[None] | None = None
+    cloudflare_processes: list[Popen[str]] = []
+    ftp_server: StoreLimitlessFTPServer | None = None
+    ftp_started: bool = False
+    discord_thread: Thread | None = None
+    discord_started: bool = False
+    telegram_started: bool = False
 
     try:
         await Redis.initialize()
         await DataCenter.initialize_cache()
         await Telegram.main()
+        telegram_started = True
 
-        discord_thread: Thread = Thread(target=Discord.main, daemon=True)
+        discord_thread = Thread(target=Discord.main, daemon=True, name="storelimitless-discord")
         ftp_server = StoreLimitlessFTPServer(get_running_loop())
-
-        with socket(AF_INET, SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            ip: str = sock.getsockname()[0]
+        ip: str = get_local_ip()
 
         if HOST == "CLOUD":
             api_tunnel, api_url = await to_thread(start_cloudflare_tunnel, "http://127.0.0.1:8000", "API")
             cloudflare_processes.append(api_tunnel)
-
             website_tunnel, website_url = await to_thread(start_cloudflare_tunnel, "http://127.0.0.1:5173", "Website")
             cloudflare_processes.append(website_tunnel)
-
             environ["STORELIMITLESS_API_URL"] = api_url
             environ["VITE_API_URL"] = api_url
-
             app.add_middleware(CORSMiddleware, allow_origins=[website_url], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
         elif HOST == "LOCAL":
@@ -66,24 +78,21 @@ async def main() -> None:
         else:
             raise ValueError(f"Unsupported HOST configuration: {HOST!r}")
 
-        server: Server = Server(Config(app, host="0.0.0.0", port=8000, log_level="warning"))
-        server_task: Task[None] = create_task(server.serve())
+        server = Server(Config(app, host="0.0.0.0", port=8000, log_level="warning"))
+        server_task = create_task(server.serve(), name="storelimitless-api")
 
         if frozen:
             frontend_server = Server(Config(frontend_app, host="0.0.0.0", port=5173, log_level="warning"))
-            frontend_task = create_task(frontend_server.serve())
+            frontend_task = create_task(frontend_server.serve(), name="storelimitless-frontend")
 
         else:
-            frontend_dir: Path = Path(__file__).resolve().parent.parent / "frontend"
-            frontend_env = environ.copy()
-            frontend_env["VITE_API_URL"] = api_url
+            if frontend_dir is None:
+                raise RuntimeError("Frontend source directory was not initialized.")
 
+            frontend_env: dict[str, str] = environ.copy()
+            frontend_env["VITE_API_URL"] = api_url
             frontend_process = Popen(
-                [
-                    "npm", "run", "dev", "--",
-                    "--host", "0.0.0.0",
-                    "--port", "5173",
-                ],
+                ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"],
                 cwd=str(frontend_dir),
                 env=frontend_env,
                 stdout=DEVNULL,
@@ -91,41 +100,37 @@ async def main() -> None:
             )
 
         discord_thread.start()
+        discord_started = True
         ftp_server.start()
+        ftp_started = True
 
         try:
             while not Discord.ready:
                 if server_task.done():
                     await server_task
 
+                if Discord.startup_error is not None:
+                    raise RuntimeError("Discord failed to initialize") from Discord.startup_error
+
+                if discord_started and discord_thread is not None and not discord_thread.is_alive():
+                    raise RuntimeError("Discord client stopped before becoming ready")
+
                 await sleep(0.1)
 
             print("\n" + "=" * 50)
             print("Servers started")
             print("=" * 50)
-
-            if HOST == "LOCAL":
-                print(f"FastAPI : {api_url}")
-                print(f"Website : {website_url}")
-                print(f"FTP     : ftp://{ip}:2121")
-                print(f"Redis   : redis://{ip}:6379")
-
-            else:
-                print(f"FastAPI : {api_url}")
-                print(f"Website : {website_url}")
-                print(f"FTP     : ftp://{ip}:2121")
-                print(f"Redis   : redis://{ip}:6379")
-
+            print(f"FastAPI : {api_url}")
+            print(f"Website : {website_url}")
+            print(f"FTP     : ftp://{ip}:2121")
+            print("Redis   : redis://127.0.0.1:6379")
             print("=" * 50 + "\n")
             server_mode: bool = False
 
             while True:
                 try:
-                    if server_mode:
-                        command: str = (await to_thread(input, "")).strip().lower()
-
-                    else:
-                        command: str = (await to_thread(input, "StoreLimitless> ")).strip().lower()
+                    prompt: str = "" if server_mode else "StoreLimitless> "
+                    command: str = (await to_thread(input, prompt)).strip().lower()
 
                     if command == "server":
                         server_mode = not server_mode
@@ -135,11 +140,6 @@ async def main() -> None:
 
                         else:
                             print("Interactive prompt restored.")
-
-                    elif command == "restart":
-                        print("Restarting StoreLimitless...")
-                        restart = True
-                        break
 
                     elif command == "exit":
                         print("Shutting down StoreLimitless...")
@@ -154,62 +154,46 @@ async def main() -> None:
         except CancelledError:
             pass
 
-        finally:
+    finally:
+        if server is not None:
             server.should_exit = True
 
-            if frontend_server is not None:
-                frontend_server.should_exit = True
+        if frontend_server is not None:
+            frontend_server.should_exit = True
 
-            await gather(server_task, *([frontend_task] if frontend_task is not None else []), return_exceptions=True)
+        background_tasks: list[Task[None]] = [task for task in (server_task, frontend_task) if task is not None]
 
+        if background_tasks:
+            await gather(*background_tasks, return_exceptions=True)
+
+        if ftp_server is not None and ftp_started:
             ftp_server.stop()
             ftp_server.join(timeout=5)
 
-            await Telegram.exit()
+        if discord_started and discord_thread is not None:
+            try:
+                await Discord.shutdown()
+
+            except Exception:
+                pass
+
             discord_thread.join(timeout=5)
 
-    finally:
+        if telegram_started:
+            await Telegram.exit()
+
         await Redis.close()
 
         for process in cloudflare_processes:
-            if process.poll() is None:
-                process.terminate()
+            stop_process(process)
 
-                try:
-                    process.wait(timeout=5)
+        if redis_process is not None:
+            stop_process(redis_process)
 
-                except TimeoutExpired:
-                    process.kill()
-                    process.wait()
-
-        if redis_process is not None and redis_process.poll() is None:
-            redis_process.terminate()
-
-            try:
-                redis_process.wait(timeout=5)
-
-            except TimeoutExpired:
-                redis_process.kill()
-                redis_process.wait()
-
-        if frontend_process is not None and frontend_process.poll() is None:
-            frontend_process.terminate()
-
-            try:
-                frontend_process.wait(timeout=5)
-
-            except TimeoutExpired:
-                frontend_process.kill()
-                frontend_process.wait()
+        if frontend_process is not None:
+            stop_process(frontend_process)
 
         rmtree(TRANSFER_PATH, ignore_errors=True)
-
-    if restart:
-        if frozen:
-            execv(sys.executable, [sys.executable, *sys.argv[1:]])
-
-        else:
-            execv(sys.executable, [sys.executable, "-m", "core.main"])
 
 
 if __name__ == "__main__":

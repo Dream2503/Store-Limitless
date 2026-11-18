@@ -1,3 +1,5 @@
+"""FTP command-handler integration with StoreLimitless authentication and filesystem."""
+
 from asyncio import AbstractEventLoop
 
 from pyftpdlib.handlers import FTPHandler
@@ -7,10 +9,13 @@ from backend.ftp.filesystem.filesystem import StoreLimitlessFS
 
 
 class StoreLimitlessHandler(FTPHandler):
-    abstracted_fs = StoreLimitlessFS
+    """Connect pyftpdlib commands to the StoreLimitless virtual filesystem."""
 
+    abstracted_fs = StoreLimitlessFS
     event_loop: AbstractEventLoop
     store_limitless_user: User | None = None
 
     def on_logout(self, username: str) -> None:
+        """Clear the authenticated user reference when the FTP session ends."""
+
         self.store_limitless_user = None

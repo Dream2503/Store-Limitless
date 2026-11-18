@@ -148,9 +148,13 @@ class Stream:
         return data
 
     async def stream(self) -> AsyncGenerator[bytes]:
-        """Yield bytes in order while fetching one storage link at a time."""
+        """Yield bytes in order while prefetching within the source provider's limit."""
 
         from core.utils.download_manager import ordered_parallel_downloads
+
+        provider = self.provider
+        if provider is None:
+            raise ValueError(f"Unsupported data center: {self.file.data_center}")
 
         byte_range: Stream.ByteRange = self.byte_range
         first_index: int = bisect_right(self._chunk_starts, byte_range.start) - 1
@@ -163,6 +167,8 @@ class Stream:
                 ordered_parallel_downloads(
                     range(first_index, last_index + 1),
                     self._load_chunk,
+                    concurrency=provider.MAX_PARALLEL_DOWNLOADS,
+                    slot_key=provider.NAME,
                 ),
                 first_index,
             ):

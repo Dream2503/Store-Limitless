@@ -28,6 +28,7 @@ from core.transfer import file_upload, link_upload
 from core.utils.telegram_link import resolve_telegram_message_link
 from core.utils import get_file_mime_type, sanitize_sensitive_urls, write_log
 from core.utils.download_utils import preview_torrent_files
+from core.utils.download_manager import ordered_parallel_downloads
 from core.utils.progress import Progress
 from core.utils.upload_manager import cancel_ingestion_upload, enqueue_ingestion_upload, ingestion_upload_slot
 from .upload_state import (
@@ -186,12 +187,18 @@ async def copy_file_to_directory(
         async def download_source() -> None:
             """Append source chunks in order and flush each complete chunk for the uploader."""
             downloaded = 0
+            index = 0
             async with aiofiles.open(stage_path, "wb") as output:
-                for index, link in enumerate(source.links, start=1):
+                async for chunk in ordered_parallel_downloads(
+                    range(len(source.links)),
+                    lambda part_index: source_provider.download(source.links[part_index]),
+                    concurrency=source_provider.MAX_PARALLEL_DOWNLOADS,
+                    slot_key=source_provider.NAME,
+                ):
+                    index += 1
                     metadata = await get_upload_job_metadata(job_id)
                     if metadata is None or metadata.get("cancelled"):
                         raise CancelledError()
-                    chunk = await source_provider.download(link)
                     if not isinstance(chunk, (bytes, bytearray)):
                         raise TypeError(f"{source.data_center} returned a non-byte chunk")
                     if not chunk:

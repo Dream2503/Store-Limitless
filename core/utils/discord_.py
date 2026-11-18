@@ -20,6 +20,7 @@ class Discord(DataCenter, metaclass=ConfigMeta):
     """Send and retrieve storage chunks through a configured Discord text channel."""
 
     NAME: str = "Discord"
+    MAX_PARALLEL_DOWNLOADS: int = 2
     MAX_PARALLEL_UPLOADS: int = 2
     TOKEN: str = DISCORD_TOKEN
     FILE_DUMP_ID: int = DISCORD_FILE_DUMP_ID

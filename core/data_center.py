@@ -22,6 +22,7 @@ class DataCenter:
     TOKEN: str
     FILE_DUMP_ID: int
     MAX_SIZE: int = 10 * 1024 * 1024
+    MAX_PARALLEL_DOWNLOADS: int = 1
     MAX_PARALLEL_UPLOADS: int
     CACHE_DIR: Path = TRANSFER_PATH / "cached"
     CACHE_LIMIT: int = 256 * 1024 * 1024

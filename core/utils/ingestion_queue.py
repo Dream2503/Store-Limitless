@@ -19,12 +19,14 @@ _LOCK_TTL_MS = 120_000
 _HEARTBEAT = 10.0
 
 _ENQUEUE = """
+-- storelimitless-ingestion-enqueue
 local sequence = redis.call('INCR', KEYS[2])
 redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[2])
 redis.call('ZADD', KEYS[1], sequence, ARGV[1])
 return sequence
 """
 _CLAIM = """
+-- storelimitless-ingestion-claim
 local head
 while true do
     head = redis.call('ZRANGE', KEYS[1], 0, 0)
@@ -46,18 +48,22 @@ redis.call('DEL', KEYS[3])
 return 1
 """
 _RENEW_TICKET = """
+-- storelimitless-ingestion-renew-ticket
 if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
 return redis.call('EXPIRE', KEYS[1], ARGV[1])
 """
 _RENEW_LOCK = """
+-- storelimitless-ingestion-renew-lock
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 return redis.call('PEXPIRE', KEYS[1], ARGV[2])
 """
 _RELEASE_LOCK = """
+-- storelimitless-ingestion-release-lock
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 return redis.call('DEL', KEYS[1])
 """
 _CANCEL = """
+-- storelimitless-ingestion-cancel-ticket
 redis.call('ZREM', KEYS[1], ARGV[1])
 return redis.call('DEL', KEYS[2])
 """

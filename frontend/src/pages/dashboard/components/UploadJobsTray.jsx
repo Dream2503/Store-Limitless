@@ -636,12 +636,34 @@ function describeJob(job) {
     const torrentDownloadPercent = isComplete ? 100 : total > 0
         ? Math.max(0, Math.min(100, torrentDownloadTransfer * 100 / total))
         : itemCount > 0
-            ? items.filter((item) => ["downloaded", "waiting_upload", "uploading", "completed"].includes(String(item.status || ""))).length * 100 / itemCount
+            ? items.reduce((sum, item) => {
+                const status = String(item.status || "queued");
+                if (["downloaded", "waiting_upload", "uploading", "completed"].includes(status)) return sum + 1;
+                if (status !== "downloading") return sum;
+
+                // Folder entries can lack a size until Google Drive starts sending
+                // the file. Use live byte progress whenever a denominator is known;
+                // otherwise represent the active unknown-size download as in progress
+                // rather than leaving the whole folder at 0% until it finishes.
+                const size = num(item.download_total) || num(item.total) || num(item.size);
+                if (size <= 0) return sum + 0.5;
+                const downloaded = Math.max(0, num(item.download_transfer ?? item.transfer));
+                return sum + Math.min(0.99, downloaded / size);
+            }, 0) * 100 / itemCount
             : 0;
     const torrentUploadPercent = isComplete ? 100 : total > 0
         ? Math.max(0, Math.min(100, torrentUploadTransfer * 100 / total))
         : itemCount > 0
-            ? items.filter((item) => item.status === "completed").length * 100 / itemCount
+            ? items.reduce((sum, item) => {
+                const status = String(item.status || "queued");
+                if (status === "completed") return sum + 1;
+                if (status !== "uploading") return sum;
+
+                const size = num(item.upload_total) || num(item.total) || num(item.size);
+                if (size <= 0) return sum + 0.5;
+                const uploaded = Math.max(0, num(item.upload_transfer ?? item.transfer));
+                return sum + Math.min(0.99, uploaded / size);
+            }, 0) * 100 / itemCount
             : 0;
     const hasExplicitItemProgress = hasDetailedItems && items.some((item) => item.progress !== undefined && item.progress !== null);
     const progressWeightedByItem = hasExplicitItemProgress ? items.reduce((sum, item) => {

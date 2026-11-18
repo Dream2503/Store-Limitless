@@ -636,7 +636,13 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                     # Ingestion jobs publish authoritative file-level outcomes from the
                     # server. Preserve those successes/failures instead of overwriting them
                     # with a generic parent-level cancellation/error snapshot.
-                    if ingestion_type != "google_drive_folder":
+                    if ingestion_type == "google_drive_folder":
+                        for item in items:
+                            if child_status == "cancelled" and item.get("status") not in {"completed", "error", "failed"}:
+                                item["status"] = "cancelled"
+                                item["message"] = "Cancelled"
+                                items_changed = True
+                    else:
                         active_seen = False
                         for item in items:
                             if item.get("status") in {"downloading", "uploading"}:
@@ -671,6 +677,11 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                         {key: value for key, value in child_item.items() if not key.startswith("_")}
                         for child_item in child_items if isinstance(child_item, dict)
                     ]
+                    if str(metadata.get("status") or "") == "cancelled" or metadata.get("cancelled"):
+                        for folder_item in folder_items:
+                            if folder_item.get("status") not in {"completed", "error", "failed"}:
+                                folder_item["status"] = "cancelled"
+                                folder_item["message"] = "Cancelled"
                     if folder_items and folder_items != items:
                         items = folder_items
                         metadata["items"] = items

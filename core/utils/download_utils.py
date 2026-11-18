@@ -57,13 +57,29 @@ def safe_filename(name: str) -> str:
 
 
 def download_google_drive_file(link: str, output: Path) -> None:
-    """Download a Google Drive file to ``output`` using gdown."""
+    """Stream a Google Drive file directly into ``output`` for concurrent upload."""
 
-    downloaded: str | None = cast(str | None, gdown.download(link, output=str(output), quiet=True))
+    # Passing a path to gdown makes it write to a temporary .part file and rename
+    # it only after the download completes. The upload worker watches ``output``
+    # for growing chunks, so that behavior silently turns streaming into a
+    # download-then-upload operation. A file-like destination disables gdown's
+    # staging rename. Unbuffered writes make each received chunk visible to the
+    # concurrent reader immediately.
+    try:
+        with output.open("wb", buffering=0) as destination:
+            gdown.download(
+                url=link,
+                output=destination,
+                quiet=True,
+                use_cookies=False,
+            )
+            destination.flush()
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
 
-    if downloaded is None or not output.is_file():
+    if not output.is_file():
         raise OSError("Google Drive download failed")
-
 
 MAX_STREAM_RETRIES: int = 50
 STREAM_RETRY_MAX_DELAY: float = 5.0
@@ -1056,13 +1072,13 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
                 return
 
             index, file_id, relative_parts, target_directory, item = entry
-            staging_dir = temp_dir / "payload" / f"{index:06d}"
-            staging_dir.mkdir(parents=True, exist_ok=True)
-            proposed_path = staging_dir / relative_parts[-1]
-            item["_staging_dir"] = str(staging_dir)
-            item["status"] = "downloading"
-            item["message"] = "Downloading file"
             try:
+                staging_dir = temp_dir / "payload" / f"{index:06d}"
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                proposed_path = staging_dir / relative_parts[-1]
+                item["_staging_dir"] = str(staging_dir)
+                item["status"] = "downloading"
+                item["message"] = "Downloading file"
                 actual_path = await to_thread(_download_google_drive_entry, file_id, proposed_path, item)
                 actual_size = actual_path.stat().st_size
                 item.update({
@@ -1104,19 +1120,19 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
                 return
 
             index, local_path, target_directory, item, ticket = work
-            name = local_path.name
-            remote_file = File(
-                directory_id=cast(int, target_directory.id),
-                name=name,
-                type=guess_type(name)[0] or "application/octet-stream",
-                size=max(0, local_path.stat().st_size),
-                modified_at=datetime.now(timezone.utc),
-                links=[],
-                data_center=file.data_center,
-                username=file.username,
-            )
-            local_size = remote_file.size
             try:
+                name = local_path.name
+                remote_file = File(
+                    directory_id=cast(int, target_directory.id),
+                    name=name,
+                    type=guess_type(name)[0] or "application/octet-stream",
+                    size=max(0, local_path.stat().st_size),
+                    modified_at=datetime.now(timezone.utc),
+                    links=[],
+                    data_center=file.data_center,
+                    username=file.username,
+                )
+                local_size = remote_file.size
                 async with ingestion_upload_slot(ticket):
                     item.update({
                         "status": "uploading",
@@ -1171,8 +1187,10 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
                     f"Failed to upload folder entry {item.get('path')}: {sanitize_sensitive_urls(str(error))}",
                 )
             finally:
-                await cancel_ingestion_upload(ticket)
-                ready_queue.task_done()
+                try:
+                    await cancel_ingestion_upload(ticket)
+                finally:
+                    ready_queue.task_done()
 
     try:
         try:
@@ -1207,7 +1225,13 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
                 raise OSError("Google Drive returned a file without an ID")
             try:
                 raw_parts = torrent_relative_parts(raw_path)
+                # Some folder listings include the root prefix, while gdown's current
+                # public API normally returns paths relative to the selected folder.
+                if len(raw_parts) > 1 and raw_parts[0].casefold() == root_name.casefold():
+                    raw_parts = raw_parts[1:]
                 relative_parts = tuple(safe_torrent_component(part) for part in raw_parts)
+                if not relative_parts:
+                    raise ValueError("Google Drive returned an empty file path")
             except ValueError as error:
                 raise OSError(f"Google Drive returned an unsafe path: {raw_path!r}") from error
 
@@ -1291,8 +1315,10 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
             f"Folder import finished for {root_name}: {len(items) - failures} succeeded, {failures} failed",
         )
     finally:
-        for ticket in tickets.values():
-            await cancel_ingestion_upload(ticket)
+        await gather(
+            *(cancel_ingestion_upload(ticket) for ticket in tickets.values()),
+            return_exceptions=True,
+        )
         for task in download_workers:
             if not task.done():
                 task.cancel()
@@ -1328,6 +1354,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
     torrent_session: Any | None = None
     handle: Any | None = None
     active_uploads: dict[int, Task[File]] = {}
+    pending_uploads: dict[int, tuple[File, Path, dict[str, Any], str, int, int, IngestionUploadTicket]] = {}
     max_concurrent_file_uploads: int = max(1, min(2, int(data_center.MAX_PARALLEL_UPLOADS)))
     tray_items: list[dict[str, Any]] = []
 
@@ -1401,6 +1428,32 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
         finally:
             if not ticket.claimed:
                 await cancel_ingestion_upload(ticket)
+
+    def start_pending_uploads() -> None:
+        """Start only a bounded number of upload coroutines for already-enqueued FIFO tickets."""
+
+        while pending_uploads and len(active_uploads) < max_concurrent_file_uploads:
+            index = next(iter(pending_uploads))
+            (
+                torrent_file,
+                local_path,
+                item,
+                relative_name,
+                local_size,
+                sequence,
+                ticket,
+            ) = pending_uploads.pop(index)
+            active_uploads[index] = create_task(
+                upload_completed_file(
+                    torrent_file,
+                    local_path,
+                    item,
+                    relative_name,
+                    local_size,
+                    sequence,
+                    ticket,
+                )
+            )
 
     try:
         write_log("INFO", data_center, "TORRENT", file.username, f"Starting magnet download: {safe_link}")
@@ -1488,13 +1541,21 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                     continue
 
                 del active_uploads[index]
-                saved_file: File = task.result()
+                try:
+                    saved_file: File = task.result()
+                except Exception:
+                    # One file's provider failure must not cancel downloads/uploads for
+                    # other selected torrent files. The worker already recorded its error.
+                    processed_indices.add(index)
+                    continue
+
                 processed_indices.add(index)
                 saved_count += 1
 
-                if first_saved_id is None and saved_file is file:
+                if first_saved_id is None:
                     first_saved_id = saved_file.id
 
+            start_pending_uploads()
             status: Any = handle.status()
             raise_torrent_error(status)
             raw_file_progress = handle.file_progress()
@@ -1507,15 +1568,20 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                 size = file_sizes[index]
 
                 if index in processed_indices:
-                    item.update({
-                        "transfer": size,
-                        "total": size,
-                        "status": "completed",
-                        "message": "Completed",
-                    })
+                    if item.get("status") != "error":
+                        item.update({
+                            "transfer": size,
+                            "total": size,
+                            "download_transfer": size,
+                            "download_total": size,
+                            "upload_transfer": size,
+                            "upload_total": size,
+                            "status": "completed",
+                            "message": "Completed",
+                        })
                     continue
 
-                if index in active_uploads:
+                if index in active_uploads or index in pending_uploads:
                     continue
 
                 downloaded = min(size, file_progress[index]) if index < len(file_progress) else 0
@@ -1531,10 +1597,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
             # local file immediately after its upload succeeds, rather than waiting for
             # the whole torrent to finish downloading.
             for index in selected_order:
-                if len(active_uploads) >= max_concurrent_file_uploads:
-                    break
-
-                if index in processed_indices or index in active_uploads:
+                if index in processed_indices or index in active_uploads or index in pending_uploads:
                     continue
 
                 size = file_sizes[index]
@@ -1579,7 +1642,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                 relative_display_path: str = "/".join(target_parts)
                 local_size: int = candidate_path.stat().st_size
 
-                if first_saved_id is None and saved_count == 0 and not active_uploads:
+                if first_saved_id is None and saved_count == 0 and not active_uploads and not pending_uploads:
                     torrent_file: File = file
                     torrent_file.directory_id = cast(int, target_directory.id)
                     torrent_file.name = target_name
@@ -1619,18 +1682,20 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                     file.username,
                     f"Uploading completed torrent file {scheduled_count}/{len(selected_order)}: {relative_display_path}",
                 )
+                # Enter the global FIFO immediately after the on-disk file is verified.
+                # Only a bounded number of local coroutines wait for/acquire upload slots.
                 ticket = await enqueue_ingestion_upload()
-                active_uploads[index] = create_task(
-                    upload_completed_file(
-                        torrent_file,
-                        candidate_path,
-                        item,
-                        relative_display_path,
-                        local_size,
-                        scheduled_count,
-                        ticket,
-                    )
+                pending_uploads[index] = (
+                    torrent_file,
+                    candidate_path,
+                    item,
+                    relative_display_path,
+                    local_size,
+                    scheduled_count,
+                    ticket,
                 )
+
+            start_pending_uploads()
 
             # Persist download and storage-upload bytes independently; item-level metrics
             # are computed by the backend and survive Redis status polling and page refreshes.
@@ -1646,10 +1711,15 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                     downloaded = size
                 else:
                     downloaded = min(size, file_progress[index]) if index < len(file_progress) else 0
-                uploaded = size if item_status == "completed" else (
-                    min(size, max(0, int(item.get("upload_transfer", item.get("transfer", 0) or 0)))
-                    if item_status == "uploading" else 0
-                )
+                if item_status == "completed":
+                    uploaded = size
+                elif item_status == "uploading":
+                    uploaded = min(
+                        size,
+                        max(0, int(item.get("upload_transfer", item.get("transfer", 0) or 0))),
+                    )
+                else:
+                    uploaded = 0
                 item.update({
                     "download_transfer": downloaded,
                     "download_total": size,
@@ -1694,8 +1764,12 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
             seeds = int(getattr(status, "num_seeds", 0) or 0)
             if peers:
                 progress.message = f"Downloading torrent files ({peers} peers, {seeds} seeds)"
+            elif any(item.get("status") == "uploading" for item in tray_items):
+                progress.message = "Uploading completed files"
+            elif any(item.get("status") == "waiting_upload" for item in tray_items):
+                progress.message = "Waiting for upload slot"
             else:
-                progress.message = "Uploading completed files" if active_uploads else "Searching for peers"
+                progress.message = "Searching for peers"
 
             yield progress
 
@@ -1719,19 +1793,29 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
             await sleep(0.5)
 
         file.id = first_saved_id
-        final_progress: Progress = Progress(torrent_name, f"Upload Complete: {saved_count} torrent file(s)", total_upload_bytes)
-        final_progress.transfer = total_upload_bytes
+        failed_count = sum(item.get("status") == "error" for item in tray_items)
+        final_message = (
+            f"Upload failed: {failed_count} of {len(selected_order)} torrent files failed; "
+            f"{saved_count} completed"
+            if failed_count else f"Upload Complete: {saved_count} torrent file(s)"
+        )
+        final_progress: Progress = Progress(torrent_name, final_message, total_upload_bytes)
+        final_progress.transfer = sum(
+            min(file_sizes[int(item["file_index"])], max(0, int(item.get("upload_transfer") or 0)))
+            for item in tray_items
+            if int(item["file_index"]) in file_sizes
+        )
         final_progress.download_transfer = total_upload_bytes
         final_progress.download_total = total_upload_bytes
         final_progress.download_active = True
         final_progress.ingestion_type = "torrent"
         final_progress.torrent_items = [dict(item) for item in tray_items]
         write_log(
-            "INFO",
+            "INFO" if not failed_count else "WARNING",
             data_center,
             "TORRENT",
             file.username,
-            f"Torrent download and concurrent upload complete: {saved_count} file(s), {total_upload_bytes} bytes",
+            f"Torrent download and sequential upload finished: {saved_count} succeeded, {failed_count} failed, {total_upload_bytes} bytes selected",
         )
         yield final_progress
 
@@ -1741,12 +1825,17 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
         raise
 
     finally:
-        pending_uploads: list[Task[File]] = list(active_uploads.values())
-        for task in pending_uploads:
+        active_tasks: list[Task[File]] = list(active_uploads.values())
+        for task in active_tasks:
             task.cancel()
 
-        if pending_uploads:
-            await gather(*pending_uploads, return_exceptions=True)
+        if active_tasks:
+            await gather(*active_tasks, return_exceptions=True)
+
+        await gather(
+            *(cancel_ingestion_upload(work[-1]) for work in pending_uploads.values()),
+            return_exceptions=True,
+        )
 
         if torrent_session is not None and handle is not None:
             try:

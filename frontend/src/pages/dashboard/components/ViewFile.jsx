@@ -1131,7 +1131,7 @@ export default function ViewFile({active = true} = {}) {
                     <p className="text-sm text-[#ff6369]">{publicFileError}</p>
                 </div>
             ) : kind === "text" || kind === "markdown" ? <FileContentPreview fileId={fileId} kind={kind} navigate={navigate} publicToken={publicToken} onRegisterActions={registerPreviewActions}/> : kind === "image" ? <MediaPreview fileId={fileId} navigate={navigate} type="image" fileName={name} publicToken={publicToken}/> : kind === "pdf" ?
-                <MediaPreview fileId={fileId} navigate={navigate} type="pdf" publicToken={publicToken}/> : kind === "audio" ?
+                <MediaPreview fileId={fileId} navigate={navigate} type="pdf" fileName={name} publicToken={publicToken}/> : kind === "audio" ?
                     <MediaPreview fileId={fileId} navigate={navigate} type="audio" fileName={name} publicToken={publicToken}/> : kind !== "video" ? (
                         <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-[#898989]">
                             <span className="material-symbols-outlined text-[40px] text-[#4d4d4d]" aria-hidden="true">visibility_off</span>

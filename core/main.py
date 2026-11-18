@@ -23,6 +23,7 @@ from core.data_center import DataCenter
 from core.utils.binaries import start_cloudflare_tunnel, start_redis_server
 from core.utils.discord_ import Discord
 from core.utils.telegram_ import Telegram
+from core.utils.telegram_link import login_telegram_user_session
 from core.utils_ import get_local_ip, stop_process, ensure_frontend_dependencies, register_vercel_backend_tunnel
 
 
@@ -162,6 +163,12 @@ async def main() -> None:
 
                         else:
                             print("Interactive prompt restored.")
+
+                    elif command in {"telegram-login", "login-telegram"}:
+                        try:
+                            await to_thread(run, login_telegram_user_session())
+                        except Exception as error:
+                            print(f"Telegram user login failed: {error}")
 
                     elif command in {"exit", "stop"}:
                         print("Shutting down StoreLimitless...")

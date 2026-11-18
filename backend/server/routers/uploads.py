@@ -23,6 +23,7 @@ from backend.server.utils import perform_validation
 from core.config import TRANSFER_PATH
 from core.data_center import DataCenter
 from core.transfer import link_upload
+from core.utils.telegram_link import resolve_telegram_message_link
 from core.utils import sanitize_sensitive_urls, write_log
 from core.utils.download_utils import preview_torrent_files
 from core.utils.progress import Progress
@@ -757,6 +758,8 @@ async def upload_link(
     """Start a background job that imports an HTTP(S), YouTube, or torrent magnet link."""
 
     raw_link: str = link.strip()
+    initial_hostname: str = (urlsplit(raw_link).hostname or "").lower()
+    is_telegram_message_link: bool = initial_hostname in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}
     parsed_link: SplitResult = urlsplit(raw_link)
     is_magnet: bool = parsed_link.scheme.lower() == "magnet"
 
@@ -783,7 +786,7 @@ async def upload_link(
         selected_torrent_files = None
         link = perform_validation(raw_link, "link")
         parsed_link = urlsplit(link)
-        raw_name = unquote(Path(parsed_link.path).name).strip() or (parsed_link.hostname or "Link import")
+        raw_name = "Telegram message" if is_telegram_message_link else (unquote(Path(parsed_link.path).name).strip() or (parsed_link.hostname or "Link import"))
 
     link_name: str = raw_name.replace("\\", "/").rsplit("/", 1)[-1].strip()[:255] or "Link import"
     source_host: str = (parsed_link.hostname or "").lower().removeprefix("www.")
@@ -845,7 +848,52 @@ async def upload_link(
         progress: Progress
 
         try:
-            async for progress in link_upload(file, link, selected_torrent_files):
+            download_link: str = link
+
+            if is_telegram_message_link:
+                # Telegram processing happens inside this persistent job so the API request
+                # can return immediately while the bot works. Never pass the original
+                # Telegram message URL to the normal downloader.
+                await Redis.set(job_id, Progress(file.name, "Processing Telegram message", 0))
+                download_link, source_name = await resolve_telegram_message_link(link)
+                resolved_name: str = source_name.replace("\\", "/").rsplit("/", 1)[-1].strip()[:255] or "Telegram download"
+                file.name = resolved_name
+                file.type = guess_type(file.name)[0] or "application/octet-stream"
+                await Redis.set(job_id, Progress(file.name, "Starting download", 0))
+
+                latest_metadata = await get_upload_job_metadata(job_id)
+
+                if latest_metadata is not None and latest_metadata.get("username") == user.username:
+                    latest_metadata["name"] = file.name
+                    await Redis.set_json(upload_job_key(job_id), latest_metadata)
+
+                if batch_id:
+                    latest_batch = await get_upload_batch_metadata(batch_id)
+
+                    if latest_batch and latest_batch.get("username") == user.username:
+                        batch_updates: dict[str, Any] = {"current_name": file.name}
+                        batch_items: Any = latest_batch.get("items")
+
+                        if isinstance(batch_items, list):
+                            normalized_items: list[dict[str, Any]] = [
+                                dict(item) if isinstance(item, dict) else {"name": str(item)}
+                                for item in batch_items
+                            ]
+                            item_index: int = int(latest_batch.get("current_index") or 0)
+
+                            if 0 <= item_index < len(normalized_items):
+                                normalized_items[item_index]["name"] = file.name
+                                batch_updates["items"] = normalized_items
+
+                        await update_upload_batch(batch_id, user.username, **batch_updates)
+
+            latest_metadata = await get_upload_job_metadata(job_id)
+
+            if latest_metadata is None or latest_metadata.get("cancelled"):
+                await Redis.set(job_id, Progress(file.name, "Upload cancelled", 0))
+                return
+
+            async for progress in link_upload(file, download_link, selected_torrent_files):
                 latest_metadata = await get_upload_job_metadata(job_id)
 
                 if latest_metadata is None or latest_metadata.get("cancelled"):

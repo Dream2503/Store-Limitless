@@ -189,7 +189,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             output = temp_dir / file.name
             output.touch()
             download_response: Response = cast(Response, response)
-            download_task = create_task(to_thread(stream_response, download_response, output))
+            download_task = create_task(to_thread(stream_response, download_response, output, link))
 
         progress: Progress = Progress(file.name, "Downloading and uploading file", total_size)
 

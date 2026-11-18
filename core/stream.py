@@ -6,7 +6,7 @@ from asyncio import Task, create_task, gather, sleep, wait_for
 from bisect import bisect_right
 from dataclasses import dataclass
 from re import Match, fullmatch
-from typing import AsyncGenerator, cast
+from typing import AsyncGenerator
 
 from backend.database.models.file import File
 from core.data_center import DataCenter
@@ -33,63 +33,15 @@ class Stream:
 
     @classmethod
     async def prepare(cls, file: File, range_header: str | None = None) -> "Stream":
-        """Resolve the real stored byte length from the final storage part before building headers."""
+        """Build a range stream from persisted metadata without waiting for an unrelated storage read."""
 
         if not file.links:
             raise OSError("File has no stored data parts")
 
-        provider: type[DataCenter] | None = DataCenter(file.data_center)
-
-        if provider is None:
-            raise ValueError(f"Unsupported data center: {file.data_center}")
-
-        chunk_size: int = int(provider.MAX_SIZE)
-
-        if chunk_size <= 0:
-            raise OSError(f"{provider.__name__}.MAX_SIZE must be greater than zero")
-
-        last_index = len(file.links) - 1
-        cached_last = await DataCenter.get_cached_part(str(file.id), last_index)
-        expected_last = None
-
-        if cached_last is not None and 0 < len(cached_last) <= provider.MAX_SIZE:
-            expected_last = cached_last
-
-        else:
-            for attempt in range(5):
-                try:
-                    candidate = await wait_for(provider.download(file.links[last_index]), timeout=300)
-
-                    if not candidate or len(candidate) > provider.MAX_SIZE:
-                        raise OSError(f"Final storage part has invalid size {len(candidate)} bytes "    f"(maximum {provider.MAX_SIZE})")
-
-                    expected_last = candidate
-                    await DataCenter.cache_part(str(file.id), last_index, candidate)
-                    break
-
-                except Exception as error:
-                    last_error = error
-
-                    if attempt == 4:
-                        raise OSError("Could not verify the final storage part after 5 attempts") from last_error
-
-                    await sleep(min(2 ** attempt, 16))
-
-        actual_size = last_index * chunk_size + len(cast(bytes, expected_last))
-
-        if actual_size <= 0:
-            raise ValueError("Cannot stream an empty file")
-
-        if int(file.size) != actual_size:
-            file.size = actual_size
-
-            if file.id is not None:
-                try:
-                    await file.update()
-
-                except Exception:
-                    pass
-
+        # File.size is committed by the upload pipeline. Do not download the final
+        # storage part just to calculate headers: that delays the first response byte,
+        # even when the browser only requests the start of a video. Each requested
+        # chunk is still validated against its expected length by _load_chunk().
         return cls(file, range_header)
 
     def __init__(self, file: File, range_header: str | None = None) -> None:

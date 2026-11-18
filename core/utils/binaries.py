@@ -284,9 +284,21 @@ def start_cloudflare_tunnel(service_url: str, label: str) -> tuple[Popen[str], s
         cloudflared = str(cloudflared_path)
         write_log("INFO", Binaries, "START_CLOUDFLARE_TUNNEL", "server", f"Cloudflare Tunnel installed at: {cloudflared_path}")
 
+    protocol: str = os.environ.get("STORELIMITLESS_CLOUDFLARE_PROTOCOL", "http2").strip().lower()
+
+    if protocol not in {"auto", "http2", "quic"}:
+        raise ValueError("STORELIMITLESS_CLOUDFLARE_PROTOCOL must be one of: auto, http2, quic")
+
+    write_log(
+        "INFO",
+        Binaries,
+        "START_CLOUDFLARE_TUNNEL",
+        "server",
+        f"Using Cloudflare edge protocol: {protocol}",
+    )
     output: Queue[str] = Queue(maxsize=1)
     process: Popen[str] = Popen(
-        [cloudflared, "tunnel", "--no-autoupdate", "--url", service_url],
+        [cloudflared, "tunnel", "--no-autoupdate", "--protocol", protocol, "--url", service_url],
         stdout=PIPE,
         stderr=STDOUT,
         text=True,
@@ -300,6 +312,20 @@ def start_cloudflare_tunnel(service_url: str, label: str) -> tuple[Popen[str], s
             return
 
         for line in process.stdout:
+            normalized_line: str = line.lower()
+
+            # Browser seeking, media-player retries, and closed client connections can
+            # make cloudflared report these expected request cancellations as ERR logs.
+            # Suppress only this known transport noise; keep forwarding unrelated errors.
+            if (
+                "http2: stream closed" in normalized_line
+                or (
+                    "context canceled" in normalized_line
+                    and ("failed to serve incoming request" in normalized_line or "failed to proxy http" in normalized_line)
+                )
+            ):
+                continue
+
             write_log("INFO", Binaries, "START_CLOUDFLARE_TUNNEL", "server", f"[Cloudflare:{label}] {line.rstrip()}")
             match: Match[str] | None = search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
 

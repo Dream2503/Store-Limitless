@@ -6,10 +6,18 @@ import {getToken} from "../utils.js";
 export default function useUploadJobs(refreshDirectory) {
     const [uploadJobs, setUploadJobs] = useState([]);
     const refreshedTerminalIds = useRef(new Set());
+    const hasActiveUploads = useRef(false);
 
     useEffect(() => {
         let cancelled = false;
         let polling = false;
+        let pollTimer = null;
+
+        const scheduleNextPoll = () => {
+            if (cancelled) return;
+            const delay = hasActiveUploads.current ? 500 : 2000;
+            pollTimer = window.setTimeout(refreshUploadBatches, delay);
+        };
 
         const authenticatedFetch = (url, options = {}) => {
             const token = getToken();
@@ -25,10 +33,12 @@ export default function useUploadJobs(refreshDirectory) {
             try {
                 const response = await authenticatedFetch(`${API_URL}/auth/upload-batches`);
                 if (!response) {
+                    hasActiveUploads.current = false;
                     if (!cancelled) setUploadJobs([]);
                     return;
                 }
                 if (response.status === 401 || response.status === 403) {
+                    hasActiveUploads.current = false;
                     if (!cancelled) setUploadJobs([]);
                     return;
                 }
@@ -60,6 +70,10 @@ export default function useUploadJobs(refreshDirectory) {
                         createdAt: Number(batch.created_at) || 0,
                     };
                 });
+                // Refresh frequently only while work is active. Idle trays poll less often,
+                // reducing unnecessary API and Redis reads.
+                hasActiveUploads.current = batches.some((batch) => batch.status === "queued" || batch.status === "uploading");
+
                 // Cancellation and Clear all can be initiated from another signed-in device.
                 // Mirror those server-side changes into this tab's active chunk requests.
                 const batchStatusById = new Map(batches.map((batch) => [batch.jobId, batch.status]));
@@ -88,14 +102,14 @@ export default function useUploadJobs(refreshDirectory) {
                 console.error("Could not refresh upload tasks:", error);
             } finally {
                 polling = false;
+                scheduleNextPoll();
             }
         };
 
         void refreshUploadBatches();
-        const intervalId = window.setInterval(refreshUploadBatches, 1000);
         return () => {
             cancelled = true;
-            window.clearInterval(intervalId);
+            if (pollTimer !== null) window.clearTimeout(pollTimer);
         };
     }, [refreshDirectory]);
 

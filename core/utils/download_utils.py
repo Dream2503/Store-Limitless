@@ -9,14 +9,16 @@ from functools import partial
 from mimetypes import guess_type
 from pathlib import Path, PurePosixPath
 from shutil import rmtree
-from time import monotonic
+from re import fullmatch
+from time import monotonic, sleep as thread_sleep
 from traceback import format_exc
 from typing import Any, AsyncGenerator, Callable, cast
 from uuid import uuid4
 
 import gdown
 import libtorrent
-from requests import Response
+from requests import Response, get
+from requests.exceptions import RequestException
 from yt_dlp import YoutubeDL
 
 from backend.database.models import Directory, File
@@ -52,17 +54,223 @@ def download_google_drive_file(link: str, output: Path) -> None:
         raise OSError("Google Drive download failed")
 
 
-def stream_response(response: Response, output: Path) -> None:
-    """Stream a remote HTTP response to disk and close the response."""
+MAX_STREAM_RETRIES: int = 50
+STREAM_RETRY_MAX_DELAY: float = 5.0
+
+
+class IncompleteDownloadResponseError(RuntimeError):
+    """Raised when a server closes a response before its advertised byte count arrives."""
+
+
+class DownloadResumeNotSupportedError(RuntimeError):
+    """Raised when a remote server cannot resume a partially downloaded file."""
+
+
+def _content_range(response: Response) -> tuple[int, int, int | None] | None:
+    """Parse a standard Content-Range header into start, end, and optional total size."""
+
+    value: str = response.headers.get("Content-Range", "").strip()
+    match = fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", value, flags=2)
+
+    if match is None:
+        return None
+
+    start: int = int(match.group(1))
+    end: int = int(match.group(2))
+    total: int | None = None if match.group(3) == "*" else int(match.group(3))
+    return start, end, total
+
+
+def stream_response(response: Response, output: Path, source_url: str | None = None) -> None:
+    """Stream an HTTP response to disk, resuming interrupted transfers with byte ranges.
+
+    The output is appended only after the source confirms the requested Range offset.
+    This matters because completed chunks may already be uploading to the storage provider.
+    """
+
+    download_url: str = source_url or response.url
+    request_headers: dict[str, str] = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Encoding": "identity",
+    }
+    current_response: Response | None = response
+    total_size: int = 0
+    retry_count: int = 0
 
     try:
-        with output.open("wb", buffering=0) as destination:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    destination.write(chunk)
+        try:
+            total_size = max(0, int(response.headers.get("Content-Length", "0")))
+        except (TypeError, ValueError):
+            total_size = 0
+
+        while True:
+            offset: int = output.stat().st_size if output.exists() else 0
+
+            if total_size > 0 and offset >= total_size:
+                return
+
+            segment_start: int = offset
+            segment_end: int | None = None
+            segment_size: int = 0
+
+            try:
+                if current_response is None:
+                    headers: dict[str, str] = dict(request_headers)
+
+                    if offset:
+                        headers["Range"] = f"bytes={offset}-"
+
+                    current_response = get(
+                        download_url,
+                        stream=True,
+                        allow_redirects=True,
+                        headers=headers,
+                        timeout=(30, 60),
+                    )
+
+                    if offset:
+                        status: int = current_response.status_code
+
+                        if status in {408, 429} or status >= 500:
+                            raise RequestException(f"Remote server returned HTTP {status} while resuming the download")
+
+                        if status == 416:
+                            unsatisfied: str = current_response.headers.get("Content-Range", "")
+                            match = fullmatch(r"bytes\s+\*/(\d+)", unsatisfied.strip(), flags=2)
+
+                            if match is not None and offset >= int(match.group(1)):
+                                total_size = int(match.group(1))
+                                current_response.close()
+                                current_response = None
+                                return
+
+                            raise DownloadResumeNotSupportedError(
+                                f"Remote server rejected the resume request at byte {offset} (HTTP 416)"
+                            )
+
+                        if status == 200:
+                            raise DownloadResumeNotSupportedError(
+                                "The remote server interrupted the download and ignored the HTTP Range request. "
+                                "It must support byte-range requests to resume this partial download safely."
+                            )
+
+                        if status != 206:
+                            raise DownloadResumeNotSupportedError(
+                                f"The remote server could not resume the download (HTTP {status})"
+                            )
+
+                        content_range = _content_range(current_response)
+
+                        if content_range is None or content_range[0] != offset:
+                            raise DownloadResumeNotSupportedError(
+                                "The remote server returned an invalid Content-Range for the resume request"
+                            )
+
+                        segment_start, segment_end, remote_total = content_range
+
+                        if remote_total is not None:
+                            if total_size > 0 and total_size != remote_total:
+                                raise DownloadResumeNotSupportedError(
+                                    "The remote file size changed while the download was being resumed"
+                                )
+
+                            total_size = remote_total
+
+                    else:
+                        if current_response.status_code in {408, 429} or current_response.status_code >= 500:
+                            raise RequestException(
+                                f"Remote server returned HTTP {current_response.status_code} while downloading"
+                            )
+
+                        if not current_response.ok:
+                            raise OSError(
+                                f"Remote server returned HTTP {current_response.status_code} "
+                                f"{current_response.reason or 'Request rejected'}"
+                            )
+
+                elif current_response.status_code == 206:
+                    content_range = _content_range(current_response)
+
+                    if content_range is not None:
+                        segment_start, segment_end, remote_total = content_range
+
+                        if segment_start != offset:
+                            raise DownloadResumeNotSupportedError(
+                                "The remote server returned a byte range that does not match the downloaded file"
+                            )
+
+                        if remote_total is not None:
+                            total_size = remote_total
+
+                try:
+                    segment_size = max(0, int(current_response.headers.get("Content-Length", "0")))
+                except (TypeError, ValueError):
+                    segment_size = 0
+
+                if segment_end is not None:
+                    range_size: int = segment_end - segment_start + 1
+
+                    if segment_size > 0 and segment_size != range_size:
+                        raise IncompleteDownloadResponseError(
+                            "Remote Content-Length did not match the requested byte range"
+                        )
+
+                    segment_size = range_size
+
+                bytes_received: int = 0
+                write_mode: str = "ab" if offset else "wb"
+
+                with output.open(write_mode, buffering=0) as destination:
+                    for chunk in current_response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            destination.write(chunk)
+                            bytes_received += len(chunk)
+
+                current_response.close()
+                current_response = None
+
+                new_offset: int = output.stat().st_size if output.exists() else 0
+
+                if segment_size > 0 and bytes_received < segment_size:
+                    raise IncompleteDownloadResponseError(
+                        f"Remote response ended after {bytes_received} of {segment_size} expected bytes"
+                    )
+
+                if total_size > 0 and new_offset < total_size:
+                    # A server may intentionally return a bounded 206 range. A fully
+                    # received segment is valid progress, so request the next byte range
+                    # immediately instead of counting it as a failed attempt.
+                    if segment_end is not None and bytes_received == segment_size and new_offset == segment_end + 1:
+                        retry_count = 0
+                        continue
+
+                    raise IncompleteDownloadResponseError(
+                        f"Remote response ended at byte {new_offset} of {total_size}"
+                    )
+
+                return
+
+            except (RequestException, IncompleteDownloadResponseError) as error:
+                if current_response is not None:
+                    current_response.close()
+                    current_response = None
+
+                retry_count += 1
+
+                if retry_count > MAX_STREAM_RETRIES:
+                    current_size: int = output.stat().st_size if output.exists() else 0
+                    raise RuntimeError(
+                        f"Remote download failed after {MAX_STREAM_RETRIES} resume attempts at byte {current_size}. "
+                        f"Last error: {error}"
+                    ) from error
+
+                # Use a short capped delay. Repeated mid-stream connection cuts should
+                # recover quickly rather than accumulating long exponential backoffs.
+                thread_sleep(min(STREAM_RETRY_MAX_DELAY, 0.5 * retry_count))
 
     finally:
-        response.close()
+        if current_response is not None:
+            current_response.close()
 
 
 def update_progress_name(file: File, name: str, progress_state: ProcessedDownloadProgress) -> None:

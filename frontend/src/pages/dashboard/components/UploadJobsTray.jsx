@@ -1,5 +1,5 @@
 import {useEffect, useRef, useState} from "react";
-import {useNavigate} from "react-router-dom";
+import {useLocation, useNavigate} from "react-router-dom";
 import {API_URL, iconBtn, iconBtnDanger} from "../constants.js";
 import {formatFileSize, getToken} from "../utils.js";
 
@@ -50,6 +50,7 @@ const LINK_STAGES = {
     "finalizing upload": "Finalizing upload",
 };
 const STAGES_WITH_PERCENT = new Set(["Downloading video", "Downloading audio", "Uploading"]);
+const TORRENT_STATUS_POLL_MS = 500;
 
 function formatLinkStage(message) {
     const stage = String(message ?? "").trim().toLowerCase();
@@ -106,7 +107,7 @@ function Icon({name, className = "", style}) {
 function ProgressBar({percent, muted = false, className = ""}) {
     return <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}
                 className={`h-1 overflow-hidden rounded-full bg-[#29372e] ${className}`}>
-        <div className={`h-full rounded-full transition-[width] duration-300 motion-reduce:transition-none ${muted ? "bg-[#7f8f84]" : FILL}`}
+        <div className={`h-full rounded-full transition-[width] duration-500 ease-linear motion-reduce:transition-none ${muted ? "bg-[#7f8f84]" : FILL}`}
              style={{width: `${percent}%`}}/>
     </div>;
 }
@@ -125,10 +126,16 @@ function formatEta(seconds) {
     return `${hours}h ${minutes}m left`;
 }
 
-/** Estimate rate from the latest account-synchronized progress snapshots. */
-function useTransferMetrics(transfer, total, status) {
+/**
+ * Estimate throughput from successive server progress snapshots.
+ *
+ * Keep this hook in the persistent file row/card rather than inside conditional
+ * progress-detail markup. Brief status changes and a quiet polling interval should
+ * not throw away the last useful rate estimate.
+ */
+function useTransferMetrics(transfer, total) {
     const [speed, setSpeed] = useState(0);
-    const previous = useRef({transfer: num(transfer), at: Date.now(), status});
+    const previous = useRef({transfer: num(transfer), at: Date.now()});
 
     useEffect(() => {
         const now = Date.now();
@@ -136,29 +143,25 @@ function useTransferMetrics(transfer, total, status) {
         const prior = previous.current;
         const elapsed = (now - prior.at) / 1000;
 
-        if (prior.status !== status || currentTransfer < prior.transfer) {
+        if (currentTransfer < prior.transfer) {
+            // A new transfer phase or resumed transfer reset its byte counter.
             setSpeed(0);
         } else if (elapsed >= 0.25 && currentTransfer > prior.transfer) {
-            setSpeed((currentTransfer - prior.transfer) / elapsed);
+            const measuredSpeed = (currentTransfer - prior.transfer) / elapsed;
+            setSpeed((currentSpeed) => currentSpeed > 0
+                ? currentSpeed * 0.7 + measuredSpeed * 0.3
+                : measuredSpeed);
         }
 
-        previous.current = {transfer: currentTransfer, at: now, status};
-    }, [transfer, status]);
-
-    useEffect(() => {
-        const interval = window.setInterval(() => {
-            if (Date.now() - previous.current.at >= 4000) setSpeed(0);
-        }, 1000);
-        return () => window.clearInterval(interval);
-    }, []);
+        previous.current = {transfer: currentTransfer, at: now};
+    }, [transfer]);
 
     const remaining = Math.max(0, num(total) - num(transfer));
     const eta = speed > 0 && remaining > 0 ? remaining / speed : null;
     return {speed, eta, remaining};
 }
 
-function TransferDetails({transfer, total, status, compact = false}) {
-    const {speed, eta} = useTransferMetrics(transfer, total, status);
+function TransferDetails({transfer, total, status, compact = false, speed = 0, eta = null}) {
     if (num(total) <= 0) return null;
 
     const transferLabel = status === "downloading" ? "Downloaded" : "Transferred";
@@ -181,6 +184,7 @@ function ItemRow({item, status}) {
     const meta = ITEM_STATUS[status] || ITEM_STATUS.queued;
     const {size, percent} = getItemProgress(item, status);
     const transfer = status === "completed" ? size : num(item.transfer);
+    const {speed, eta} = useTransferMetrics(transfer, size);
     const name = getFileName(item);
     const showPercent = meta.transferring && size > 0;
 
@@ -195,7 +199,7 @@ function ItemRow({item, status}) {
         </div>
         {showPercent && <>
             <ProgressBar percent={percent} className="ml-[23px] mt-1.5"/>
-            <TransferDetails transfer={transfer} total={size} status={status} compact/>
+            <TransferDetails transfer={transfer} total={size} status={status} compact speed={speed} eta={eta}/>
         </>}
     </div>;
 }
@@ -260,10 +264,21 @@ function mergeTorrentProgress(items, owns, progressItems) {
     const byIndex = new Map(progressItems.map((p) => [Number(p.file_index), p]));
     return items.map((item) => {
         if (!owns(item)) return item;
-        const p = byIndex.get(Number(item.file_index)) || progressItems.find((candidate) => getFileName(candidate) === item.name);
+
+        // The API reports paths relative to the torrent root while the picker stores the
+        // full path. Match by stable file index first, then normalize both names as fallback.
+        const p = byIndex.get(Number(item.file_index)) || progressItems.find((candidate) =>
+            normalizePath(candidate.name).toLowerCase() === normalizePath(item.path || item.name).toLowerCase() ||
+            getFileName(candidate) === getFileName(item)
+        );
         if (!p) return item;
+
         const status = String(p.status || "downloading");
-        const message = status === "downloaded" ? "Downloaded · waiting to upload" : status === "downloading" ? "Downloading" : String(p.message || item.message || (status === "uploading" ? "Uploading" : status));
+        const message = status === "downloaded"
+            ? "Downloaded · waiting to upload"
+            : status === "downloading"
+                ? "Downloading"
+                : String(p.message || item.message || (status === "uploading" ? "Uploading" : status));
         return {...item, status, message, transfer: num(p.transfer), total: num(p.total) || num(item.size)};
     });
 }
@@ -277,10 +292,22 @@ async function runTorrentImport(job, selection, onStarted) {
     const token = getToken();
     if (!token) throw new Error("Your session has expired.");
 
-    const torrents = job.torrentFiles;
+    const torrents = Array.isArray(job.torrentFiles) ? job.torrentFiles : [];
+    if (torrents.length !== 1) {
+        throw new Error("Import one torrent per task. Multiple torrent links are not supported.");
+    }
+
     const selectedFor = (torrent, i) => selection[getTorrentKey(torrent, i)] || [];
-    const patch = (body) => patchBatch(token, job.jobId, body);
+    const patch = async (body) => {
+        const response = await patchBatch(token, job.jobId, body);
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.detail || `Could not update torrent task (HTTP ${response.status}).`);
+        }
+        return response;
+    };
     const totalFiles = torrents.reduce((count, torrent, i) => count + selectedFor(torrent, i).length, 0);
+    if (totalFiles === 0) throw new Error("Select at least one file from the torrent.");
 
     let items = torrents.flatMap((torrent, i) => torrent.files
         .filter((file) => selectedFor(torrent, i).includes(Number(file.index)))
@@ -295,16 +322,14 @@ async function runTorrentImport(job, selection, onStarted) {
             path: file.path,
         })));
 
-    const started = await patch({
+    await patch({
         status: "uploading",
-        message: `Downloading ${totalFiles} selected file${totalFiles === 1 ? "" : "s"}`,
+        message: `Starting torrent download for ${totalFiles} selected file${totalFiles === 1 ? "" : "s"}`,
         items,
         total_items: totalFiles,
         completed_items: 0,
         current_name: items[0]?.name || "",
     });
-    if (!started.ok) throw new Error("Could not start the torrent task.");
-    onStarted();
 
     for (const [i, torrent] of torrents.entries()) {
         const selected = selectedFor(torrent, i);
@@ -330,14 +355,23 @@ async function runTorrentImport(job, selection, onStarted) {
         const {job_id: importJobId} = await response.json();
         await patch({current_job_id: importJobId, current_name: firstName, message: `Importing ${firstName}`});
 
-        let delay = 500;
+        // Keep the picker open until the backend has accepted the child job and its ID
+        // has been recorded. A failed request can then be corrected and retried without
+        // leaving an orphaned, terminal-looking batch in the tray.
+        onStarted();
+
         while (true) {
             const statusResponse = await fetch(`${API_URL}/public/upload/${encodeURIComponent(importJobId)}/status`, {
                 headers: {Authorization: `Bearer ${token}`}, cache: "no-store",
             });
             if (!statusResponse.ok) {
                 const err = await statusResponse.json().catch(() => ({}));
-                throw new Error(`Could not check status for ${firstName}: ${err.detail || err.message || `HTTP ${statusResponse.status}`}`);
+                const message = `Could not check status for ${firstName}: ${err.detail || err.message || `HTTP ${statusResponse.status}`}`;
+                const failure = new Error(message);
+                if (statusResponse.status === 401 || statusResponse.status === 403 || statusResponse.status === 404) {
+                    failure.terminalStatus = "error";
+                }
+                throw failure;
             }
             const jobStatus = await statusResponse.json();
 
@@ -346,25 +380,32 @@ async function runTorrentImport(job, selection, onStarted) {
                 const own = items.filter(owns);
                 const active = own.find((item) => item.status === "downloading" || item.status === "uploading") || own.find((item) => item.status === "downloaded") || own[0];
                 const activeName = active?.name || firstName;
-                await patch({items, current_name: activeName, message: `${active?.message || "Processing"}: ${activeName}`});
+                const progressPatch = await patch({items, current_name: activeName, message: `${active?.message || "Processing"}: ${activeName}`});
+                if (!progressPatch.ok) {
+                    throw new Error(`Torrent is running, but its progress could not be saved (HTTP ${progressPatch.status}).`);
+                }
             }
 
             if (jobStatus.status === "completed") break;
-            if (jobStatus.status === "cancelled" || jobStatus.status === "error") throw new Error(jobStatus.message || `${firstName} failed`);
-            await new Promise((resolve) => window.setTimeout(resolve, delay));
-            delay = Math.min(2000, delay + 250);
+            if (jobStatus.status === "cancelled" || jobStatus.status === "error") {
+                const failure = new Error(jobStatus.message || `${firstName} failed`);
+                failure.terminalStatus = jobStatus.status;
+                throw failure;
+            }
+            await new Promise((resolve) => window.setTimeout(resolve, TORRENT_STATUS_POLL_MS));
         }
 
         updateOwn((item) => {
             const size = Number(item.size) || Number(item.total) || 0;
             return {...item, status: "completed", message: "Completed", transfer: size, total: size};
         });
-        await patch({
+        const completedPatch = await patch({
             items,
             completed_items: items.filter((item) => item.status === "completed").length,
             current_name: items.find(owns)?.name || firstName,
             message: `Completed ${firstName}`,
         });
+        if (!completedPatch.ok) throw new Error(`Torrent file finished, but completion state could not be saved (HTTP ${completedPatch.status}).`);
     }
 
     const final = await patch({status: "completed", message: "All selected torrent files uploaded", completed_items: items.length});
@@ -578,6 +619,7 @@ function describeJob(job) {
 
 function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
     const {isQueued, isActive, itemCount, title, statusText, statusTone, icon, iconTone, percent, transfer, total} = describeJob(job);
+    const {speed, eta} = useTransferMetrics(transfer, total);
     const torrents = job.torrentFiles || [];
     const items = Array.isArray(job.items) ? job.items : [];
     const hasPicker = torrents.length === 1 && job.status === "queued";
@@ -603,7 +645,8 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
                         {isQueued ? "Waiting" : `${percent.toFixed(1)}%`}
                     </p>
                     {!isQueued && <TransferDetails transfer={transfer} total={total}
-                                                   status={job.status === "completed" ? "completed" : (/download/i.test(String(job.message || "")) ? "downloading" : "uploading")}/>}
+                                                   status={job.status === "completed" ? "completed" : (/download/i.test(String(job.message || "")) ? "downloading" : "uploading")}
+                                                   speed={speed} eta={eta}/>}
                 </div>}
 
 
@@ -629,6 +672,10 @@ function UploadJobCard({job, onSelectFiles, onCancel, onDismiss}) {
 
 export default function UploadJobsTray({uploadJobs, cancelUploadJob, dismissUploadJob, clearAllUploadJobs, fullscreen = false}) {
     const navigate = useNavigate();
+    const location = useLocation();
+    const returnTo = typeof location.state?.returnTo === "string" && /^\/home(?:\/|$)/.test(location.state.returnTo)
+        ? location.state.returnTo
+        : "/home";
     const [selectionJob, setSelectionJob] = useState(null); // non-null means the picker is open
     const [selection, setSelection] = useState({});         // torrentKey -> selected file indexes
     const [selectionIndex, setSelectionIndex] = useState(0);
@@ -682,9 +729,35 @@ export default function UploadJobsTray({uploadJobs, cancelUploadJob, dismissUplo
             });
         } catch (err) {
             const message = err instanceof Error ? err.message : "Could not start torrent download.";
-            if (!pickerClosed) setError(message);
             const token = getToken();
-            if (token) void patchBatch(token, job.jobId, {status: "error", message});
+
+            if (!pickerClosed) {
+                setError(message);
+                // A start failure must remain retryable. Restore the queued state instead
+                // of making this task terminal before the torrent child was accepted.
+                if (token) {
+                    void patchBatch(token, job.jobId, {
+                        status: "queued",
+                        message: `Could not start torrent import: ${message}`,
+                    }).catch((patchError) => console.error("Could not restore torrent task after start failure:", patchError));
+                }
+            } else if (err?.terminalStatus) {
+                if (token) {
+                    void patchBatch(token, job.jobId, {
+                        status: err.terminalStatus,
+                        message,
+                    }).catch((patchError) => console.error("Could not save torrent task failure:", patchError));
+                }
+            } else {
+                // A temporary progress/API failure after the child started must not mark
+                // the parent terminal; the backend reconciles the batch from child state.
+                if (token) {
+                    void patchBatch(token, job.jobId, {
+                        status: "uploading",
+                        message: `Torrent import started; waiting for server progress: ${message}`,
+                    }).catch((patchError) => console.error("Could not save torrent recovery state:", patchError));
+                }
+            }
         } finally {
             if (!pickerClosed) setStarting(false);
         }
@@ -717,10 +790,14 @@ export default function UploadJobsTray({uploadJobs, cancelUploadJob, dismissUplo
                     </span>}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
-                    <button type="button" onClick={() => navigate(fullscreen ? "/home" : "/upload-tray")}
+                    <button type="button" onClick={() => fullscreen
+                        ? navigate(returnTo, {replace: true})
+                        : navigate("/upload-tray", {
+                            state: {returnTo: `${location.pathname}${location.search}${location.hash}`},
+                        })}
                             className="flex h-7 w-7 items-center justify-center rounded-md text-[#9bbba7] transition-colors hover:bg-white/5 hover:text-[#f3f7f4]"
-                            title={fullscreen ? "Return to dashboard" : "Open full-screen upload tray"}
-                            aria-label={fullscreen ? "Return to dashboard" : "Maximize upload tray"}>
+                            title={fullscreen ? "Return to previous directory" : "Open full-screen upload tray"}
+                            aria-label={fullscreen ? "Minimize upload tray and return to previous directory" : "Maximize upload tray"}>
                         <Icon name={fullscreen ? "close_fullscreen" : "open_in_full"} className="text-[17px]"/>
                     </button>
                     <button type="button" onClick={() => clearAllUploadJobs?.()}

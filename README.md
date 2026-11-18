@@ -457,7 +457,7 @@ scratch space whose staging folders are isolated and cleaned asynchronously when
 
 ### Remote-link imports
 
-`POST /auth/upload-link` starts a background import job for **one remote source URL**. Link mode intentionally accepts one HTTP(S) URL or one valid
+`POST /auth/upload-link` starts a background import job for **one remote source URL**. It also accepts StoreLimitless `/s/{id}` share links and legacy signed `/view/{token}` links from the same database: these create a new `files` row for the importing account with the same name, type, size, provider, and complete `links` array, reusing the original stored parts without downloading or uploading bytes. A share link from another StoreLimitless database cannot use this metadata-copy path. Link mode intentionally accepts one HTTP(S) URL or one valid
 torrent magnet URI per task. It no longer treats newline-separated URLs as a multi-link batch; start another import for each additional source. Local
 multi-file and nested-folder uploads remain batch operations.
 
@@ -1046,9 +1046,12 @@ see [Security notes](#security-notes).
 | `POST /auth/trash/directory/{did}/restore`        | Restore a trashed directory.                                                                                       |
 | `DELETE /auth/trash/file/{fid}`                   | Permanently delete a file record from trash.                                                                       |
 | `DELETE /auth/trash/directory/{did}`              | Permanently delete a directory from trash.                                                                         |
-| `POST /auth/file/{fid}/public-link`               | Create a signed stream/download token for a file.                                                                  |
+| `POST /auth/file/{fid}/public-link`               | Create or reuse a permanent short public share ID for a file; legacy clients also receive a signed token.           |
 | `POST /auth/files/zip-link`                        | Validate at least two active files and create a short-lived token for a streamed ZIP download.                     |
 | `GET /public/download-zip/{token}`                 | Stream a ZIP64 archive directly from remote source files without creating a complete temporary archive.            |
+
+New public shares use an opaque 11-character ID stored in PostgreSQL and are opened at `/s/{share_id}`. The same ID also works with
+`/public/stream/{share_id}` and `/public/download/{share_id}`. Existing signed `/view/{token}` links continue to work.
 
 The `/home` root is protected from being moved/renamed/deleted by the directory-management code. File and directory names are validated before path
 changes.
@@ -1090,7 +1093,7 @@ The current deployment separates the static React frontend from the Python API:
 | Component             | URL / location                                          | Role                                                                                              |
 |-----------------------|---------------------------------------------------------|---------------------------------------------------------------------------------------------------|
 | Frontend              | `https://storelimitless.vercel.app`                     | Public landing page, authentication UI, and dashboard                                             |
-| Stable API proxy      | `https://storelimitlessbackend.vercel.app`              | Stable browser-facing API origin; forwards requests to the currently registered Cloudflare tunnel |
+| Stable API proxy      | `https://cdn-storelimitless.vercel.app`              | Stable browser-facing API origin; forwards requests to the currently registered Cloudflare tunnel |
 | Cloud-mode API tunnel | Generated at runtime                                    | Temporary HTTPS upstream to the Python API on port `8000`                                         |
 | Tunnel registry       | Upstash Redis, configured in the Next.js Vercel project | Stores the active tunnel URL and last registration timestamp                                      |
 
@@ -1134,7 +1137,7 @@ and configuration files; these are required to rebuild and deploy the proxy.
   `0.0.0.0:5173`, and FTP on port `2121`. Source-mode startup installs frontend dependencies if Vite is missing, then launches the Vite dev server.
 - **`CLOUD`**: start a Cloudflare Quick Tunnel for the local API on port `8000`. The public frontend is hosted separately at
   `https://storelimitless.vercel.app`; Cloud mode does not start Vite or bundle frontend assets into its executable. The current tunnel URL is
-  registered with the stable Vercel API proxy at `https://storelimitlessbackend.vercel.app`, which stores the active upstream URL in Upstash Redis.
+  registered with the stable Vercel API proxy at `https://cdn-storelimitless.vercel.app`, which stores the active upstream URL in Upstash Redis.
   The proxy forwards API requests to that registered tunnel.
 
 The current Cloud-mode code does not create a public FTP tunnel. FTP still listens locally on port `2121`, and Redis is intended to remain private.
@@ -1467,14 +1470,13 @@ This project should be treated as a self-hosted application that requires securi
 
 1. **Rotate committed secrets.** The shared source contains hardcoded credentials/configuration values. Treat them as exposed, rotate them, and
    replace hardcoded constants with environment-based configuration or a secret manager.
-2. **Move login credentials out of query strings.** The current frontend sends the username and password as query parameters for the login request.
-   URLs may be retained by browser history, proxy/server logs, and monitoring systems. Change login to accept a JSON request body and update the
-   frontend and backend together.
+2. **Keep login credentials out of URLs.** Login credentials are sent in a JSON request body, not query parameters, to avoid exposing them
+   through browser history, proxy/server logs, and monitoring systems.
 3. **Keep Redis private.** Redis listens on the local host and is an internal coordination service. Do not expose it directly to the internet.
 4. **Do not use plain FTP over untrusted networks.** Add FTPS or another secure transport and configure passive data ports/firewall rules correctly
    before public use.
-5. **Treat public links as secrets.** Signed public-link tokens do not currently contain an expiry. Add expiry and a revocation strategy if links must
-   be time-limited.
+5. **Treat public links as secrets.** Short public share IDs are durable and do not currently expire; anyone with the link can view the file until
+   the file is deleted. Add an explicit revocation/expiry control if time-limited sharing is required.
 6. **Use HTTPS in public deployments.** The frontend, bearer tokens, account data, and file links should not cross untrusted networks over plain HTTP.
 7. **Review CORS and hosting mode.** `backend/server/app.py` has development-oriented local origins, and Cloud mode adds the selected website origin.
    Use an explicit allowlist appropriate for the deployment.

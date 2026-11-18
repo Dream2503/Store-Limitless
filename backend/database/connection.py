@@ -71,6 +71,26 @@ try:
                         REFERENCES users (username)
             );
 
+            CREATE TABLE IF NOT EXISTS public_links (
+                slug       TEXT PRIMARY KEY,
+                file_id    BIGINT      NOT NULL,
+                username   TEXT        NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+                CONSTRAINT fk_public_links_file
+                    FOREIGN KEY (file_id)
+                        REFERENCES files (id)
+                        ON DELETE CASCADE,
+
+                CONSTRAINT fk_public_links_user
+                    FOREIGN KEY (username)
+                        REFERENCES users (username)
+                        ON DELETE CASCADE,
+
+                CONSTRAINT unique_public_link_per_file
+                    UNIQUE (file_id, username)
+            );
+
             """
         )
         connection.commit()

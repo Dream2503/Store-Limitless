@@ -60,6 +60,7 @@ def resolve_upload_job_status(message: str, metadata: dict[str, object]) -> str:
         "download and upload complete",
         "torrent download and sequential upload complete",
         "google drive folder import complete",
+        "storelimitless copy complete",
     )):
         return "completed"
 

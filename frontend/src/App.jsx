@@ -144,10 +144,12 @@ function LegacyDashboardRedirect() {
 function PersistentRoutePages() {
     const location = useLocation();
     const isDashboardRoute = location.pathname === "/home" || location.pathname.startsWith("/home/");
-    const viewRouteMatch = location.pathname.match(/^\/view\/([^/]+)\/?$/);
+    const viewRouteMatch = location.pathname.match(/^\/(?:view|s)\/([^/]+)\/?$/);
     const isViewRoute = Boolean(viewRouteMatch);
+    const isShortShareRoute = /^\/s\/[^/]+\/?$/.test(location.pathname);
     const isPublicViewRoute = isViewRoute && (
-        new URLSearchParams(location.search).has("public_token")
+        isShortShareRoute
+        || new URLSearchParams(location.search).has("public_token")
         || !/^\d+$/.test(decodeURIComponent(viewRouteMatch[1]))
     );
     const [hasSession, setHasSession] = useState(() => Boolean(localStorage.getItem("token")));
@@ -205,6 +207,7 @@ function PersistentRoutePages() {
             <Route path="/upload" element={hasStoredSession ? <UploadPage/> : <Navigate to="/" replace/>}/>
             <Route path="/home/*" element={hasStoredSession ? null : <Navigate to="/" replace/>}/>
             <Route path="/view/:fileId" element={!hasStoredSession && !isPublicViewRoute ? <Navigate to="/" replace/> : null}/>
+            <Route path="/s/:shareId" element={null}/>
         </Routes>
     </>);
 }

@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from backend.database.models import Directory, File, User
 from backend.database.redis_server import Redis
 from backend.server.jwt_handler import get_current_user
-from backend.server.security import verify_public_stream_token, verify_public_zip_token
+from backend.server.security import resolve_public_share_id, verify_public_stream_token, verify_public_zip_token
 from backend.server.zip_stream import ZipStreamEntry, stream_zip64, zip64_stored_content_length
 from core.data_center import Database
 from core.stream import Stream
@@ -128,29 +128,17 @@ def _content_disposition(filename: str, attachment: bool) -> str:
 
 
 
-async def _stream_while_connected(stream: Stream, request: Request) -> AsyncGenerator[bytes]:
-    """Stop reading remote storage chunks when the HTTP client disconnects."""
+async def _stream_while_connected(stream: Stream) -> AsyncGenerator[bytes]:
+    """Yield storage bytes and let Starlette own ASGI client-disconnect detection."""
 
     iterator = stream.stream()
     try:
-        while True:
-            if await request.is_disconnected():
-                return
-
-            try:
-                chunk = await anext(iterator)
-            except StopAsyncIteration:
-                return
-
-            # A disconnect may occur while the next remote storage chunk is loading.
-            # Do not send that chunk after the consumer has already left.
-            if await request.is_disconnected():
-                return
+        async for chunk in iterator:
             if chunk:
                 yield chunk
     finally:
-        # Seeking, closing a tab, and replacing an HTTP range normally cancel the
-        # previous stream. These are not storage failures and should not be warnings.
+        # StreamingResponse cancels this generator when the ASGI client disconnects.
+        # Do not poll Request.receive() here: Starlette is already listening on it.
         await iterator.aclose()
 
 
@@ -215,7 +203,6 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
         "Content-Disposition": _content_disposition(file.name, attachment),
         "Cache-Control": "private, no-cache, no-transform",
         "ETag": etag,
-        "Content-Length": str(size),
         "X-Content-Type-Options": "nosniff",
         "X-Accel-Buffering": "no",
         **cors_headers,
@@ -225,7 +212,14 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
     end = stream.byte_range.end
     length = end - start + 1
     partial = range_header is not None
-    headers["Content-Length"] = str(length)
+
+    # Inline media players commonly cancel an initial full-file 200 response after
+    # reading only the metadata. Do not advertise a full-body Content-Length for
+    # that response, or the browser reports a content-length mismatch on a normal
+    # preload/seek cancellation. Explicit byte ranges remain length-delimited, and
+    # attachment downloads retain Content-Length for download progress/resume.
+    if partial or attachment or head_only:
+        headers["Content-Length"] = str(length)
 
     if partial:
         headers["Content-Range"] = f"bytes {start}-{end}/{size}"
@@ -233,7 +227,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
     if head_only:
         return Response(status_code=206 if partial else 200, headers=headers, media_type=content_type)
 
-    return StreamingResponse(_stream_while_connected(stream, request), status_code=206 if partial else 200, headers=headers, media_type=content_type)
+    return StreamingResponse(_stream_while_connected(stream), status_code=206 if partial else 200, headers=headers, media_type=content_type)
 
 
 async def _ensure_private_link_session_active(payload: dict[str, object], request: Request) -> None:
@@ -262,13 +256,22 @@ async def _ensure_private_link_session_active(payload: dict[str, object], reques
 
 
 async def _owned_public_file(token: str, request: Request) -> File:
-    """Resolve a signed token to its original owner's file record."""
+    """Resolve either a legacy signed token or a short share ID to its owner's file record."""
 
     try:
         payload: dict[str, object] = verify_public_stream_token(token)
 
     except ValueError as error:
-        raise HTTPException(status_code=404, detail="Invalid public download link", headers=_public_cors_headers(request)) from error
+        # New public URLs use a short, random database-backed ID. Retain support for
+        # existing signed tokens so links already shared by users do not break.
+        short_link = resolve_public_share_id(token)
+        if short_link is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Invalid public download link",
+                headers=_public_cors_headers(request),
+            ) from error
+        payload = short_link
 
     await _ensure_private_link_session_active(payload, request)
     file = await File.get(cast("str", payload["username"]), fid=int(cast("int", payload["file_id"])))

@@ -344,9 +344,14 @@ export default function DashboardPage({active = true} = {}) {
                 }
                 throw new Error(data.detail || "Could not create a share link.");
             }
-            if (!data.public_token) throw new Error("The server did not return a public link.");
+            const sharePath = data.share_id
+                ? `/s/${encodeURIComponent(data.share_id)}`
+                : data.public_token
+                    ? `/view/${encodeURIComponent(data.public_token)}`
+                    : null;
+            if (!sharePath) throw new Error("The server did not return a public link.");
 
-            const url = new URL(`/view/${encodeURIComponent(data.public_token)}`, window.location.origin).toString();
+            const url = new URL(sharePath, window.location.origin).toString();
 
             setShareDialog({name: file.name, url, loading: false, error: ""});
         } catch (error) {

@@ -34,6 +34,7 @@ async def file_upload(
         pause_check: Callable[[], Awaitable[bool]] | None = None,
         bypass_queue: bool = False,
         total_size: int = 0,
+        download_from_path: bool = False,
 ) -> AsyncGenerator[Progress]:
     """Upload a file, optionally bypassing the shared FIFO for interactive edits."""
 
@@ -74,6 +75,7 @@ async def file_upload(
                     track_download=track_download,
                     download_total=download_total,
                     total_size=max(0, int(total_size or 0)),
+                    download_from_path=download_from_path,
                     pause_check=pause_check,
             )) as upload_progress_stream:
                 async for progress_value in upload_progress_stream:

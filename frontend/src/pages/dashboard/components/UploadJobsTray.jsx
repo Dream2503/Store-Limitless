@@ -916,6 +916,7 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
     const canPause = job.kind === "file"
         && (job.status === "uploading" || job.status === "paused")
         && (!job.isBatchItem || job.isBatchItemCurrent);
+    const canCancel = isActive && (!job.isBatchItem || job.isBatchItemCurrent);
     const hasPicker = torrents.length === 1 && job.status === "queued";
 
     return <article
@@ -1087,14 +1088,14 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
                               title="Pause upload" aria-label={`Pause upload ${job.name}`}>
                         <Icon name="pause" className="text-[18px]"/>
                       </button>}
-                <button type="button"
-                        onClick={() => onCancel(job.jobId, job.isBatchItem ? job.batchItemIndex : null)}
-                        className={iconBtnDanger}
-                        title={job.isBatchItem ? "Cancel this file and continue the queue" : "Cancel this upload task and skip queued items"}
-                        aria-label={job.isBatchItem ? `Cancel file ${job.name} and continue queue` : `Cancel upload task ${job.name}`}>
-                    <Icon name="close" className="text-[17px]"/>
-                </button>
             </>}
+            {canCancel && <button type="button"
+                    onClick={() => onCancel(job.jobId, job.isBatchItem ? job.batchItemIndex : null)}
+                    className={iconBtnDanger}
+                    title={job.isBatchItem ? "Cancel this file and continue the queue" : "Cancel this copy/upload task"}
+                    aria-label={job.isBatchItem ? `Cancel file ${job.name} and continue queue` : `Cancel upload task ${job.name}`}>
+                <Icon name="close" className="text-[17px]"/>
+            </button>}
             {!isActive && (!job.isBatchItem || job.isBatchItemLast) && <button type="button" onClick={() => onDismiss(job.jobId)} className={iconBtn}
                                   title="Remove task from tray" aria-label={`Remove upload task ${job.name}`}>
                 <Icon name="close" className="text-[16px]"/>

@@ -29,6 +29,7 @@ from core.utils.telegram_link import resolve_telegram_message_link
 from core.utils import get_file_mime_type, sanitize_sensitive_urls, write_log
 from core.utils.download_utils import preview_torrent_files
 from core.utils.progress import Progress
+from core.utils.upload_manager import cancel_ingestion_upload, enqueue_ingestion_upload, ingestion_upload_slot
 from .upload_state import (
     cancel_upload_task,
     cancel_upload_job_state,
@@ -123,6 +124,7 @@ async def copy_file_to_directory(
     if not source.links:
         raise HTTPException(status_code=409, detail="The source file has no stored chunks to copy")
 
+    expected_size = max(0, int(source.size or 0))
     batch_id = str(uuid4())
     job_id = str(uuid4())
     safe_name = Path(source.name).name
@@ -158,107 +160,150 @@ async def copy_file_to_directory(
     progress.download_total = max(0, int(source.size or 0))
     await Redis.set(job_id, progress)
 
+
     async def run_copy() -> None:
-        """Download source chunks to local staging, then stream the staged file to the target."""
+        """Stream source chunks into staging while destination uploads consume completed chunks."""
         target_file = File(
             directory_id=cast("int", destination.id),
             name=safe_name,
             type=source.type,
-            size=max(0, int(source.size or 0)),
+            size=0,
             modified_at=datetime.now(timezone.utc),
             deleted_at=None,
             data_center=destination_dc,
             links=[],
             username=user.username,
         )
-        try:
-            expected_size = max(0, int(source.size or 0))
+        producer_task: Task[None] | None = None
+        latest_progress = Progress(
+            safe_name,
+            f"Copying from {source.data_center} to {destination_dc}",
+            expected_size,
+        )
+        latest_progress.download_active = True
+        latest_progress.download_total = expected_size
+
+        async def download_source() -> None:
+            """Append source chunks in order and flush each complete chunk for the uploader."""
             downloaded = 0
             async with aiofiles.open(stage_path, "wb") as output:
                 for index, link in enumerate(source.links, start=1):
-                    meta = await get_upload_job_metadata(job_id)
-                    if not meta or meta.get("cancelled"):
-                        await Redis.set(job_id, Progress(safe_name, "Upload cancelled", downloaded))
-                        await update_upload_batch(batch_id, user.username, status="cancelled", message="Copy cancelled")
-                        return
+                    metadata = await get_upload_job_metadata(job_id)
+                    if metadata is None or metadata.get("cancelled"):
+                        raise CancelledError()
                     chunk = await source_provider.download(link)
                     if not isinstance(chunk, (bytes, bytearray)):
                         raise TypeError(f"{source.data_center} returned a non-byte chunk")
+                    if not chunk:
+                        continue
                     await output.write(chunk)
+                    await output.flush()
                     downloaded += len(chunk)
-                    progress.download_transfer = downloaded
-                    progress.download_total = expected_size or downloaded
-                    progress.message = f"Downloaded {downloaded} bytes from {source.data_center}"
-                    await Redis.set(job_id, progress)
-                    await update_upload_batch(
-                        batch_id, user.username, status="uploading",
-                        message="Downloading from source data center",
-                        download_transfer=downloaded, download_total=expected_size or downloaded,
-                        download_active=True,
+                    if expected_size and downloaded > expected_size:
+                        raise IOError(
+                            f"Source provider returned more than the declared {expected_size} bytes"
+                        )
+                    write_log(
+                        "INFO", source_provider, "COPY DOWNLOAD", user.username,
+                        f"Downloaded source chunk {index}/{len(source.links)} "
+                        f"({downloaded}/{expected_size or 'unknown'} bytes) for file_id={fid}.",
                     )
             if expected_size and downloaded != expected_size:
                 raise IOError(f"Downloaded {downloaded} of {expected_size} expected bytes")
 
-            if not expected_size:
-                progress.total = downloaded
-            progress.download_transfer = downloaded
-            progress.download_total = downloaded
-            progress.download_active = False
-            target_file.size = downloaded
-            progress.total = downloaded
-            progress.message = f"Uploading to {destination_dc}"
-            await Redis.set(job_id, progress)
-            await update_upload_batch(
-                batch_id, user.username, status="uploading", message=f"Uploading to {destination_dc}",
-                download_transfer=downloaded, download_total=downloaded, download_active=False,
-            )
-            async for value in file_upload(
-                target_file, stage_path, track_download=True,
-                download_total=downloaded,
-            ):
-                # file_upload would report only upload progress. Preserve the completed
-                # source-side counter and publish both lanes to the same copy tray task.
-                value.download_transfer = downloaded
-                value.download_total = downloaded
-                value.download_active = False
-                await Redis.set(job_id, value)
-                await update_upload_batch(
-                    batch_id, user.username, status="uploading", message=f"Uploading to {destination_dc}",
-                    transfer=max(0, int(value.transfer or 0)), total=max(0, int(value.total or downloaded)),
-                    upload_transfer=max(0, int(value.transfer or 0)), upload_total=max(0, int(value.total or downloaded)),
-                    download_transfer=downloaded, download_total=downloaded, download_active=False,
-                )
-            target_file.size = downloaded
-            completed = Progress(safe_name, f"Upload Complete of id={target_file.id}", downloaded)
-            completed.transfer = downloaded
-            completed.total = downloaded
-            completed.download_transfer = downloaded
-            completed.download_total = downloaded
+        ticket = None
+        try:
+            ticket = await enqueue_ingestion_upload(safe_name, user.username)
+            async with ingestion_upload_slot(ticket):
+                producer_task = create_task(download_source())
+                async for value in file_upload(
+                    target_file,
+                    stage_path,
+                    upload_task=producer_task,
+                    track_download=True,
+                    download_total=expected_size,
+                    queue_slot_held=True,
+                    total_size=expected_size,
+                    download_from_path=True,
+                ):
+                    latest_progress = value
+                    if str(value.message or "").lower().startswith("upload complete of id="):
+                        value.download_active = False
+                        value.download_transfer = max(value.download_transfer, expected_size or value.total)
+                        value.download_total = expected_size or value.total
+                        await Redis.set(job_id, value)
+                        continue
+    
+                    # Both counters are updated by the shared upload_growing_file pipeline:
+                    # download_transfer follows bytes appended to staging, while transfer
+                    # follows bytes accepted by the destination provider.
+                    value.message = f"Copying from {source.data_center} to {destination_dc}"
+                    value.download_active = True
+                    await Redis.set(job_id, value)
+                    await update_upload_batch(
+                        batch_id,
+                        user.username,
+                        status="uploading",
+                        message=value.message,
+                        transfer=max(0, int(value.transfer or 0)),
+                        total=max(0, int(value.total or expected_size)),
+                        upload_transfer=max(0, int(value.transfer or 0)),
+                        upload_total=max(0, int(value.total or expected_size)),
+                        download_transfer=max(0, int(value.download_transfer or 0)),
+                        download_total=max(0, int(value.download_total or expected_size)),
+                        download_active=True,
+                    )
+    
+                if producer_task is not None:
+                    await producer_task
+                copied_size = max(0, int(target_file.size or expected_size or 0))
+
+            completed = Progress(safe_name, f"Upload Complete of id={target_file.id}", copied_size)
+            completed.transfer = copied_size
+            completed.total = copied_size
+            completed.download_transfer = copied_size
+            completed.download_total = copied_size
+            completed.download_active = False
             await Redis.set(job_id, completed)
             await update_upload_batch(
                 batch_id, user.username, status="completed", message="Copy completed",
-                completed_items=1, progress=100, transfer=downloaded, total=downloaded,
-                upload_transfer=downloaded, upload_total=downloaded,
-                download_transfer=downloaded, download_total=downloaded, download_active=False,
+                completed_items=1, progress=100, transfer=copied_size, total=copied_size,
+                upload_transfer=copied_size, upload_total=copied_size,
+                download_transfer=copied_size, download_total=copied_size, download_active=False,
                 items=[dict(batch_items[0], status="completed", message="Copy completed",
-                            transfer=downloaded, total=downloaded, progress=100,
-                            upload_transfer=downloaded, upload_total=downloaded,
-                            download_transfer=downloaded, download_total=downloaded)],
+                            transfer=copied_size, total=copied_size, progress=100,
+                            upload_transfer=copied_size, upload_total=copied_size,
+                            download_transfer=copied_size, download_total=copied_size)],
             )
         except CancelledError:
-            cancelled_progress = Progress(safe_name, "Upload cancelled", max(0, int(source.size or 0)))
-            cancelled_progress.transfer = progress.transfer
-            cancelled_progress.total = progress.total
-            cancelled_progress.download_transfer = progress.download_transfer
-            cancelled_progress.download_total = progress.download_total
-            cancelled_progress.download_active = False
-            await Redis.set(job_id, cancelled_progress)
+            cancelled = Progress(safe_name, "Upload cancelled", max(0, int(latest_progress.total or expected_size)))
+            cancelled.transfer = max(0, int(latest_progress.transfer or 0))
+            cancelled.total = max(0, int(latest_progress.total or expected_size))
+            cancelled.download_transfer = max(0, int(latest_progress.download_transfer or 0))
+            cancelled.download_total = max(0, int(latest_progress.download_total or expected_size))
+            cancelled.download_active = False
+            await Redis.set(job_id, cancelled)
             await update_upload_batch(batch_id, user.username, status="cancelled", message="Copy cancelled")
         except Exception as error:
             detail = " ".join(sanitize_sensitive_urls(str(error)).split())[:400]
-            await Redis.set(job_id, Progress(safe_name, f"Upload failed: {detail or type(error).__name__}", 0))
+            failed = Progress(safe_name, f"Upload failed: {detail or type(error).__name__}", max(0, int(latest_progress.total or 0)))
+            failed.transfer = max(0, int(latest_progress.transfer or 0))
+            failed.total = max(0, int(latest_progress.total or 0))
+            failed.download_transfer = max(0, int(latest_progress.download_transfer or 0))
+            failed.download_total = max(0, int(latest_progress.download_total or expected_size))
+            failed.download_active = False
+            await Redis.set(job_id, failed)
             await update_upload_batch(batch_id, user.username, status="error", message=f"Copy failed: {detail}")
         finally:
+            if ticket is not None and not ticket.claimed:
+                await cancel_ingestion_upload(ticket)
+            # Cancelling the tracked parent must stop the separate source producer too.
+            if producer_task is not None and not producer_task.done():
+                producer_task.cancel()
+                try:
+                    await producer_task
+                except CancelledError:
+                    pass
             stage_path.unlink(missing_ok=True)
             try:
                 stage_path.parent.rmdir()

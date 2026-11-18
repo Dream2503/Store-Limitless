@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import platform
 import re
 import shutil
 import unicodedata
@@ -12,7 +13,7 @@ from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 from mimetypes import guess_type
-from typing import cast, Any
+from typing import AsyncGenerator, cast, Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -24,6 +25,7 @@ from backend.server.jwt_handler import get_current_user
 from backend.server.security import verify_public_stream_token, verify_public_zip_token
 from backend.server.zip_stream import ZipStreamEntry, stream_zip64, zip64_stored_content_length
 from core.stream import Stream
+from core.utils.binaries import get_ffmpeg_path
 from core.utils.discord_ import Discord
 from core.utils.progress import Progress
 from .upload_state import get_upload_job_metadata
@@ -114,6 +116,31 @@ def _content_disposition(filename: str, attachment: bool) -> str:
     return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
 
 
+
+async def _stream_while_connected(stream: Stream, request: Request) -> AsyncGenerator[bytes, None]:
+    """Stop reading remote storage chunks when the HTTP client disconnects."""
+
+    iterator = stream.stream()
+    try:
+        while True:
+            if await request.is_disconnected():
+                return
+
+            try:
+                chunk = await anext(iterator)
+            except StopAsyncIteration:
+                return
+
+            # A disconnect may occur while the next remote storage chunk is loading.
+            # Do not send that chunk after the consumer has already left.
+            if await request.is_disconnected():
+                return
+            if chunk:
+                yield chunk
+    finally:
+        await iterator.aclose()
+
+
 async def _file_response(file: File, request: Request, *, attachment: bool, head_only: bool = False) -> Response:
     """Build a byte-range response with validators suitable for interrupted downloads."""
 
@@ -180,7 +207,7 @@ async def _file_response(file: File, request: Request, *, attachment: bool, head
     if head_only:
         return Response(status_code=206 if partial else 200, headers=headers, media_type=content_type)
 
-    return StreamingResponse(stream.stream(), status_code=206 if partial else 200, headers=headers, media_type=content_type)
+    return StreamingResponse(_stream_while_connected(stream, request), status_code=206 if partial else 200, headers=headers, media_type=content_type)
 
 
 async def _owned_public_file(token: str, request: Request) -> File:
@@ -221,24 +248,25 @@ _BITMAP_SUBTITLE_CODECS = {
 
 
 def _media_tool_paths() -> tuple[str, str]:
-    """Return FFmpeg and FFprobe executables without installing software from a public request."""
+    """Ensure FFmpeg and FFprobe are installed, then return both executable paths."""
 
-    ffmpeg_path = shutil.which("ffmpeg")
-    ffprobe_path = shutil.which("ffprobe")
+    try:
+        ffmpeg_path: Path = get_ffmpeg_path()
+    except (OSError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
-    if ffmpeg_path and not ffprobe_path:
-        candidate = Path(ffmpeg_path).with_name(f"ffprobe{Path(ffmpeg_path).suffix}")
-        if candidate.is_file():
-            ffprobe_path = str(candidate)
+    # Prefer the FFprobe bundled beside FFmpeg so both tools come from the same installation.
+    probe_name = "ffprobe.exe" if platform.system() == "Windows" else "ffprobe"
+    adjacent_probe = ffmpeg_path.with_name(probe_name)
+    ffprobe_executable: str | None = str(adjacent_probe) if adjacent_probe.is_file() else shutil.which("ffprobe")
 
-    if not ffmpeg_path or not ffprobe_path:
+    if ffprobe_executable is None:
         raise HTTPException(
             status_code=503,
-            detail="Track-aware playback requires FFmpeg and FFprobe on the StoreLimitless server.",
+            detail="FFprobe could not be found after installation. Install FFmpeg and FFprobe on the StoreLimitless server.",
         )
 
-    return ffmpeg_path, ffprobe_path
-
+    return str(ffmpeg_path), ffprobe_executable
 
 def _media_source_url(token: str) -> str:
     """Return the local byte-range endpoint used by FFmpeg to read the original stored chunks."""
@@ -246,7 +274,7 @@ def _media_source_url(token: str) -> str:
     return f"http://127.0.0.1:8000/public/stream/{quote(token, safe='')}"
 
 
-async def _run_media_tool(command: list[str], *, timeout: float, output_limit: int) -> bytes:
+async def _run_media_tool(command: list[str], *, timeout: float, output_limit: int, request: Request | None = None) -> bytes | None:
     """Run one bounded FFmpeg utility command and collect its in-memory output."""
 
     async with _MEDIA_PROCESS_LIMIT:
@@ -259,12 +287,59 @@ async def _run_media_tool(command: list[str], *, timeout: float, output_limit: i
         except OSError as error:
             raise HTTPException(status_code=503, detail="The media processing tools could not be started.") from error
 
+        communicate_task = asyncio.create_task(process.communicate())
+        disconnect_task = None
+
+        async def wait_for_disconnect() -> None:
+            """Stop waiting when the HTTP client closes its connection."""
+
+            if request is None:
+                return
+
+            while not await request.is_disconnected():
+                await asyncio.sleep(0.2)
+
+        if request is not None:
+            disconnect_task = asyncio.create_task(wait_for_disconnect())
+
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except asyncio.TimeoutError as error:
-            process.kill()
-            await process.communicate()
-            raise HTTPException(status_code=504, detail="Preparing this media track timed out. Try again.") from error
+            waiting_tasks = {communicate_task}
+            if disconnect_task is not None:
+                waiting_tasks.add(disconnect_task)
+
+            done, _ = await asyncio.wait(
+                waiting_tasks,
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if not done:
+                if process.returncode is None:
+                    process.kill()
+                await asyncio.gather(communicate_task, return_exceptions=True)
+                raise HTTPException(status_code=504, detail="Preparing this media track timed out. Try again.")
+
+            # If the client has gone away, stop expensive probing/transcoding instead of
+            # returning a large response to a socket that is already closed. Prefer the
+            # disconnect result even if FFmpeg finished in the same event-loop tick.
+            if disconnect_task is not None and disconnect_task in done:
+                if process.returncode is None:
+                    process.kill()
+                await asyncio.gather(communicate_task, return_exceptions=True)
+                return None
+
+            stdout, stderr = communicate_task.result()
+
+        except asyncio.CancelledError:
+            # Also reap FFmpeg if the ASGI request itself is cancelled during shutdown.
+            if process.returncode is None:
+                process.kill()
+            await asyncio.gather(communicate_task, return_exceptions=True)
+            raise
+        finally:
+            if disconnect_task is not None and not disconnect_task.done():
+                disconnect_task.cancel()
+                await asyncio.gather(disconnect_task, return_exceptions=True)
 
         if process.returncode != 0:
             # Do not return raw FFmpeg stderr because it can contain internal URLs or storage details.
@@ -299,7 +374,7 @@ def _hls_attribute(value: str) -> str:
     return f'"{clean[:120]}"'
 
 
-async def _public_media_info(file: File, token: str) -> dict[str, Any]:
+async def _public_media_info(file: File, token: str, request: Request | None = None) -> dict[str, Any] | None:
     """Probe the original stored media and cache only its small stream metadata."""
 
     cache_key = f"{file.username}:{file.id}:{_file_etag(file)}"
@@ -323,7 +398,10 @@ async def _public_media_info(file: File, token: str) -> dict[str, Any]:
         ],
         timeout=90,
         output_limit=8 * 1024 * 1024,
+        request=request,
     )
+    if output is None:
+        return None
 
     try:
         probe = json.loads(output)
@@ -414,9 +492,11 @@ def _hls_media_playlist(token: str, media_info: dict[str, Any], *, kind: str, st
             lines.append("#EXT-X-DISCONTINUITY")
 
         segment_duration = min(_MEDIA_SEGMENT_SECONDS, duration - segment_index * _MEDIA_SEGMENT_SECONDS)
-        url = f"{base}/segment/{kind}?index={segment_index}"
         if kind == "audio":
-            url += f"&track={int(stream_index or 0)}"
+            url = f"{base}/segment/audio/{int(stream_index or 0)}/{segment_index}"
+        else:
+            video_index = int(media_info["video"]["index"])
+            url = f"{base}/segment/video/{video_index}/{segment_index}"
         lines.extend([f"#EXTINF:{segment_duration:.3f},", url])
 
     lines.append("#EXT-X-ENDLIST")
@@ -440,7 +520,9 @@ async def public_media_tracks(token: str, request: Request) -> JSONResponse:
     """List selectable audio and text subtitle tracks embedded in the original file."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token)
+    media_info = await _public_media_info(file, token, request)
+    if media_info is None:
+        return Response(status_code=204, headers=_media_response_headers(request))
     return JSONResponse(media_info, headers=_media_response_headers(request))
 
 
@@ -449,7 +531,9 @@ async def public_hls_master(token: str, request: Request) -> Response:
     """Create an HLS master playlist without writing a playlist or media segment to disk."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token)
+    media_info = await _public_media_info(file, token, request)
+    if media_info is None:
+        return Response(status_code=204, headers=_media_response_headers(request))
     if not media_info.get("video"):
         raise HTTPException(status_code=415, detail="This file has no video track.")
 
@@ -460,7 +544,7 @@ async def public_hls_master(token: str, request: Request) -> Response:
     if audio_tracks:
         default_index = next((index for index, track in enumerate(audio_tracks) if track["default"]), 0)
         for index, track in enumerate(audio_tracks):
-            audio_playlist_url = f"{base}/audio.m3u8?track={track['index']}"
+            audio_playlist_url = f"{base}/audio/{track['index']}.m3u8"
             attributes = [
                 'TYPE=AUDIO',
                 'GROUP-ID="audio"',
@@ -488,7 +572,9 @@ async def public_hls_video_playlist(token: str, request: Request) -> Response:
     """Create the video-only HLS playlist for dynamic, in-memory segments."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token)
+    media_info = await _public_media_info(file, token, request)
+    if media_info is None:
+        return Response(status_code=204, headers=_media_response_headers(request))
     return Response(
         content=_hls_media_playlist(token, media_info, kind="video"),
         media_type="application/vnd.apple.mpegurl",
@@ -496,16 +582,18 @@ async def public_hls_video_playlist(token: str, request: Request) -> Response:
     )
 
 
-@router.get("/hls/{token}/audio.m3u8")
+@router.get("/hls/{token}/audio/{track}.m3u8")
 async def public_hls_audio_playlist(
     token: str,
+    track: int,
     request: Request,
-    track: int = Query(ge=0),
 ) -> Response:
     """Create a separate audio rendition playlist for the selected embedded stream."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token)
+    media_info = await _public_media_info(file, token, request)
+    if media_info is None:
+        return Response(status_code=204, headers=_media_response_headers(request))
     if not any(int(item["index"]) == track for item in media_info["audio"]):
         raise HTTPException(status_code=404, detail="Audio track not found.")
 
@@ -516,13 +604,13 @@ async def public_hls_audio_playlist(
     )
 
 
-@router.get("/hls/{token}/segment/{kind}")
+@router.get("/hls/{token}/segment/{kind}/{track}/{index}")
 async def public_hls_segment(
     token: str,
     kind: str,
+    track: int,
+    index: int,
     request: Request,
-    index: int = Query(ge=0),
-    track: int | None = Query(default=None, ge=0),
 ) -> Response:
     """Generate one MPEG-TS transport segment on demand and return it directly from memory."""
 
@@ -530,14 +618,18 @@ async def public_hls_segment(
         raise HTTPException(status_code=404, detail="Media segment not found.")
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token)
+    media_info = await _public_media_info(file, token, request)
+    if media_info is None:
+        return Response(status_code=204, headers=_media_response_headers(request))
     duration = float(media_info["duration"])
     segment_count = math.ceil(duration / _MEDIA_SEGMENT_SECONDS)
-    if index >= segment_count:
+    if index < 0 or index >= segment_count:
         raise HTTPException(status_code=404, detail="Media segment not found.")
 
     if kind == "video":
         stream_index = int(media_info["video"]["index"])
+        if track != stream_index:
+            raise HTTPException(status_code=404, detail="Video track not found.")
     else:
         audio_track = next((item for item in media_info["audio"] if int(item["index"]) == track), None)
         if audio_track is None:
@@ -594,19 +686,24 @@ async def public_hls_segment(
         command,
         timeout=max(120.0, segment_duration * 30.0),
         output_limit=_MEDIA_MAX_OUTPUT_BYTES,
+        request=request,
     )
+    if segment is None:
+        return Response(status_code=204, headers=_media_response_headers(request))
     if not segment:
         raise HTTPException(status_code=502, detail="FFmpeg produced an empty media segment.")
 
     return Response(content=segment, media_type="video/mp2t", headers=_media_response_headers(request))
 
 
-@router.get("/hls/{token}/subtitles/{stream_index}.vtt")
+@router.get("/hls/{token}/subtitles/{stream_index}.srt")
 async def public_hls_subtitles(token: str, stream_index: int, request: Request) -> Response:
     """Extract one text subtitle track to WebVTT in memory; no sidecar file is stored."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token)
+    media_info = await _public_media_info(file, token, request)
+    if media_info is None:
+        return Response(status_code=204, headers=_media_response_headers(request))
     subtitle = next(
         (item for item in media_info["subtitles"] if int(item["index"]) == stream_index),
         None,
@@ -631,13 +728,19 @@ async def public_hls_subtitles(token: str, stream_index: int, request: Request) 
         ],
         timeout=300,
         output_limit=32 * 1024 * 1024,
+        request=request,
     )
-    if not output.startswith(b"WEBVTT"):
-        raise HTTPException(status_code=502, detail="Could not extract this subtitle track.")
+    if output is None:
+        return Response(status_code=204, headers=_media_response_headers(request))
+    if not output.lstrip().startswith(b"WEBVTT"):
+        raise HTTPException(
+            status_code=502,
+            detail="FFmpeg could not extract WebVTT captions from this subtitle track. It may be empty or an unsupported bitmap format.",
+        )
 
     return Response(
         content=output,
-        media_type="text/vtt",
+        media_type="text/vtt; charset=utf-8",
         headers=_media_response_headers(request),
     )
 

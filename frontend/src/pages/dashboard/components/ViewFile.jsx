@@ -1,4 +1,5 @@
 import {useCallback, useEffect, useRef, useState} from "react";
+import Hls from "hls.js";
 import {useNavigate, useParams, useSearchParams} from "react-router-dom";
 import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
 import UploadJobsTray from "./UploadJobsTray.jsx";
@@ -12,14 +13,96 @@ import {listResumableDownloadChunks, removeResumableDownloadChunks, removeResuma
  * @typedef {Object} VideoPlayerProps
  * @property {PreviewFile} file
  * @property {string} streamUrl
+ * @property {string} publicToken
  * @property {string} [heightClass]
  */
-/** @typedef {{streamUrl: string}} VideoSource */
+/** @typedef {{streamUrl: string, publicToken: string}} VideoSource */
 
 
 /** @type {string | undefined} */
 const API_URL = window.STORELIMITLESS_CONFIG?.API_URL ?? import.meta.env.VITE_API_URL;
 const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+
+const TRACK_LANGUAGES = [
+    ["English", /\b(?:english|eng)\b/i],
+    ["Hindi", /\b(?:hindi|hin)\b/i],
+    ["German", /\b(?:german|deu|ger)\b/i],
+    ["French", /\b(?:french|fra|fre)\b/i],
+    ["Portuguese", /\b(?:portuguese|por)\b/i],
+    ["Spanish", /\b(?:spanish|spa)\b/i],
+    ["Korean", /\b(?:korean|kor)\b/i],
+    ["Chinese", /\b(?:chinese|zho|chi|cmn)\b/i],
+    ["Polish", /\b(?:polish|pol)\b/i],
+    ["Russian", /\b(?:russian|rus)\b/i],
+    ["Japanese", /\b(?:japanese|jpn)\b/i],
+    ["Italian", /\b(?:italian|ita)\b/i],
+    ["Arabic", /\b(?:arabic|ara)\b/i],
+    ["Tamil", /\b(?:tamil|tam)\b/i],
+    ["Telugu", /\b(?:telugu|tel)\b/i],
+    ["Bengali", /\b(?:bengali|ben)\b/i],
+    ["Turkish", /\b(?:turkish|tur)\b/i],
+    ["Dutch", /\b(?:dutch|nld|dut)\b/i],
+    ["Swedish", /\b(?:swedish|swe)\b/i],
+    ["Ukrainian", /\b(?:ukrainian|ukr)\b/i],
+];
+
+/** Show only a recognized spoken language, not release-group and codec metadata. */
+function getTrackLanguage(track, kind = "Audio") {
+    const candidates = [track?.language, track?.label].filter(Boolean).join(" ");
+    for (const [language, pattern] of TRACK_LANGUAGES) {
+        if (pattern.test(candidates)) return language;
+    }
+    return kind + " " + (Number(track?.index) >= 0 ? Number(track.index) + 1 : 1);
+}
+
+/** Convert SRT or WebVTT cue timestamps into seconds. */
+function subtitleTimeToSeconds(value) {
+    const parts = String(value || "").trim().replace(",", ".").split(":");
+    if (parts.length < 2 || parts.length > 3) return NaN;
+    const seconds = Number(parts.pop());
+    const minutes = Number(parts.pop());
+    const hours = parts.length ? Number(parts.pop()) : 0;
+    if (![hours, minutes, seconds].every(Number.isFinite)) return NaN;
+    return hours * 3600 + minutes * 60 + seconds;
+}
+
+/** Parse SRT or WebVTT cues without depending on blank-line formatting between blocks. */
+function parseSubtitleText(source) {
+    const lines = String(source || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n");
+    const cues = [];
+
+    for (let index = 0; index < lines.length; index += 1) {
+        if (!lines[index].includes("-->")) continue;
+        const timing = lines[index].split("-->");
+        if (timing.length !== 2) continue;
+
+        const start = subtitleTimeToSeconds(timing[0]);
+        const end = subtitleTimeToSeconds(timing[1].trim().split(/\s+/)[0]);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+
+        const bodyLines = [];
+        for (let bodyIndex = index + 1; bodyIndex < lines.length; bodyIndex += 1) {
+            if (lines[bodyIndex].includes("-->") || (!lines[bodyIndex].trim() && bodyLines.length)) break;
+            if (lines[bodyIndex].trim() || bodyLines.length) bodyLines.push(lines[bodyIndex]);
+        }
+
+        const body = bodyLines.join("\n")
+            .replace(/\{\\[^}]+\}/g, "")
+            .replace(/<[^>]*>/g, "")
+            .replace(/\\[Nn]/g, "\n")
+            .replace(/&amp;/gi, "&")
+            .replace(/&lt;/gi, "<")
+            .replace(/&gt;/gi, ">")
+            .replace(/&quot;/gi, '"')
+            .replace(/&#39;|&apos;/gi, "'")
+            .replace(/&nbsp;/gi, "\u00a0")
+            .trim();
+
+        if (body) cues.push({start, end, text: body});
+    }
+
+    return cues.sort((left, right) => left.start - right.start);
+}
 
 const ctrlBtn = "flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[#fafafa]/90 transition-colors " + "hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]";
 
@@ -41,9 +124,10 @@ const fmtTime = (seconds) => {
  * @param {VideoPlayerProps} props
  * @returns {import("react").ReactElement}
  */
-function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
+function VideoPlayer({file, streamUrl, publicToken, heightClass = "h-[70vh]"}) {
     const wrapRef = useRef(null);
     const videoRef = useRef(null);
+    const hlsRef = useRef(null);
     const hideTimer = useRef(null);
     const stallTimerRef = useRef(null);
     const menuRef = useRef(null);
@@ -56,9 +140,15 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
     const [volume, setVolume] = useState(1);
     const [muted, setMuted] = useState(false);
     const [rate, setRate] = useState(1);
+    const [audioTracks, setAudioTracks] = useState([]);
+    const [selectedAudioTrack, setSelectedAudioTrack] = useState(-1);
+    const [subtitleTracks, setSubtitleTracks] = useState([]);
+    const [selectedSubtitleTrack, setSelectedSubtitleTrack] = useState(-1);
+    const [subtitleCues, setSubtitleCues] = useState([]);
+    const [subtitleLoadError, setSubtitleLoadError] = useState("");
     const [isFs, setIsFs] = useState(false);
     const [showUi, setShowUi] = useState(true);
-    /** @type {["speed" | null, import("react").Dispatch<import("react").SetStateAction<"speed" | null>>]} */
+    /** @type {["speed" | "audio" | "subtitles" | null, import("react").Dispatch<import("react").SetStateAction<"speed" | "audio" | "subtitles" | null>>]} */
     const [menu, setMenu] = useState(null);
     /** @type {[string | null, import("react").Dispatch<import("react").SetStateAction<string | null>>]} */
     const [error, setError] = useState(null);
@@ -72,6 +162,8 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
     // A media request can be interrupted by a transient tunnel/proxy reset.
     // Add a unique cache-busting query for each retry and resume at the last position.
     const playbackUrl = streamRetryNonce > 0 ? `${streamUrl}${streamUrl.includes("?") ? "&" : "?"}_sl_stream_retry=${streamRetryNonce}` : streamUrl;
+    const hlsUrl = publicToken ? API_URL + "/public/hls/" + encodeURIComponent(publicToken) + "/master.m3u8" : "";
+    const tracksUrl = publicToken ? API_URL + "/public/tracks/" + encodeURIComponent(publicToken) : "";
 
     useEffect(() => {
         retryCountRef.current = 0;
@@ -84,16 +176,175 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
     useEffect(() => {
         const video = videoRef.current;
         if (!video) return;
+
+        let cancelled = false;
+        let hlsInstance = null;
+
         setError(null);
         setBuffering(true);
+        setAudioTracks([]);
+        setSelectedAudioTrack(-1);
+        setSubtitleTracks([]);
+        setSelectedSubtitleTrack(-1);
+        video.removeAttribute("src");
         video.load();
-        video.play().catch(() => {
-            // Some browsers require a user gesture before playback.
-        });
-        return () => {
-            video.pause();
+
+        const useOriginalStream = () => {
+            if (cancelled) return;
+            video.src = playbackUrl;
+            video.load();
+            video.play().catch(() => {
+                // Some browsers require a user gesture before playback.
+            });
         };
-    }, [playbackUrl]);
+
+        const setupPlayback = async () => {
+            if (!publicToken) {
+                useOriginalStream();
+                return;
+            }
+
+            try {
+                const response = await fetch(tracksUrl, {cache: "no-store"});
+                if (!response.ok) throw new Error("Track metadata is unavailable.");
+                const trackInfo = await response.json();
+                if (cancelled) return;
+
+                setSubtitleTracks((trackInfo.subtitles || []).filter((track) => track.selectable));
+                setAudioTracks((trackInfo.audio || []).map((track, index) => ({
+                    index,
+                    label: track.label || track.language || ("Audio " + (index + 1)),
+                    language: track.language || "",
+                    default: Boolean(track.default),
+                })));
+
+                if (Hls.isSupported()) {
+                    hlsInstance = new Hls({
+                        enableWorker: true,
+                        maxBufferLength: 30,
+                        backBufferLength: 30,
+                        manifestLoadingMaxRetry: 2,
+                        levelLoadingMaxRetry: 2,
+                        fragLoadingMaxRetry: 3,
+                    });
+                    hlsRef.current = hlsInstance;
+
+                    const syncAudioTracks = () => {
+                        if (cancelled || !hlsInstance) return;
+                        const available = hlsInstance.audioTracks.map((track, index) => ({
+                            index,
+                            label: track.name || track.lang || ("Audio " + (index + 1)),
+                            language: track.lang || "",
+                            default: Boolean(track.default),
+                        }));
+                        setAudioTracks(available);
+
+                        if (available.length) {
+                            const currentIndex = hlsInstance.audioTrack;
+                            const defaultIndex = available.findIndex((track) => track.default);
+                            const selectedIndex = currentIndex >= 0
+                                ? currentIndex
+                                : defaultIndex >= 0 ? defaultIndex : 0;
+                            hlsInstance.audioTrack = selectedIndex;
+                            setSelectedAudioTrack(selectedIndex);
+                        }
+                    };
+
+                    hlsInstance.on(Hls.Events.MEDIA_ATTACHED, () => {
+                        if (!cancelled) hlsInstance.loadSource(hlsUrl);
+                    });
+                    hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+                        syncAudioTracks();
+                        setBuffering(false);
+                        video.play().catch(() => {
+                            // Some browsers require a user gesture before playback.
+                        });
+                    });
+                    hlsInstance.on(Hls.Events.AUDIO_TRACKS_UPDATED, syncAudioTracks);
+                    hlsInstance.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => {
+                        setSelectedAudioTrack(data.id);
+                    });
+                    hlsInstance.on(Hls.Events.ERROR, (_event, data) => {
+                        if (!data.fatal) return;
+
+                        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && retryCountRef.current < 3) {
+                            retryCountRef.current += 1;
+                            hlsInstance.startLoad();
+                        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                            hlsInstance.recoverMediaError();
+                        } else {
+                            setBuffering(false);
+                            setError("Track-aware streaming could not load a video or audio segment. Reopen the stream to try again.");
+                        }
+                    });
+                    hlsInstance.attachMedia(video);
+                    return;
+                }
+
+                if (video.canPlayType("application/vnd.apple.mpegurl")) {
+                    video.src = hlsUrl;
+                    video.load();
+                    video.play().catch(() => {
+                        // Some browsers require a user gesture before playback.
+                    });
+                    return;
+                }
+
+                useOriginalStream();
+            } catch {
+                // Keep existing direct streaming working if track-aware playback is unavailable.
+                useOriginalStream();
+            }
+        };
+
+        void setupPlayback();
+
+        return () => {
+            cancelled = true;
+            if (hlsInstance) hlsInstance.destroy();
+            if (hlsRef.current === hlsInstance) hlsRef.current = null;
+            video.pause();
+            video.removeAttribute("src");
+            video.load();
+        };
+    }, [hlsUrl, playbackUrl, publicToken, tracksUrl]);
+
+    useEffect(() => {
+        let cancelled = false;
+        setSubtitleCues([]);
+        setSubtitleLoadError("");
+
+        if (!publicToken || selectedSubtitleTrack < 0) return undefined;
+
+        const subtitleUrl = API_URL + "/public/hls/" + encodeURIComponent(publicToken)
+            + "/subtitles/" + selectedSubtitleTrack + ".srt";
+
+        (async () => {
+            try {
+                const response = await fetch(subtitleUrl, {cache: "no-store"});
+                if (!response.ok) {
+                    throw new Error("Subtitle request failed (HTTP " + response.status + ").");
+                }
+
+                const cues = parseSubtitleText(await response.text());
+                if (cancelled) return;
+
+                if (!cues.length) {
+                    setSubtitleLoadError("This subtitle track did not contain readable text captions.");
+                    return;
+                }
+                setSubtitleCues(cues);
+            } catch (loadError) {
+                if (!cancelled) {
+                    setSubtitleLoadError(loadError instanceof Error ? loadError.message : "Could not load this subtitle track.");
+                }
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [publicToken, selectedSubtitleTrack]);
 
     const recoverStream = useCallback((video) => {
         if (!video) return;
@@ -115,6 +366,7 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
 
     const handleMediaError = useCallback((event) => {
         const video = event.currentTarget;
+        if (hlsRef.current) return;
 
         // MEDIA_ERR_NETWORK is recoverable; codec/decode errors usually are not.
         if (video.error?.code === 2) {
@@ -175,6 +427,23 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
      */
     const changeRate = (playbackRate) => {
         if (videoRef.current) videoRef.current.playbackRate = playbackRate;
+        setMenu(null);
+    };
+
+    const selectAudioTrack = (index) => {
+        if (hlsRef.current) {
+            hlsRef.current.audioTrack = index;
+        } else if (videoRef.current?.audioTracks && videoRef.current.audioTracks[index]) {
+            for (let trackIndex = 0; trackIndex < videoRef.current.audioTracks.length; trackIndex += 1) {
+                videoRef.current.audioTracks[trackIndex].enabled = trackIndex === index;
+            }
+        }
+        setSelectedAudioTrack(index);
+        setMenu(null);
+    };
+
+    const selectSubtitleTrack = (index) => {
+        setSelectedSubtitleTrack(index);
         setMenu(null);
     };
 
@@ -267,6 +536,10 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
         setBuffered(0);
     };
 
+    const activeSubtitleText = subtitleCues
+        .filter((cue) => current >= cue.start && current < cue.end)
+        .map((cue) => cue.text)
+        .join("\n");
     const controlsVisible = showUi || !playing || menu !== null;
     /**
      * Convert a time value to a clamped timeline percentage.
@@ -283,7 +556,7 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
     >
         <video
             ref={videoRef}
-            src={playbackUrl}
+            crossOrigin="anonymous"
             autoPlay
             playsInline
             className="h-full w-full object-contain"
@@ -342,6 +615,17 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
             onRateChange={(event) => setRate(event.currentTarget.playbackRate)}
             onError={handleMediaError}
         />
+        {activeSubtitleText && (<div
+            aria-live="off"
+            className="pointer-events-none absolute inset-x-4 bottom-[5.5rem] z-10 flex justify-center px-4 text-center"
+        >
+            <span className="max-w-[90%] whitespace-pre-line rounded bg-black/75 px-3 py-1.5 text-base font-semibold leading-relaxed text-white [text-shadow:0_1px_2px_#000,1px_0_2px_#000,-1px_0_2px_#000] md:text-xl">
+                {activeSubtitleText}
+            </span>
+        </div>)}
+        {subtitleLoadError && selectedSubtitleTrack >= 0 && (<div className="pointer-events-none absolute inset-x-4 bottom-20 z-10 flex justify-center">
+            <span className="rounded bg-black/80 px-2 py-1 text-xs text-red-300">{subtitleLoadError}</span>
+        </div>)}
 
         {buffering && !error && (<div className="pointer-events-none absolute inset-0 flex items-center justify-center">
                     <span className="material-symbols-outlined animate-spin text-[40px] text-[#3ecf8e]" aria-label="Loading">
@@ -357,6 +641,44 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
         {isFs && (<div
             className={`pointer-events-none absolute inset-x-0 top-0 bg-gradient-to-b from-black/80 to-transparent px-5 pb-8 pt-4 transition-opacity duration-200 ${controlsVisible ? "opacity-100" : "opacity-0"}`}>
             <p className="truncate text-sm font-medium text-[#fafafa]">{file.name}</p>
+        </div>)}
+
+        {menu === "audio" && (<div
+            className="absolute bottom-16 right-3 z-20 max-h-64 w-56 overflow-auto rounded-md border border-[#2e2e2e] bg-[#1c1c1c]/95 p-1.5 shadow-xl backdrop-blur"
+            onClick={(event) => event.stopPropagation()}>
+            <p className="px-2 pb-1 pt-2 text-[11px] text-[#8b8b8b]">Audio track</p>
+            {audioTracks.map((track) => (<button
+                key={"audio-" + track.index}
+                type="button"
+                onClick={() => selectAudioTrack(track.index)}
+                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-[#fafafa] hover:bg-white/10"
+            >
+                <span className="inline-block w-4 text-[#3ecf8e]">{selectedAudioTrack === track.index ? "✓" : ""}</span>
+                <span className="flex-1 truncate">{getTrackLanguage(track, "Audio")}</span>
+            </button>))}
+        </div>)}
+
+        {menu === "subtitles" && (<div
+            className="absolute bottom-16 right-3 z-20 max-h-64 w-56 overflow-auto rounded-md border border-[#2e2e2e] bg-[#1c1c1c]/95 p-1.5 shadow-xl backdrop-blur"
+            onClick={(event) => event.stopPropagation()}>
+            <p className="px-2 pb-1 pt-2 text-[11px] text-[#8b8b8b]">Subtitles</p>
+            <button
+                type="button"
+                onClick={() => selectSubtitleTrack(-1)}
+                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-[#fafafa] hover:bg-white/10"
+            >
+                <span className="inline-block w-4 text-[#3ecf8e]">{selectedSubtitleTrack === -1 ? "✓" : ""}</span>
+                <span className="flex-1">Off</span>
+            </button>
+            {subtitleTracks.map((track) => (<button
+                key={"subtitle-" + track.index}
+                type="button"
+                onClick={() => selectSubtitleTrack(track.index)}
+                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-[#fafafa] hover:bg-white/10"
+            >
+                <span className="inline-block w-4 text-[#3ecf8e]">{selectedSubtitleTrack === track.index ? "✓" : ""}</span>
+                <span className="flex-1 truncate">{getTrackLanguage(track, "Subtitle")}</span>
+            </button>))}
         </div>)}
 
         {menu === "speed" && (<div
@@ -444,6 +766,26 @@ function VideoPlayer({file, streamUrl, heightClass = "h-[70vh]"}) {
                 <span className="ml-2 text-xs tabular-nums text-[#fafafa]/80">{fmtTime(current)} / {fmtTime(duration)}</span>
 
                 <div className="ml-auto flex items-center gap-1">
+                    {audioTracks.length > 1 && (<button
+                        type="button"
+                        className={"flex h-8 shrink-0 items-center justify-center rounded-md px-2 text-xs text-[#fafafa]/90 transition-colors hover:bg-white/10 " + (menu === "audio" ? "bg-white/10" : "")}
+                        aria-label="Audio tracks"
+                        aria-expanded={menu === "audio"}
+                        onClick={() => setMenu(menu === "audio" ? null : "audio")}
+                    >
+                        <span className="material-symbols-outlined mr-1 text-[17px]" aria-hidden="true">audio_file</span>
+                        Audio
+                    </button>)}
+                    {subtitleTracks.length > 0 && (<button
+                        type="button"
+                        className={"flex h-8 shrink-0 items-center justify-center rounded-md px-2 text-xs text-[#fafafa]/90 transition-colors hover:bg-white/10 " + (menu === "subtitles" ? "bg-white/10" : "")}
+                        aria-label="Subtitle tracks"
+                        aria-expanded={menu === "subtitles"}
+                        onClick={() => setMenu(menu === "subtitles" ? null : "subtitles")}
+                    >
+                        <span className="material-symbols-outlined mr-1 text-[17px]" aria-hidden="true">closed_caption</span>
+                        Subs
+                    </button>)}
                     <button
                         type="button"
                         className={`${ctrlBtn} w-auto px-2 text-xs tabular-nums ${menu === "speed" ? "bg-white/10" : ""}`}
@@ -1031,7 +1373,7 @@ export default function ViewFile() {
         setError("");
 
         if (publicToken) {
-            setSource({streamUrl: `${API_URL}/public/stream/${encodeURIComponent(publicToken)}`});
+            setSource({streamUrl: `${API_URL}/public/stream/${encodeURIComponent(publicToken)}`, publicToken});
             return () => {
                 cancelled = true;
             };
@@ -1058,7 +1400,7 @@ export default function ViewFile() {
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.detail || "Could not open this file.");
                 if (!data.public_token) throw new Error("The server did not return a public stream token.");
-                if (!cancelled) setSource({streamUrl: `${API_URL}/public/stream/${data.public_token}`});
+                if (!cancelled) setSource({streamUrl: `${API_URL}/public/stream/${data.public_token}`, publicToken: data.public_token});
             } catch (err) {
                 if (!cancelled) setError(err.message || "Could not open this file.");
             }
@@ -1128,7 +1470,7 @@ export default function ViewFile() {
                         {status}
                     </div>) : (<div className="flex h-full w-full min-h-0 flex-col">
                         <div className="min-h-0 min-w-0 flex-1">
-                            <VideoPlayer file={{name}} streamUrl={source.streamUrl} heightClass="h-full"/>
+                            <VideoPlayer file={{name}} streamUrl={source.streamUrl} publicToken={source.publicToken} heightClass="h-full"/>
                         </div>
                     </div>)}
         </main>

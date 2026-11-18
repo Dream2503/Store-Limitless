@@ -22,11 +22,12 @@ from core.utils import write_log
 
 
 def get_ffmpeg_path() -> Path:
-    """Return FFmpeg's executable path, installing it automatically on supported systems."""
+    """Return FFmpeg's path, installing FFmpeg and FFprobe when either is missing."""
 
     ffmpeg_executable: str | None = shutil.which("ffmpeg")
+    ffprobe_executable: str | None = shutil.which("ffprobe")
 
-    if ffmpeg_executable is not None:
+    if ffmpeg_executable is not None and ffprobe_executable is not None:
         return Path(ffmpeg_executable)
 
     system: str = platform.system()
@@ -34,57 +35,88 @@ def get_ffmpeg_path() -> Path:
     if system == "Windows":
         ffmpeg_dir: Path = Path.home() / "AppData" / "Local" / "StoreLimitless" / "ffmpeg"
         ffmpeg_path: Path = ffmpeg_dir / "ffmpeg.exe"
+        ffprobe_path: Path = ffmpeg_dir / "ffprobe.exe"
 
-        if not ffmpeg_path.is_file():
-            write_log("INFO", Binaries, "GET_FFMPEG_PATH", "server", "FFmpeg is not installed. Downloading and installing FFmpeg for you...")
-            ffmpeg_dir.mkdir(parents=True, exist_ok=True)
-            archive: Path = ffmpeg_dir / "ffmpeg.zip"
+        # Prefer a system installation only when both required tools are available.
+        if ffmpeg_path.is_file() and ffprobe_path.is_file():
+            write_log("INFO", Binaries, "GET_FFMPEG_PATH", "server", f"Using bundled FFmpeg and FFprobe from: {ffmpeg_dir}")
+            return ffmpeg_path
 
-            try:
-                request.urlretrieve("https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip", archive)
+        write_log(
+            "INFO", Binaries, "GET_FFMPEG_PATH", "server",
+            "FFmpeg or FFprobe is missing. Downloading and installing both tools...",
+        )
+        ffmpeg_dir.mkdir(parents=True, exist_ok=True)
+        archive: Path = ffmpeg_dir / "ffmpeg.zip"
 
-                with ZipFile(archive) as zip_file:
-                    ffmpeg_files: list[str] = [name for name in zip_file.namelist() if name.endswith("/bin/ffmpeg.exe")]
+        try:
+            request.urlretrieve("https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip", archive)
 
-                    if not ffmpeg_files:
-                        raise RuntimeError("FFmpeg was downloaded, but ffmpeg.exe could not be found.")
+            with ZipFile(archive) as zip_file:
+                ffmpeg_files: list[str] = [
+                    name for name in zip_file.namelist() if name.endswith("/bin/ffmpeg.exe")
+                ]
+                ffprobe_files: list[str] = [
+                    name for name in zip_file.namelist() if name.endswith("/bin/ffprobe.exe")
+                ]
 
-                    with zip_file.open(ffmpeg_files[0]) as source:
-                        ffmpeg_path.write_bytes(source.read())
-            finally:
-                archive.unlink(missing_ok=True)
+                if not ffmpeg_files or not ffprobe_files:
+                    raise RuntimeError("The FFmpeg archive must contain both ffmpeg.exe and ffprobe.exe.")
 
-        if not ffmpeg_path.is_file():
-            raise RuntimeError("FFmpeg was downloaded, but ffmpeg.exe could not be installed.")
+                with zip_file.open(ffmpeg_files[0]) as source:
+                    ffmpeg_path.write_bytes(source.read())
+
+                with zip_file.open(ffprobe_files[0]) as source:
+                    ffprobe_path.write_bytes(source.read())
+        finally:
+            archive.unlink(missing_ok=True)
+
+        if not ffmpeg_path.is_file() or not ffprobe_path.is_file():
+            raise RuntimeError(
+                "FFmpeg installation did not provide both executables. "
+                "Please install FFmpeg and FFprobe manually."
+            )
 
         write_log("INFO", Binaries, "GET_FFMPEG_PATH", "server", f"FFmpeg installed at: {ffmpeg_path}")
+        write_log("INFO", Binaries, "GET_FFMPEG_PATH", "server", f"FFprobe installed at: {ffprobe_path}")
         return ffmpeg_path
 
     if system == "Linux":
-        write_log("INFO", Binaries, "GET_FFMPEG_PATH", "server", "FFmpeg is not installed. Installing FFmpeg for you...")
+        write_log(
+            "INFO", Binaries, "GET_FFMPEG_PATH", "server",
+            "FFmpeg or FFprobe is missing. Installing the FFmpeg package, which provides both tools...",
+        )
         is_root: bool = hasattr(os, "geteuid") and os.geteuid() == 0
-        apt_prefix: list[str] = [] if is_root else ["sudo"]
+        # Avoid hanging a server request on an interactive sudo password prompt.
+        apt_prefix: list[str] = [] if is_root else ["sudo", "-n"]
 
         try:
-            run(apt_prefix + ["apt-get", "update"], check=True)
-            run(apt_prefix + ["apt-get", "install", "-y", "ffmpeg"], check=True)
+            run(apt_prefix + ["apt-get", "update"], check=True, timeout=180)
+            run(apt_prefix + ["apt-get", "install", "-y", "ffmpeg"], check=True, timeout=180)
 
-        except (CalledProcessError, FileNotFoundError) as error:
+        except (CalledProcessError, FileNotFoundError, TimeoutExpired) as error:
             raise RuntimeError(
-                "FFmpeg is required to download YouTube videos, but StoreLimitless could not install it automatically.\n\n"
-                "Please install it manually by running:\n"
+                "FFmpeg and FFprobe are required for track-aware streaming, but StoreLimitless "
+                "could not install them automatically. Please install them manually by running:\n"
                 "sudo apt-get update && sudo apt-get install -y ffmpeg"
             ) from error
 
         ffmpeg_executable = shutil.which("ffmpeg")
+        ffprobe_executable = shutil.which("ffprobe")
 
-        if ffmpeg_executable is None:
-            raise RuntimeError("FFmpeg was installed, but could not be found in PATH.")
+        if ffmpeg_executable is None or ffprobe_executable is None:
+            raise RuntimeError(
+                "The FFmpeg package was installed, but both ffmpeg and ffprobe must be available in PATH."
+            )
 
+        write_log("INFO", Binaries, "GET_FFMPEG_PATH", "server", f"FFmpeg available at: {ffmpeg_executable}")
+        write_log("INFO", Binaries, "GET_FFMPEG_PATH", "server", f"FFprobe available at: {ffprobe_executable}")
         return Path(ffmpeg_executable)
 
-    raise RuntimeError("FFmpeg is required to download YouTube videos. Please install FFmpeg and make sure it is available in PATH.")
-
+    raise RuntimeError(
+        f"Automatic FFmpeg and FFprobe installation is not supported on {system}. "
+        "Please install both tools and make sure they are available in PATH."
+    )
 
 def _redis_is_responding(timeout: float = 0.2) -> bool:
     """Verify Redis with a RESP PING instead of trusting an open TCP port alone."""

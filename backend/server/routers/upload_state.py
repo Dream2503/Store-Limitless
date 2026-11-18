@@ -254,7 +254,9 @@ def cancel_upload_task(job_id: str) -> bool:
 
 
 async def wait_for_all_chunks(job_id: str, file: File) -> None:
-    """Wait on Redis-backed contiguous-byte metadata rather than an in-memory Event."""
+    """Wait for browser chunks, allowing an explicit pause to last indefinitely."""
+
+    session_key = upload_session_key(job_id)
 
     while True:
         job_metadata: dict[str, object] | None = await get_upload_job_metadata(job_id)
@@ -265,14 +267,48 @@ async def wait_for_all_chunks(job_id: str, file: File) -> None:
         if job_metadata and bool(job_metadata.get("failed")):
             raise RuntimeError("Upload failed: browser transfer stopped")
 
-        while job_metadata and bool(job_metadata.get("paused")) and not bool(job_metadata.get("cancelled")):
-            await sleep(0.25)
-            job_metadata = await get_upload_job_metadata(job_id)
+        # An explicit user pause is not an idle upload. Wait without a duration
+        # limit, keep the one-hour Redis session TTL alive, and watch for Resume
+        # or Cancel. The 120-second idle watchdog below applies only while active.
+        if job_metadata and bool(job_metadata.get("paused")):
+            while job_metadata and bool(job_metadata.get("paused")):
+                if bool(job_metadata.get("cancelled")):
+                    raise RuntimeError("Upload cancelled")
+                if bool(job_metadata.get("failed")):
+                    raise RuntimeError("Upload failed: browser transfer stopped")
 
-        if job_metadata and bool(job_metadata.get("cancelled")):
-            raise RuntimeError("Upload cancelled")
+                paused_state: object | None = await Redis.get_json(session_key)
+                if not isinstance(paused_state, dict):
+                    raise TimeoutError("Upload session expired while paused")
 
-        state: object | None = await Redis.get_json(upload_session_key(job_id))
+                # A paused transfer may remain untouched for hours or days.
+                # Refresh its session/activity TTL so Resume can continue using
+                # the same staged file and already-received byte ranges.
+                await Redis.set_json(session_key, paused_state, ex=60 * 60)
+                await touch_upload_activity(job_id)
+                await sleep(1.0)
+                job_metadata = await get_upload_job_metadata(job_id)
+
+            if job_metadata and bool(job_metadata.get("cancelled")):
+                raise RuntimeError("Upload cancelled")
+
+            if job_metadata and bool(job_metadata.get("failed")):
+                raise RuntimeError("Upload failed: browser transfer stopped")
+
+            # Exclude the entire paused interval from the active idle timer.
+            # Otherwise a pause longer than 120 seconds would fail immediately
+            # on Resume despite being an intentional, healthy state.
+            resumed_state: object | None = await Redis.get_json(session_key)
+            if not isinstance(resumed_state, dict):
+                raise TimeoutError("Upload session expired while paused")
+
+            resumed_at = time()
+            resumed_state["last_activity"] = resumed_at
+            await Redis.set_json(session_key, resumed_state, ex=60 * 60)
+            await touch_upload_activity(job_id, resumed_at)
+            continue
+
+        state: object | None = await Redis.get_json(session_key)
 
         if not isinstance(state, dict):
             raise TimeoutError("Upload session expired before all chunks arrived")
@@ -293,6 +329,24 @@ async def wait_for_all_chunks(job_id: str, file: File) -> None:
                 pass
 
         if time() - last_activity > 120:
+            # Recheck the pause/cancel state at the timeout boundary. This avoids
+            # racing a Pause request that arrived just after the first metadata read.
+            latest_metadata = await get_upload_job_metadata(job_id)
+            if latest_metadata and bool(latest_metadata.get("cancelled")):
+                raise RuntimeError("Upload cancelled")
+            if latest_metadata and bool(latest_metadata.get("failed")):
+                raise RuntimeError("Upload failed: browser transfer stopped")
+            if latest_metadata and bool(latest_metadata.get("paused")):
+                continue
+
+            latest_activity = await Redis.redis.get(upload_activity_key(job_id))
+            if latest_activity is not None:
+                try:
+                    if time() - float(latest_activity) <= 120:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
             raise TimeoutError("No browser upload data received for 120 seconds")
 
         await sleep(0.25)

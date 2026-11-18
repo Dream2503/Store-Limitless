@@ -59,7 +59,7 @@ import {createUniqueId, decodePathSegment, folderPathToRoute, getFileIcon, getFi
  */
 
 /** @typedef {{kind: "background"} | {kind: "item", item: SelectableItem}} ContextMenuPayload */
-/** @typedef {ContextMenuPayload & {x: number, y: number}} ContextMenuState */
+/** @typedef {ContextMenuPayload & {x: number, y: number, canDownloadZip?: boolean}} ContextMenuState */
 
 function isPathWithinFolder(candidatePath, folderPath) {
     const candidate = String(candidatePath || "").replace(/\/$/, "");
@@ -339,55 +339,115 @@ export default function DashboardPage() {
             }
 
             if (job.streamOnly) {
-                const response = await fetch(job.url, {signal: controller.signal, cache: "no-store"});
-                if (!response.ok) throw new Error(`ZIP stream failed (${response.status}).`);
+                // A ZIP stream can be resumed only if the server can reproduce the same
+                // archive byte-for-byte. Keep each received prefix in OPFS, then request
+                // the next byte range rather than truncating the file on every retry.
+                const initialFile = await handle.getFile();
+                let offset = Math.max(0, initialFile.size || 0);
+                // Without the validator saved from the first response, we cannot safely
+                // prove that a partial archive still matches the current selection.
+                if (offset > 0 && !job.etag) offset = 0;
+                const requestHeaders = {};
+                if (offset > 0) {
+                    requestHeaders.Range = "bytes=" + offset + "-";
+                    requestHeaders["If-Range"] = job.etag;
+                }
 
-                const contentLength = response.headers.get("content-length");
-                const latestTotal = contentLength ? Number(contentLength) : 0;
-                updateDownloadJob(job.id, {
-                    total: latestTotal,
-                    transferred: 0,
-                    message: "Downloading ZIP to temporary storage",
+                const response = await fetch(job.url, {
+                    headers: requestHeaders,
+                    signal: controller.signal,
+                    cache: "no-store",
                 });
 
-                const writer = await handle.createWritable();
-                let transferred = 0;
-                let lastReported = 0;
+                // If the archive revision changed, If-Range intentionally returns a fresh
+                // 200 response. Start over safely instead of appending different ZIP bytes.
+                if (response.status === 200 && offset > 0) offset = 0;
+                if (offset > 0 && response.status !== 206) {
+                    await response.body?.cancel();
+                    throw new Error("The ZIP server did not honor the resume range.");
+                }
+                if (offset === 0 && response.status !== 200) {
+                    await response.body?.cancel();
+                    throw new Error("ZIP stream failed (" + response.status + ").");
+                }
+
+                const contentRange = response.headers.get("content-range") || "";
+                const rangeMatch = contentRange.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+                let latestTotal = 0;
+                if (response.status === 206) {
+                    if (!rangeMatch || Number(rangeMatch[1]) !== offset) {
+                        await response.body?.cancel();
+                        throw new Error("The ZIP server returned an invalid resume range.");
+                    }
+                    latestTotal = Number(rangeMatch[3]);
+                } else {
+                    latestTotal = Number(response.headers.get("content-length") || 0);
+                }
+                if (!Number.isSafeInteger(latestTotal) || latestTotal <= 0 || offset > latestTotal) {
+                    await response.body?.cancel();
+                    throw new Error("The ZIP server did not provide a valid archive size.");
+                }
+
+                const latestEtag = response.headers.get("etag") || job.etag || "";
+                updateDownloadJob(job.id, {
+                    total: latestTotal,
+                    etag: latestEtag,
+                    transferred: offset,
+                    message: offset > 0
+                        ? "Resuming ZIP from " + formatFileSize(offset)
+                        : "Downloading ZIP to temporary storage",
+                });
+
+                let writer;
+                let writerClosed = false;
+                let reader;
+                let transferred = offset;
+                let lastReported = offset;
                 try {
-                    const reader = response.body?.getReader();
-                    if (reader) {
-                        while (true) {
-                            if (controller.signal.aborted) {
-                                await reader.cancel().catch(() => {});
-                                throw new DOMException("Download paused", "AbortError");
-                            }
-                            const {done, value} = await reader.read();
-                            if (done) break;
-                            if (!value?.byteLength) continue;
-                            await writer.write(value);
-                            transferred += value.byteLength;
-                            if (transferred - lastReported >= 1024 * 1024 || (latestTotal > 0 && transferred >= latestTotal)) {
-                                updateDownloadJob(job.id, {
-                                    transferred,
-                                    total: latestTotal,
-                                    message: "Downloading ZIP to temporary storage",
-                                });
-                                lastReported = transferred;
-                            }
+                    // Commit the old prefix and append at its current byte offset.
+                    // Closing on pause preserves bytes; aborting this OPFS writer would
+                    // roll back its pending writes and make every resume start at zero.
+                    writer = await handle.createWritable({keepExistingData: true});
+                    await writer.truncate(offset);
+                    await writer.seek(offset);
+
+                    reader = response.body?.getReader();
+                    if (!reader) throw new Error("Streaming ZIP responses are not supported by this browser.");
+
+                    while (true) {
+                        if (controller.signal.aborted) {
+                            await reader.cancel().catch(() => {});
+                            throw new DOMException("Download paused", "AbortError");
                         }
-                    } else {
-                        const bytes = await response.arrayBuffer();
-                        await writer.write(bytes);
-                        transferred = bytes.byteLength;
+                        const {done, value} = await reader.read();
+                        if (done) break;
+                        if (!value?.byteLength) continue;
+                        await writer.write(value);
+                        transferred += value.byteLength;
+
+                        if (transferred - lastReported >= 1024 * 1024 || transferred >= latestTotal) {
+                            updateDownloadJob(job.id, {
+                                transferred,
+                                total: latestTotal,
+                                etag: latestEtag,
+                                message: "Downloading ZIP · " + formatFileSize(transferred),
+                            });
+                            lastReported = transferred;
+                        }
                     }
 
-                    if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
-                    if (latestTotal > 0 && transferred !== latestTotal) {
-                        throw new Error(`Incomplete ZIP stream: received ${transferred} of ${latestTotal} bytes.`);
-                    }
                     await writer.close();
+                    writerClosed = true;
+                    if (transferred !== latestTotal) {
+                        throw new Error("Incomplete ZIP stream: received " + transferred + " of " + latestTotal + " bytes.");
+                    }
                 } catch (error) {
-                    await writer.abort().catch(() => {});
+                    await reader?.cancel().catch(() => {});
+                    // Persist the successfully written prefix even for network errors,
+                    // so retrying can resume at the committed OPFS file length.
+                    if (writer && !writerClosed) {
+                        await writer.close().then(() => { writerClosed = true; }).catch(() => {});
+                    }
                     throw error;
                 }
 
@@ -409,7 +469,8 @@ export default function DashboardPage() {
                 updateDownloadJob(job.id, {
                     status: "completed",
                     transferred,
-                    total: latestTotal || transferred,
+                    total: latestTotal,
+                    etag: latestEtag,
                     message: "ZIP staged in StoreLimitless · browser download started",
                 });
                 return;
@@ -483,11 +544,21 @@ export default function DashboardPage() {
             updateDownloadJob(job.id, {status: "completed", transferred: latestTotal, total: latestTotal, message: staged ? "Complete · browser download started" : "Download complete"});
         } catch (error) {
             if (error?.name === "AbortError" || controller.signal.aborted) {
+                let transferred = downloadJobsRef.current.find((item) => item.id === job.id)?.transferred || 0;
+                if (job.streamOnly && job.tempName && typeof navigator.storage?.getDirectory === "function") {
+                    try {
+                        const root = await navigator.storage.getDirectory();
+                        const handle = await root.getFileHandle(job.tempName, {create: true});
+                        transferred = (await handle.getFile()).size;
+                    } catch (storageError) {
+                        console.warn("Could not inspect the saved ZIP prefix:", storageError);
+                    }
+                }
                 updateDownloadJob(job.id, {
                     status: "paused",
-                    transferred: job.streamOnly ? 0 : (downloadJobsRef.current.find((item) => item.id === job.id)?.transferred || 0),
+                    transferred,
                     message: job.streamOnly
-                        ? "Paused · resuming restarts the ZIP transfer"
+                        ? "Paused · resume continues from saved ZIP bytes"
                         : job.blobFallback ? "Paused · resume continues from saved progress" : "Paused",
                 });
             } else {
@@ -2922,7 +2993,7 @@ export default function DashboardPage() {
         {contextMenu && (<DashboardContextMenu
             menu={contextMenu}
             multipleSelected={Boolean(contextMenu.item && selectedItems.has(contextMenu.item.key) && selectableItems.filter((item) => selectedItems.has(item.key)).length > 1)}
-            multipleFilesSelected={Boolean(contextMenu.item && activeTab !== "trash" && selectedItems.has(contextMenu.item.key) && selectableItems.filter((item) => selectedItems.has(item.key)).length > 1 && selectableItems.filter((item) => selectedItems.has(item.key)).every((item) => item.type === "file" && !item.is_deleted))}
+            canDownloadZip={Boolean(contextMenu.canDownloadZip)}
             onClose={() => setContextMenu(null)}
             onAction={performContextMenuAction}
         />)}

@@ -14,6 +14,22 @@ from core.data_center import Database
 from core.utils import write_log
 
 
+_VIDEO_EXTENSIONS = {
+    ".3g2", ".3gp", ".asf", ".avi", ".divx", ".flv", ".m2ts", ".m2v", ".m4v",
+    ".mkv", ".mov", ".mp4", ".mpe", ".mpeg", ".mpg", ".mts", ".mxf", ".ogv",
+    ".rm", ".rmvb", ".ts", ".vob", ".webm", ".wmv",
+}
+
+
+def is_video_file(name: str, mime_type: str = "") -> bool:
+    """Return whether a file's stored MIME type or extension identifies video media."""
+
+    if str(mime_type or "").split(";", 1)[0].strip().lower().startswith("video/"):
+        return True
+
+    return Path(str(name or "")).suffix.lower() in _VIDEO_EXTENSIONS
+
+
 class File(BaseModel):
     """Represent a stored file, including its parent directory, content metadata, data-center links, owner, and trash state."""
     model_config = ConfigDict(from_attributes=True)
@@ -80,6 +96,19 @@ class File(BaseModel):
                         self.username,
                     ),
                 ).fetchone())["id"]
+
+                # Queue registration shares the original-file transaction, so all
+                # ingestion paths converge here after the provider upload has finished.
+                if self.id is not None and is_video_file(self.name, self.type):
+                    connection.execute(
+                        """
+                        INSERT INTO video_processing_jobs (file_id)
+                        VALUES (%s)
+                        ON CONFLICT (file_id) DO NOTHING;
+                        """,
+                        (self.id,),
+                    )
+
                 connection.commit()
                 await Redis.set(f"user:{self.username}:files", self)
 

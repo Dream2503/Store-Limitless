@@ -9,6 +9,8 @@ import platform
 import re
 import shutil
 import unicodedata
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from hashlib import sha256
 from pathlib import Path
 from time import monotonic
@@ -29,6 +31,12 @@ from core.utils.binaries import get_ffmpeg_path
 from core.utils.discord_ import Discord
 from core.utils.progress import Progress
 from .upload_state import get_upload_job_metadata
+from backend.server.video_processing import (
+    get_processed_video,
+    get_video_processing_status,
+    read_processed_segment,
+    retry_video_processing,
+)
 
 router: APIRouter = APIRouter()
 
@@ -242,13 +250,24 @@ async def _owned_public_file(token: str, request: Request) -> File:
 
 
 # Track-aware playback is generated from the existing stored byte-range stream.
-# Segment payloads are returned from FFmpeg stdout; no HLS or media files are written to disk.
+# Encoded segments stay in a bounded memory cache; no HLS or media files are written to disk.
 _MEDIA_INFO_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _MEDIA_INFO_TTL: float = 300.0
 _MEDIA_SEGMENT_SECONDS: int = 6
 _MEDIA_MAX_SEGMENTS: int = 50000
 _MEDIA_MAX_OUTPUT_BYTES: int = 128 * 1024 * 1024
 _MEDIA_PROCESS_LIMIT = asyncio.Semaphore(3)
+_MEDIA_SEGMENT_CACHE_TTL: float = 900.0
+_MEDIA_SEGMENT_CACHE_MAX_BYTES: int = 128 * 1024 * 1024
+_MEDIA_SEGMENT_CACHE_MAX_ENTRY_BYTES: int = 32 * 1024 * 1024
+_MEDIA_SEGMENT_CACHE_MAX_ITEMS: int = 48
+_MEDIA_SEGMENT_PREFETCH_COUNT: int = 2
+_MEDIA_SEGMENT_CACHE: OrderedDict[tuple[str, str, int, int], tuple[float, bytes]] = OrderedDict()
+_MEDIA_SEGMENT_CACHE_BYTES: int = 0
+_MEDIA_SEGMENT_CACHE_LOCK = asyncio.Lock()
+_MEDIA_SEGMENT_IN_FLIGHT: dict[tuple[str, str, int, int], asyncio.Task[bytes | None]] = {}
+_MEDIA_SEGMENT_PREFETCH_TASKS: dict[tuple[str, str, int, int], asyncio.Task[None]] = {}
+_MEDIA_PREFETCH_LIMIT = asyncio.Semaphore(1)
 _BITMAP_SUBTITLE_CODECS = {
     "dvd_subtitle",
     "dvb_subtitle",
@@ -259,6 +278,86 @@ _BITMAP_SUBTITLE_CODECS = {
     "eia_608",
     "eia_708",
 }
+
+
+def _media_segment_cache_key(file: File, kind: str, stream_index: int, index: int) -> tuple[str, str, int, int]:
+    """Identify a generated segment by source version, track, encoding window, and index."""
+
+    source_signature = sha256("\\0".join(file.links).encode("utf-8")).hexdigest()
+    file_identity = (
+        f"{file.username}:{file.id}:{_file_etag(file)}:{file.data_center}:"
+        f"{source_signature}:{_MEDIA_SEGMENT_SECONDS}"
+    )
+    return file_identity, kind, stream_index, index
+
+
+def _purge_media_segment_cache_locked() -> None:
+    """Remove expired in-memory HLS segments while the cache lock is held."""
+
+    global _MEDIA_SEGMENT_CACHE_BYTES
+
+    now = monotonic()
+    for key, (expires_at, segment) in list(_MEDIA_SEGMENT_CACHE.items()):
+        if expires_at <= now:
+            _MEDIA_SEGMENT_CACHE.pop(key, None)
+            _MEDIA_SEGMENT_CACHE_BYTES = max(0, _MEDIA_SEGMENT_CACHE_BYTES - len(segment))
+
+
+async def _get_or_generate_media_segment(
+    cache_key: tuple[str, str, int, int],
+    producer: Callable[[], Awaitable[bytes | None]],
+) -> bytes | None:
+    """Return a cached segment or share one in-flight generation among all requesters."""
+
+    global _MEDIA_SEGMENT_CACHE_BYTES
+
+    async with _MEDIA_SEGMENT_CACHE_LOCK:
+        _purge_media_segment_cache_locked()
+        cached = _MEDIA_SEGMENT_CACHE.get(cache_key)
+        if cached is not None:
+            _MEDIA_SEGMENT_CACHE.move_to_end(cache_key)
+            return cached[1]
+
+        task = _MEDIA_SEGMENT_IN_FLIGHT.get(cache_key)
+        if task is None:
+            async def generate_and_cache() -> bytes | None:
+                global _MEDIA_SEGMENT_CACHE_BYTES
+
+                try:
+                    segment = await producer()
+                    if segment and len(segment) <= _MEDIA_SEGMENT_CACHE_MAX_ENTRY_BYTES:
+                        async with _MEDIA_SEGMENT_CACHE_LOCK:
+                            _purge_media_segment_cache_locked()
+                            previous = _MEDIA_SEGMENT_CACHE.pop(cache_key, None)
+                            if previous is not None:
+                                _MEDIA_SEGMENT_CACHE_BYTES = max(
+                                    0, _MEDIA_SEGMENT_CACHE_BYTES - len(previous[1])
+                                )
+                            _MEDIA_SEGMENT_CACHE[cache_key] = (
+                                monotonic() + _MEDIA_SEGMENT_CACHE_TTL,
+                                segment,
+                            )
+                            _MEDIA_SEGMENT_CACHE_BYTES += len(segment)
+
+                            while (
+                                _MEDIA_SEGMENT_CACHE_BYTES > _MEDIA_SEGMENT_CACHE_MAX_BYTES
+                                or len(_MEDIA_SEGMENT_CACHE) > _MEDIA_SEGMENT_CACHE_MAX_ITEMS
+                            ):
+                                _, (_, evicted_segment) = _MEDIA_SEGMENT_CACHE.popitem(last=False)
+                                _MEDIA_SEGMENT_CACHE_BYTES = max(
+                                    0, _MEDIA_SEGMENT_CACHE_BYTES - len(evicted_segment)
+                                )
+                    return segment
+                finally:
+                    current_task = asyncio.current_task()
+                    async with _MEDIA_SEGMENT_CACHE_LOCK:
+                        if _MEDIA_SEGMENT_IN_FLIGHT.get(cache_key) is current_task:
+                            _MEDIA_SEGMENT_IN_FLIGHT.pop(cache_key, None)
+
+            task = asyncio.create_task(generate_and_cache())
+            _MEDIA_SEGMENT_IN_FLIGHT[cache_key] = task
+
+    return await asyncio.shield(task)
 
 
 def _media_tool_paths() -> tuple[str, str]:
@@ -481,11 +580,36 @@ async def _public_media_info(file: File, token: str, request: Request | None = N
     return media_info
 
 
+async def _playback_media_info(file: File, token: str, request: Request | None = None) -> dict[str, Any] | None:
+    """Prefer the verified, stored streaming metadata and retain dynamic fallback for legacy files."""
+
+    if file.id is not None:
+        processed = get_processed_video(int(file.id))
+        if processed is not None:
+            media_info = dict(processed.get("media_info") or {})
+            media_info["_processed_assets"] = processed.get("assets") or {}
+            return media_info
+
+    return await _public_media_info(file, token, request)
+
+
 def _hls_media_playlist(token: str, media_info: dict[str, Any], *, kind: str, stream_index: int | None = None) -> str:
     """Describe fixed-duration on-demand segments; each request is generated in memory."""
 
     duration = float(media_info["duration"])
-    segment_count = math.ceil(duration / _MEDIA_SEGMENT_SECONDS)
+    processed_assets = media_info.get("_processed_assets")
+    stored_segments: list[dict[str, Any]] | None = None
+
+    if processed_assets is not None and kind in {"video", "audio"}:
+        if kind == "video":
+            track_key = str(int(media_info["video"]["index"]))
+        else:
+            track_key = str(int(stream_index or 0))
+        stored_segments = list(((processed_assets.get(kind) or {}).get(track_key)) or [])
+        segment_count = len(stored_segments)
+    else:
+        segment_count = math.ceil(duration / _MEDIA_SEGMENT_SECONDS)
+
     if segment_count <= 0 or segment_count > _MEDIA_MAX_SEGMENTS:
         raise HTTPException(status_code=413, detail="This video's duration is too long for track-aware playback.")
 
@@ -500,12 +624,16 @@ def _hls_media_playlist(token: str, media_info: dict[str, Any], *, kind: str, st
     ]
 
     for segment_index in range(segment_count):
-        if segment_index > 0:
-            # Each segment is produced by a short-lived FFmpeg process, so declare the
-            # timestamp/transport-stream counter reset explicitly to the HLS client.
+        if segment_index > 0 and stored_segments is None:
+            # Legacy fragments are produced by separate FFmpeg runs, so declare each
+            # timestamp reset. Preprocessed HLS segments come from a continuous encode.
             lines.append("#EXT-X-DISCONTINUITY")
 
-        segment_duration = min(_MEDIA_SEGMENT_SECONDS, duration - segment_index * _MEDIA_SEGMENT_SECONDS)
+        segment_duration = (
+            float(stored_segments[segment_index].get("duration") or _MEDIA_SEGMENT_SECONDS)
+            if stored_segments is not None
+            else min(_MEDIA_SEGMENT_SECONDS, duration - segment_index * _MEDIA_SEGMENT_SECONDS)
+        )
         if kind == "audio":
             url = f"{base}/segment/audio/{int(stream_index or 0)}/{segment_index}"
         else:
@@ -529,16 +657,45 @@ def _media_response_headers(request: Request) -> dict[str, str]:
     }
 
 
+@router.get("/video-processing/{token}/status")
+async def public_video_processing_status(token: str, request: Request) -> JSONResponse:
+    """Return per-video processing progress to the holder of the signed stream token."""
+
+    file = await _owned_public_file(token, request)
+    if file.id is None:
+        raise HTTPException(status_code=404, detail="File not found.")
+    return JSONResponse(get_video_processing_status(int(file.id)), headers=_media_response_headers(request))
+
+
+@router.post("/video-processing/{token}/retry")
+async def public_retry_video_processing(token: str, request: Request) -> JSONResponse:
+    """Requeue a failed video conversion without modifying its original uploaded file."""
+
+    file = await _owned_public_file(token, request)
+    if file.id is None:
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    current = get_video_processing_status(int(file.id))
+    if current.get("status") == "ready":
+        return JSONResponse(current, headers=_media_response_headers(request))
+    if current.get("status") != "failed":
+        return JSONResponse(current, headers=_media_response_headers(request))
+    if not retry_video_processing(int(file.id)):
+        raise HTTPException(status_code=409, detail="This video is not eligible for retry.")
+    return JSONResponse(get_video_processing_status(int(file.id)), headers=_media_response_headers(request))
+
+
 @router.get("/tracks/{token}")
 async def public_media_tracks(token: str, request: Request) -> JSONResponse:
     """List selectable audio and text subtitle tracks embedded in the original file."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token, request)
+    media_info = await _playback_media_info(file, token, request)
     if media_info is None:
         return Response(status_code=204, headers=_media_response_headers(request))
+    public_info = {key: value for key, value in media_info.items() if not key.startswith("_")}
     return JSONResponse(
-        {**media_info, "segment_duration": _MEDIA_SEGMENT_SECONDS},
+        {**public_info, "segment_duration": _MEDIA_SEGMENT_SECONDS},
         headers=_media_response_headers(request),
     )
 
@@ -548,7 +705,7 @@ async def public_hls_master(token: str, request: Request) -> Response:
     """Create an HLS master playlist without writing a playlist or media segment to disk."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token, request)
+    media_info = await _playback_media_info(file, token, request)
     if media_info is None:
         return Response(status_code=204, headers=_media_response_headers(request))
     if not media_info.get("video"):
@@ -589,7 +746,7 @@ async def public_hls_video_playlist(token: str, request: Request) -> Response:
     """Create the video-only HLS playlist for dynamic, in-memory segments."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token, request)
+    media_info = await _playback_media_info(file, token, request)
     if media_info is None:
         return Response(status_code=204, headers=_media_response_headers(request))
     return Response(
@@ -608,7 +765,7 @@ async def public_hls_audio_playlist(
     """Create a separate audio rendition playlist for the selected embedded stream."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token, request)
+    media_info = await _playback_media_info(file, token, request)
     if media_info is None:
         return Response(status_code=204, headers=_media_response_headers(request))
     if not any(int(item["index"]) == track for item in media_info["audio"]):
@@ -631,7 +788,7 @@ async def public_hls_audio_playlist_legacy(
     """Support older HLS manifests that pass the selected audio track in the query string."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token, request)
+    media_info = await _playback_media_info(file, token, request)
     if media_info is None:
         return Response(status_code=204, headers=_media_response_headers(request))
 
@@ -683,17 +840,23 @@ async def public_hls_segment(
     index: int,
     request: Request,
 ) -> Response:
-    """Generate one MPEG-TS transport segment on demand and return it directly from memory."""
+    """Serve a cached or freshly generated MPEG-TS segment and prefetch upcoming fragments."""
 
     if kind not in {"video", "audio", "subtitle"}:
         raise HTTPException(status_code=404, detail="Media segment not found.")
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token, request)
+    media_info = await _playback_media_info(file, token, request)
     if media_info is None:
         return Response(status_code=204, headers=_media_response_headers(request))
     duration = float(media_info["duration"])
-    segment_count = math.ceil(duration / _MEDIA_SEGMENT_SECONDS)
+    processed_assets = media_info.get("_processed_assets")
+    selected_segments = None
+    if processed_assets is not None and kind in {"video", "audio"}:
+        selected_segments = ((processed_assets.get(kind) or {}).get(str(track))) or []
+        segment_count = len(selected_segments)
+    else:
+        segment_count = math.ceil(duration / _MEDIA_SEGMENT_SECONDS)
     if index < 0 or index >= segment_count:
         raise HTTPException(status_code=404, detail="Media segment not found.")
 
@@ -724,6 +887,59 @@ async def public_hls_segment(
             start_seconds=start,
             duration_seconds=segment_duration,
         )
+
+    if processed_assets is not None and kind in {"video", "audio"}:
+        processed = get_processed_video(int(file.id)) if file.id is not None else None
+        if processed is None:
+            raise HTTPException(status_code=503, detail="Processed streaming assets are temporarily unavailable.")
+        try:
+            segment = await read_processed_segment(file, processed, kind, stream_index, index)
+        except IndexError as error:
+            raise HTTPException(status_code=404, detail="Processed media segment not found.") from error
+        except (KeyError, OSError, ValueError) as error:
+            raise HTTPException(status_code=502, detail="Could not read the stored media segment.") from error
+        return Response(content=segment, media_type="video/mp2t", headers=_media_response_headers(request))
+
+    cache_key = _media_segment_cache_key(file, kind, stream_index, index)
+    segment = await _get_or_generate_media_segment(
+        cache_key,
+        lambda: _generate_hls_media_segment(
+            token,
+            kind,
+            stream_index,
+            start,
+            segment_duration,
+            request=request,
+        ),
+    )
+    if segment is None:
+        return Response(status_code=204, headers=_media_response_headers(request))
+    if not segment:
+        raise HTTPException(status_code=502, detail="FFmpeg produced an empty media segment.")
+
+    # Start generating upcoming segments in the background so their FFmpeg work can
+    # overlap playback of the segment the browser is consuming now.
+    _schedule_media_segment_prefetch(
+        file,
+        token,
+        kind,
+        stream_index,
+        index,
+        duration,
+    )
+    return Response(content=segment, media_type="video/mp2t", headers=_media_response_headers(request))
+
+
+async def _generate_hls_media_segment(
+    token: str,
+    kind: str,
+    stream_index: int,
+    start: float,
+    segment_duration: float,
+    *,
+    request: Request | None,
+) -> bytes | None:
+    """Encode one HLS video/audio segment, optionally aborting when its requester disconnects."""
 
     ffmpeg_path, _ = _media_tool_paths()
     command = [
@@ -769,18 +985,93 @@ async def public_hls_segment(
         "pipe:1",
     ])
 
-    segment = await _run_media_tool(
+    return await _run_media_tool(
         command,
         timeout=max(120.0, segment_duration * 30.0),
         output_limit=_MEDIA_MAX_OUTPUT_BYTES,
         request=request,
     )
-    if segment is None:
-        return Response(status_code=204, headers=_media_response_headers(request))
-    if not segment:
-        raise HTTPException(status_code=502, detail="FFmpeg produced an empty media segment.")
 
-    return Response(content=segment, media_type="video/mp2t", headers=_media_response_headers(request))
+
+async def _prefetch_media_segment(
+    file: File,
+    token: str,
+    kind: str,
+    stream_index: int,
+    index: int,
+    duration: float,
+) -> None:
+    """Generate one upcoming audio/video segment in the background, best-effort."""
+
+    start = index * _MEDIA_SEGMENT_SECONDS
+    segment_duration = min(_MEDIA_SEGMENT_SECONDS, duration - start)
+    if segment_duration <= 0:
+        return
+
+    cache_key = _media_segment_cache_key(file, kind, stream_index, index)
+    try:
+        # Limit background work to one encoder so the active playback requests retain
+        # most of the shared FFmpeg/process capacity.
+        async with _MEDIA_PREFETCH_LIMIT:
+            await _get_or_generate_media_segment(
+                cache_key,
+                lambda: _generate_hls_media_segment(
+                    token,
+                    kind,
+                    stream_index,
+                    start,
+                    segment_duration,
+                    request=None,
+                ),
+            )
+    except Exception:
+        # Prefetch is opportunistic. A failed speculative request must never break playback.
+        return
+
+
+def _forget_media_prefetch_task(
+    cache_key: tuple[str, str, int, int],
+    task: asyncio.Task[None],
+) -> None:
+    """Release a completed task reference without affecting a replacement task."""
+
+    if _MEDIA_SEGMENT_PREFETCH_TASKS.get(cache_key) is task:
+        _MEDIA_SEGMENT_PREFETCH_TASKS.pop(cache_key, None)
+
+
+def _schedule_media_segment_prefetch(
+    file: File,
+    token: str,
+    kind: str,
+    stream_index: int,
+    index: int,
+    duration: float,
+) -> None:
+    """Queue the next few segments without blocking the current response."""
+
+    if kind not in {"video", "audio"}:
+        return
+
+    segment_count = math.ceil(duration / _MEDIA_SEGMENT_SECONDS)
+    for next_index in range(index + 1, min(segment_count, index + 1 + _MEDIA_SEGMENT_PREFETCH_COUNT)):
+        cache_key = _media_segment_cache_key(file, kind, stream_index, next_index)
+        if cache_key in _MEDIA_SEGMENT_PREFETCH_TASKS:
+            continue
+
+        task = asyncio.create_task(
+            _prefetch_media_segment(
+                file,
+                token,
+                kind,
+                stream_index,
+                next_index,
+                duration,
+            )
+        )
+        _MEDIA_SEGMENT_PREFETCH_TASKS[cache_key] = task
+        task.add_done_callback(
+            lambda finished, key=cache_key: _forget_media_prefetch_task(key, finished)
+        )
 
 
 @router.get("/hls/{token}/subtitles/{stream_index}.srt")
@@ -794,7 +1085,7 @@ async def public_hls_subtitles(
     """Stream one extracted WebVTT track as FFmpeg produces cues; no sidecar file is stored."""
 
     file = await _owned_public_file(token, request)
-    media_info = await _public_media_info(file, token, request)
+    media_info = await _playback_media_info(file, token, request)
     if media_info is None:
         return Response(status_code=204, headers=_media_response_headers(request))
     subtitle = next(
@@ -974,7 +1265,7 @@ async def public_zip_download(
         request: Request,
         filename: str = Query(default="StoreLimitless-files.zip", max_length=180),
 ) -> Response:
-    """Stream a multi-file ZIP directly from remote storage with no server-side archive staging."""
+    """Stream selected files and folder trees into a ZIP without server-side archive staging."""
 
     try:
         payload = verify_public_zip_token(token)
@@ -986,7 +1277,12 @@ async def public_zip_download(
     folder_ids = cast(list[int], payload.get("folder_ids", []))
 
     all_directories = await Directory.get_all(username)
-    all_files = await File.get_all(username)
+    # The UI intentionally hides these internal marker records; ZIP archives must
+    # not expose them either when a whole directory tree is downloaded.
+    all_files = [
+        file for file in await File.get_all(username)
+        if file.name != ".__folder__"
+    ]
     directories_by_id = {
         int(directory.id): directory
         for directory in all_directories
@@ -1001,7 +1297,7 @@ async def public_zip_download(
     selected_files: list[File] = []
     for file_id in file_ids:
         file = await File.get(username, fid=file_id)
-        if file is None or file.username != username:
+        if file is None or file.username != username or file.name == ".__folder__":
             raise HTTPException(
                 status_code=404,
                 detail="One or more selected files are no longer available",
@@ -1048,7 +1344,21 @@ async def public_zip_download(
             raise OSError(f'Cannot read "{file.name}": {error}') from error
 
     entries: list[ZipStreamEntry] = []
+    archive_identity: list[dict[str, object]] = []
     used_root_names: set[str] = set()
+
+    def record_file_identity(entry_name: str, file: File) -> None:
+        """Track metadata that must stay stable across byte-range resume requests."""
+
+        archive_identity.append({
+            "kind": "file",
+            "name": entry_name,
+            "id": file.id,
+            "size": max(0, int(file.size or 0)),
+            "modified_at": file.modified_at.isoformat(),
+            "data_center": file.data_center,
+            "links": file.links,
+        })
 
     def unique_root_name(value: str) -> str:
         base = str(value or "").strip().strip(". ") or "folder"
@@ -1064,6 +1374,13 @@ async def public_zip_download(
         root_path = Path(folder.path)
         root_name = unique_root_name(root_path.name)
         entries.append(ZipStreamEntry(name=f"{root_name}/", source=None, size=0))
+        archive_identity.append({
+            "kind": "directory",
+            "id": folder.id,
+            "path": str(root_path),
+            "modified_at": folder.modified_at.isoformat(),
+            "entry_name": f"{root_name}/",
+        })
 
         descendant_directories = sorted(
             (
@@ -1076,11 +1393,19 @@ async def public_zip_download(
         for directory in descendant_directories:
             relative = Path(directory.path).relative_to(root_path)
             if relative.parts:
+                directory_entry_name = f"{root_name}/{relative.as_posix().rstrip('/')}/"
                 entries.append(ZipStreamEntry(
-                    name=f"{root_name}/{relative.as_posix().rstrip('/')}/",
+                    name=directory_entry_name,
                     source=None,
                     size=0,
                 ))
+                archive_identity.append({
+                    "kind": "directory",
+                    "id": directory.id,
+                    "path": str(directory.path),
+                    "modified_at": directory.modified_at.isoformat(),
+                    "entry_name": directory_entry_name,
+                })
 
         for file in all_files:
             parent_path = directory_path_by_id.get(int(file.directory_id))
@@ -1091,6 +1416,7 @@ async def public_zip_download(
             file_name = Path(str(file.name).replace("\\", "/")).name or "download"
             relative_parts = [root_name, *relative_parent.parts, file_name]
             entry_name = "/".join(relative_parts)
+            record_file_identity(entry_name, file)
             if not file.links and int(file.size or 0) == 0:
                 entries.append(ZipStreamEntry(name=entry_name, source=None, size=0))
             else:
@@ -1108,6 +1434,7 @@ async def public_zip_download(
         # Explicit file selections live at the archive root. Stored file names are
         # leaf names; the ZIP writer additionally rejects unsafe relative paths.
         file_name = Path(str(file.name).replace("\\", "/")).name or "download"
+        record_file_identity(file_name, file)
         if not file.links and int(file.size or 0) == 0:
             entries.append(ZipStreamEntry(name=file_name, source=None, size=0))
         else:
@@ -1130,16 +1457,100 @@ async def public_zip_download(
             headers=_public_cors_headers(request),
         )
 
+    archive_length = zip64_stored_content_length(entries)
+    archive_etag = '"' + sha256(
+        json.dumps(archive_identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest() + '"'
+
+    range_header = request.headers.get("range")
+    if_range = request.headers.get("if-range")
+    if range_header and if_range and if_range.strip() != archive_etag:
+        # If the selected archive changed while paused, ignore Range and let the client
+        # safely truncate and replace the old partial archive from byte zero.
+        range_header = None
+
+    range_start = 0
+    range_end = archive_length - 1
+    partial = False
+    if range_header:
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+        if not match or "," in range_header:
+            return Response(status_code=416, headers={
+                "Content-Range": f"bytes */{archive_length}",
+                "Accept-Ranges": "bytes",
+                "ETag": archive_etag,
+                "Content-Length": "0",
+                **_public_cors_headers(request),
+            })
+
+        first, last = match.groups()
+        if first:
+            range_start = int(first)
+            range_end = int(last) if last else archive_length - 1
+        else:
+            suffix_length = int(last or 0)
+            if suffix_length <= 0:
+                return Response(status_code=416, headers={
+                    "Content-Range": f"bytes */{archive_length}",
+                    "Accept-Ranges": "bytes",
+                    "ETag": archive_etag,
+                    "Content-Length": "0",
+                    **_public_cors_headers(request),
+                })
+            range_start = max(0, archive_length - suffix_length)
+            range_end = archive_length - 1
+
+        if range_start >= archive_length or range_end < range_start:
+            return Response(status_code=416, headers={
+                "Content-Range": f"bytes */{archive_length}",
+                "Accept-Ranges": "bytes",
+                "ETag": archive_etag,
+                "Content-Length": "0",
+                **_public_cors_headers(request),
+            })
+
+        range_end = min(range_end, archive_length - 1)
+        partial = True
+
     archive_filename = _safe_zip_download_filename(filename)
+    response_length = range_end - range_start + 1
     headers = {
         "Content-Disposition": _content_disposition(archive_filename, attachment=True),
         "Cache-Control": "private, no-store, no-cache, must-revalidate, no-transform",
+        "Accept-Ranges": "bytes",
+        "ETag": archive_etag,
         "X-Content-Type-Options": "nosniff",
         "X-Accel-Buffering": "no",
         "Referrer-Policy": "no-referrer",
-        # STORE-mode ZIP output has a predictable exact size, so browser download
-        # managers can show the total without buffering or pre-compressing the files.
-        "Content-Length": str(zip64_stored_content_length(entries)),
+        "Content-Length": str(response_length),
         **_public_cors_headers(request),
     }
-    return StreamingResponse(stream_zip64(entries), status_code=200, headers=headers, media_type="application/zip")
+    if partial:
+        headers["Content-Range"] = f"bytes {range_start}-{range_end}/{archive_length}"
+
+    async def stream_zip_range():
+        """Replay the deterministic archive and emit only the requested byte range."""
+
+        position = 0
+        async for chunk in stream_zip64(entries):
+            chunk_end = position + len(chunk)
+            if chunk_end <= range_start:
+                position = chunk_end
+                continue
+
+            local_start = max(0, range_start - position)
+            local_end = min(len(chunk), range_end - position + 1)
+            if local_start < local_end:
+                yield chunk[local_start:local_end]
+
+            position = chunk_end
+            if position > range_end:
+                return
+
+    body = stream_zip_range() if partial else stream_zip64(entries)
+    return StreamingResponse(
+        body,
+        status_code=206 if partial else 200,
+        headers=headers,
+        media_type="application/zip",
+    )

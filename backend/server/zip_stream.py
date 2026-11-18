@@ -33,15 +33,23 @@ def _normalize_entry_name(value: str) -> str:
 
     raw = str(value or "download").replace("\\", "/")
     is_directory = raw.endswith("/")
-    if raw.startswith("/"):
+    if raw.startswith("/") or (len(raw) >= 3 and raw[0].isalpha() and raw[1:3] == ":/"):
         raise ValueError("ZIP entry paths must be relative")
 
-    raw_parts = [part for part in raw.split("/") if part not in {"", "."}]
-    if not raw_parts or any(part == ".." for part in raw_parts):
-        raise ValueError("ZIP entry path contains an unsafe component")
+    raw_parts: list[str] = []
+    for part in raw.split("/"):
+        component = part.strip()
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            raise ValueError("ZIP entry path contains an unsafe component")
+        raw_parts.append(component)
+
+    if not raw_parts:
+        raise ValueError("ZIP entry path cannot be empty")
 
     safe_parts = [
-        "".join("_" if ord(character) < 32 or ord(character) == 127 else character for character in part).strip() or "download"
+        "".join("_" if ord(character) < 32 or ord(character) == 127 else character for character in part) or "download"
         for part in raw_parts
     ]
     normalized = "/".join(safe_parts)

@@ -3,8 +3,8 @@ from traceback import format_exc
 from typing import AsyncGenerator
 
 from backend.database import add_file, File, get_file, get_user, User
+from core.config import TRANSFER_PATH
 from core.data_center import DataCenter
-from core.settings import TRANSFER_PATH
 from core.utils import write_log
 
 
@@ -87,19 +87,25 @@ async def download(file: File) -> AsyncGenerator[float | int, None]:
         write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Starting download `{file.fname}` ({total_parts} parts)")
 
         with file_path.open("wb") as output:
-            for i, flink in enumerate(file.flinks, 1):
+            for i, flink in enumerate(file.flinks):
+                part = await DataCenter.get_cached_part(str(file.uid), i)
 
-                while True:
-                    try:
-                        chunk: bytes = await data_center.download(flink)
-                        break
+                if part is None:
+                    while True:
+                        try:
+                            chunk: bytes = await data_center.download(flink)
+                            break
 
-                    except OSError as e:
-                        write_log("ERROR", data_center, "DOWNLOAD", str(file.uid), f"Network error part {i}/{total_parts}, retrying: {e}")
+                        except OSError as e:
+                            write_log("ERROR", data_center, "DOWNLOAD", str(file.uid), f"Network error part {i + 1}/{total_parts}, retrying: {e}")
 
-                output.write(chunk)
-                progress: float | int = round((i / total_parts) * 100, 2)
-                write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Downloaded {i}/{total_parts} ({progress:.1f}%)")
+                    await DataCenter.cache_part(str(file.uid), i, chunk)
+                    part = chunk
+
+                output.write(part)
+
+                progress: float | int = round(((i + 1) / total_parts) * 100, 2)
+                write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Downloaded {i + 1}/{total_parts} ({progress:.1f}%)")
                 yield progress
 
         write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Download complete `{file_path.name}`")

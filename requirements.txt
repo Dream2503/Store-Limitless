@@ -1,5 +1,5 @@
 bcrypt==4.0.1
-discord
+discord-py
 fastapi[all]
 filelock
 gdown

@@ -8,7 +8,7 @@ import libtorrent as lt
 
 from backend.database import File
 from core.data_center import DataCenter
-from core.settings import TRANSFER_PATH
+from core.config import TRANSFER_PATH
 from core.transfer import upload
 from core.utils import write_log
 

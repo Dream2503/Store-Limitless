@@ -4,7 +4,7 @@ from aiohttp import ClientSession
 
 from backend.database import github_cursor_get_repo_id, github_cursor_get_used, github_cursor_increment_repo_id, github_cursor_set_used
 from core.data_center import ConfigMeta, DataCenter
-from core.settings import getenv
+from core.config import getenv
 from core.utils import write_log
 
 
@@ -36,8 +36,8 @@ class GitHub(DataCenter, metaclass=ConfigMeta):
                 async with session.post(f"{GitHub.API}/user/repos", json={"name": name, "private": True, "auto_init": False}) as response:
                     if response.status != 201:
                         write_log(
-                                "ERROR", GitHub, "REPO", "",
-                                f"Failed to create repository '{name}': HTTP {response.status}: {await response.text()}",
+                            "ERROR", GitHub, "REPO", "",
+                            f"Failed to create repository '{name}': HTTP {response.status}: {await response.text()}",
                         )
                         raise OSError(f"GitHub repository creation failed: HTTP {response.status}")
 
@@ -50,8 +50,8 @@ class GitHub(DataCenter, metaclass=ConfigMeta):
             ) as response:
                 if response.status not in (200, 201):
                     write_log(
-                            "ERROR", GitHub, "UPLOAD", "",
-                            f"Failed to upload '{filename}': HTTP {response.status}: {await response.text()}",
+                        "ERROR", GitHub, "UPLOAD", "",
+                        f"Failed to upload '{filename}': HTTP {response.status}: {await response.text()}",
                     )
                     raise OSError(f"GitHub upload failed: HTTP {response.status}")
 
@@ -68,8 +68,8 @@ class GitHub(DataCenter, metaclass=ConfigMeta):
             async with session.get(flink, headers=headers) as response:
                 if response.status != 200:
                     write_log(
-                            "ERROR", GitHub, "DOWNLOAD", "",
-                            f"Failed to download '{flink}': HTTP {response.status}: {await response.text()}",
+                        "ERROR", GitHub, "DOWNLOAD", "",
+                        f"Failed to download '{flink}': HTTP {response.status}: {await response.text()}",
                     )
                     raise OSError(f"GitHub download failed: HTTP {response.status}")
 

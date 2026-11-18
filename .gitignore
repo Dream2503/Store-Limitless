@@ -2,10 +2,10 @@
 __pycache__
 core/.env
 core/transfer
-core/plugin/.idea
-core/plugin/DriveBot.iml
+core/logs.txt.lock
 frontend/node_modules
 .env
 .venv
+.python-version
 /transfer
 *.pyc

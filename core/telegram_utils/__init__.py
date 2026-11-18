@@ -1,10 +1,11 @@
+from asyncio import sleep
 from io import BytesIO
 
-from telegram import Bot, User
-from telegram.ext import Application, ApplicationBuilder, ContextTypes
+from telegram import Bot
+from telegram.error import NetworkError
 
+from core.config import getenv
 from core.data_center import ConfigMeta, DataCenter
-from core.settings import getenv
 from core.utils import write_log
 
 
@@ -13,20 +14,18 @@ class Telegram(DataCenter, metaclass=ConfigMeta):
     TOKEN: str = getenv("TELEGRAM_TOKEN")
     ADMIN: int = int(getenv("TELEGRAM_ADMIN"))
     FILE_DUMP_ID: int = int(getenv("TELEGRAM_FILE_DUMP_ID"))
-
     FILE_DUMP: Bot
-    app: Application
 
     @staticmethod
     async def upload(chunk: bytes, filename: str) -> str:
         message = await Telegram.FILE_DUMP.send_document(
-                chat_id=Telegram.FILE_DUMP_ID,
-                document=BytesIO(chunk),
-                filename=filename,
-                write_timeout=36_000,
-                read_timeout=36_000,
-                connect_timeout=60,
-                pool_timeout=36_000,
+            chat_id=Telegram.FILE_DUMP_ID,
+            document=BytesIO(chunk),
+            filename=filename,
+            write_timeout=36_000,
+            read_timeout=36_000,
+            connect_timeout=60,
+            pool_timeout=36_000,
         )
 
         if message.document is None:
@@ -36,29 +35,39 @@ class Telegram(DataCenter, metaclass=ConfigMeta):
 
     @staticmethod
     async def download(flink: str) -> bytes:
-        return bytes(await (await Telegram.FILE_DUMP.get_file(flink)).download_as_bytearray(), )
+        for attempt in range(5):
+            try:
+                file = await Telegram.FILE_DUMP.get_file(flink)
+                return bytes(await file.download_as_bytearray())
+
+            except NetworkError:
+                if attempt == 4:
+                    raise
+
+                await sleep(1 << attempt)
+
+        raise OSError(f"Telegram download failed: {flink}")
 
     @staticmethod
-    async def on_ready(app: Application) -> None:
+    async def initialize() -> None:
         try:
-            Telegram.FILE_DUMP = app.bot
-            user: User = await app.bot.get_me()
-            write_log("INFO", Telegram, "INIT", user.name, f"Bot is online. Logged in (id={user.id})", )
+            Telegram.FILE_DUMP = Bot(token=Telegram.TOKEN)
+
+            me = await Telegram.FILE_DUMP.get_me()
+
+            write_log("INFO", Telegram, "INIT", me.username or str(me.id), f"Bot is online. Logged in (id={me.id})")
 
         except Exception as e:
-            write_log("ERROR", Telegram, "INIT", "", f"Initialization failure: {e}", )
+            write_log("ERROR", Telegram, "INIT", "", f"Initialization failure: {e}")
+            raise
 
     @staticmethod
-    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE, ) -> None:
-        write_log("ERROR", Telegram, "HANDLER", "", f"Exception: {context.error}", )
-
-    @staticmethod
-    def main() -> None:
+    async def shutdown() -> None:
         try:
-            write_log("INFO", Telegram, "MAIN", "", "Starting Store Limitless Bot...", )
-            Telegram.app = (ApplicationBuilder().token(Telegram.TOKEN).post_init(Telegram.on_ready).build())
-            Telegram.app.add_error_handler(Telegram.error_handler)
-            Telegram.app.run_polling(drop_pending_updates=True, stop_signals=None)
+            if hasattr(Telegram, "FILE_DUMP"):
+                await Telegram.FILE_DUMP.shutdown()
+
+            write_log("INFO", Telegram, "SHUTDOWN", "", "Telegram client stopped.")
 
         except Exception as e:
-            write_log("ERROR", Telegram, "MAIN", "", f"Critical error during bot startup: {e}", )
+            write_log("ERROR", Telegram, "SHUTDOWN", "", f"Shutdown failure: {e}")

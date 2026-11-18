@@ -47,7 +47,9 @@ from .upload_state import (
     register_upload_batch,
     reconcile_completed_link_batch,
     update_upload_batch,
+    update_upload_batch_item_progress,
     upload_batch_key,
+    upload_batch_progress_key,
     user_upload_batches_key,
     upload_job_key,
     upload_session_key,
@@ -353,6 +355,50 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, object] = Body(..
         # replace completed per-file states with stale "downloading" values.
         return JSONResponse({"batch_id": batch_id, "status": "completed"})
 
+    # Browser byte-progress events update one item at a time. Keep these writes outside
+    # the batch JSON document so a large appendable queue is not re-serialized per event.
+    sparse_progress_fields = {
+        "item_index", "item_status", "item_transfer", "item_total", "item_progress", "item_message",
+    }
+    if (
+            "item_index" in payload
+            and "item_status" in payload
+            and "item_transfer" in payload
+            and set(payload).issubset(sparse_progress_fields)
+    ):
+        if metadata.get("kind") != "file":
+            raise HTTPException(status_code=422, detail="Sparse progress updates are only supported for browser file queues")
+
+        if str(payload.get("item_status") or "") != "uploading":
+            raise HTTPException(status_code=422, detail="Sparse progress updates must target an uploading item")
+
+        try:
+            item_index = int(payload["item_index"])
+            item_transfer = max(0, int(payload.get("item_transfer") or 0))
+            item_total = max(0, int(payload.get("item_total") or 0))
+            item_progress = max(0.0, min(100.0, float(payload.get("item_progress") or 0)))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Invalid sparse upload progress")
+
+        items = metadata.get("items")
+        if not isinstance(items, list) or not 0 <= item_index < len(items):
+            raise HTTPException(status_code=422, detail="Invalid upload item index")
+
+        try:
+            updated = await update_upload_batch_item_progress(
+                batch_id,
+                user.username,
+                item_index,
+                transfer=item_transfer,
+                total=item_total,
+                progress=item_progress,
+                message=str(payload.get("item_message") or "Uploading"),
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Upload task not found")
+
+        return JSONResponse({"batch_id": batch_id, "status": str(updated.get("status") or "queued")})
+
     status = str(payload.get("status") or metadata.get("status") or "queued")
 
     if status not in {"queued", "uploading", "paused", "completed", "error", "cancelled"}:
@@ -635,6 +681,12 @@ async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_us
         except KeyError:
             continue
 
+        if child_status == "completed" and child_id == current_child:
+            # The browser queue can be between a completed child and the combined
+            # next-item transition PATCH. Preserve the just-finished file on cancel.
+            completed_during_cancel = True
+            break
+
         if child_status != "uploading":
             continue
 
@@ -659,6 +711,20 @@ async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_us
     item_states = [dict(item) if isinstance(item, dict) else {"name": str(item)} for item in metadata.get("items", [])]
     current_index = int(metadata.get("current_index") or 0)
     message = "Upload task cancelled"
+
+    # Sparse byte progress is stored separately from the batch JSON. Copy the last
+    # confirmed values into the terminal item so cancellation does not reset its tray progress.
+    if 0 <= current_index < len(item_states):
+        raw_progress = await Redis.redis.hget(upload_batch_progress_key(batch_id), str(current_index))
+        if raw_progress:
+            try:
+                progress_state = json.loads(raw_progress)
+                if isinstance(progress_state, dict):
+                    for field in ("transfer", "total", "progress"):
+                        if field in progress_state:
+                            item_states[current_index][field] = progress_state[field]
+            except (TypeError, ValueError):
+                pass
 
     if completed_during_cancel and 0 <= current_index < len(item_states):
         current_item = item_states[current_index]
@@ -694,6 +760,7 @@ async def _delete_upload_batch(batch_id: str, username: str, *, cancel_active: b
 
     if metadata is None:
         await Redis.redis.srem(user_upload_batches_key(username), batch_id)
+        await Redis.delete_key(upload_batch_progress_key(batch_id))
         return
 
     if metadata.get("username") != username:
@@ -763,6 +830,7 @@ async def _delete_upload_batch(batch_id: str, username: str, *, cancel_active: b
             await Redis.delete(child_id, "Progress")
 
     await Redis.redis.srem(user_upload_batches_key(username), batch_id)
+    await Redis.delete_key(upload_batch_progress_key(batch_id))
     await Redis.delete_key(upload_batch_key(batch_id))
 
 

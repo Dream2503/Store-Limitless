@@ -641,16 +641,25 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         if (batchUpdates.item_total != null) currentItem.total = Number(batchUpdates.item_total) || 0;
                         if (batchUpdates.item_progress != null) currentItem.progress = Number(batchUpdates.item_progress) || 0;
                     }
-                    batchUpdates.items = queueItems.map(batchItemPayload);
-                    batchUpdates.total_items = queueItems.length;
-                    batchUpdates.completed_items = queueItems.filter((item) => item.status === "completed").length;
-                    if (batchUpdates.current_index == null) batchUpdates.current_index = activeQueueIndex;
-                    delete batchUpdates.item_index;
-                    delete batchUpdates.item_status;
-                    delete batchUpdates.item_message;
-                    delete batchUpdates.item_transfer;
-                    delete batchUpdates.item_total;
-                    delete batchUpdates.item_progress;
+                    const sparseProgressKeys = [
+                        "item_index", "item_status", "item_transfer", "item_total", "item_progress", "item_message",
+                    ];
+                    const isSparseProgressUpdate = batchUpdates.item_transfer != null
+                        && Object.keys(batchUpdates).every((key) => sparseProgressKeys.includes(key));
+
+                    if (!isSparseProgressUpdate) {
+                        batchUpdates.items = queueItems.map(batchItemPayload);
+                        batchUpdates.total_items = queueItems.length;
+                        batchUpdates.completed_items = queueItems.filter((item) => item.status === "completed").length;
+                        if (batchUpdates.current_index == null) batchUpdates.current_index = activeQueueIndex;
+
+                        delete batchUpdates.item_index;
+                        delete batchUpdates.item_status;
+                        delete batchUpdates.item_message;
+                        delete batchUpdates.item_transfer;
+                        delete batchUpdates.item_total;
+                        delete batchUpdates.item_progress;
+                    }
                 } else {
                     // Link imports still use one tray task per submitted link.
                     if (batchUpdates.item_index != null) batchUpdates.item_index = 0;
@@ -1013,9 +1022,25 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 // Consume a growing shared queue. New file selections append to the same
                 // array while this worker is active, so only this loop can start a file.
                 let index = 0;
+                let unpersistedCompletedIndex = -1;
                 while (true) {
                     if (index >= queueItems.length) {
                         if (sharedFileQueue && Number(sharedFileQueue.pendingAppends) > 0) {
+                            // If the queue temporarily drains while a new selection is still
+                            // being prepared, persist the completed item before waiting.
+                            if (unpersistedCompletedIndex >= 0) {
+                                await publishBatch({
+                                    status: "uploading",
+                                    current_index: index,
+                                    current_job_id: "",
+                                    current_name: "",
+                                    item_index: unpersistedCompletedIndex,
+                                    item_status: "completed",
+                                    item_message: "Uploaded successfully",
+                                    message: `Completed ${successfulItems} of ${queueItems.length}`,
+                                });
+                                unpersistedCompletedIndex = -1;
+                            }
                             await sleep(150);
                             continue;
                         }
@@ -1064,6 +1089,9 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             item_message: "Uploading",
                             message: `Uploading ${index + 1} of ${queueItems.length}`,
                         });
+                        // This single start update also commits the previous item's
+                        // locally recorded completion, replacing a separate PATCH.
+                        unpersistedCompletedIndex = -1;
                         await createJob(
                             selectedFile,
                             "",
@@ -1073,16 +1101,15 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                             String(queueItem.dataCenter || dataCenter),
                         );
                         successfulItems += 1;
-                        await publishBatch({
-                            status: "uploading",
-                            current_index: index + 1,
-                            current_job_id: "",
-                            current_name: "",
-                            item_index: index,
-                            item_status: "completed",
-                            item_message: "Uploaded successfully",
-                            message: `Completed ${successfulItems} of ${queueItems.length}`,
-                        });
+
+                        // Keep the completed item locally. The next item's start PATCH
+                        // persists this completion and the new active item together.
+                        queueItem.status = "completed";
+                        queueItem.message = "Uploaded successfully";
+                        queueItem.transfer = Math.max(0, Number(selectedFile.size) || 0);
+                        queueItem.total = Math.max(0, Number(selectedFile.size) || 0);
+                        queueItem.progress = 100;
+                        unpersistedCompletedIndex = index;
                     } catch (error) {
                         if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) {
                             queueItem.status = "cancelled";

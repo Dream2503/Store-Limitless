@@ -810,6 +810,73 @@ function describeJob(job) {
     };
 }
 
+/**
+ * Render each browser-selected file as its own tray task while retaining the shared
+ * batch ID for queue-level pause, cancellation, and dismissal actions.
+ */
+function expandBrowserFileQueue(job) {
+    const items = Array.isArray(job.items) ? job.items : [];
+    if (job.kind !== "file" || items.length === 0) return [job];
+    if (job.status === "completed") return [];
+
+    const displayItems = items.map((sourceItem, index) => {
+        const item = {...sourceItem};
+        const rawStatus = String(item.status || "queued");
+        let status = ["queued", "uploading", "paused", "completed", "error", "cancelled"].includes(rawStatus)
+            ? rawStatus
+            : rawStatus === "failed" ? "error" : rawStatus === "skipped" ? "cancelled" : "queued";
+
+        if (status === "uploading" && job.status === "paused") status = "paused";
+        if (job.status === "cancelled" && status === "queued") status = "cancelled";
+
+        return {item, index, status};
+    }).filter(({status}) => status !== "completed");
+
+    return displayItems.map(({item, index, status}, displayIndex) => {
+        const size = num(item.size) || num(item.total);
+        const itemProgress = item.progress == null ? 0 : Math.max(0, Math.min(100, num(item.progress)));
+        const providerTransfer = itemProgress >= 50
+            ? Math.min(size || Number.MAX_SAFE_INTEGER, num(item.transfer))
+            : 0;
+        const isCurrent = index === Number(job.currentIndex);
+        const name = String(item.name || `File ${index + 1}`);
+
+        item.name = name;
+        item.size = size;
+        item.total = size;
+        item.progress = itemProgress;
+        item.status = status;
+
+        return {
+            ...job,
+            displayKey: `${job.jobId}:file:${index}`,
+            isBatchItem: true,
+            isBatchItemCurrent: isCurrent,
+            isBatchItemLast: displayIndex === displayItems.length - 1,
+            batchItemIndex: index,
+            name,
+            status,
+            message: String(item.message || (status === "completed" ? "Uploaded successfully" : status)),
+            items: [item],
+            totalItems: 1,
+            completedItems: status === "completed" ? 1 : 0,
+            currentIndex: 0,
+            currentName: name,
+            total: size,
+            transfer: providerTransfer,
+            downloadTransfer: 0,
+            downloadTotal: 0,
+            downloadActive: true,
+            downloadSpeed: 0,
+            uploadSpeed: isCurrent ? num(job.uploadSpeed) : 0,
+            downloadEta: null,
+            uploadEta: isCurrent ? job.uploadEta : null,
+            progress: itemProgress,
+            torrentFiles: [],
+        };
+    });
+}
+
 function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismiss}) {
     const {
         isQueued, isActive, itemCount, title, statusText, statusTone, icon, iconTone, percent, transfer, total,
@@ -820,10 +887,15 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
     const isDownloadingStage = /download/i.test(String(job.message || ""));
     const singleSpeed = isDownloadingStage ? downloadSpeed : uploadSpeed;
     const singleEta = isDownloadingStage ? downloadEta : uploadEta;
-    const showConcurrentProgress = isActive && downloadActive && !hasTorrentItems;
+    // Browser file queues upload bytes in two internal stages, but should keep one
+    // queue-level progress meter. Separate download/storage bars belong to link imports
+    // that actually download a source before (or while) uploading it.
+    const showConcurrentProgress = isActive && job.kind === "link" && downloadActive && !hasTorrentItems;
     const torrents = job.torrentFiles || [];
     const items = Array.isArray(job.items) ? job.items : [];
-    const canPause = job.kind === "file" && (job.status === "uploading" || job.status === "paused");
+    const canPause = job.kind === "file"
+        && (job.status === "uploading" || job.status === "paused")
+        && (!job.isBatchItem || job.isBatchItemCurrent);
     const hasPicker = torrents.length === 1 && job.status === "queued";
 
     return <article
@@ -843,7 +915,39 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
                     Select files and start
                 </button>}
 
-                {isActive && hasTorrentItems ? <div className="mt-2.5 min-w-0 space-y-2.5">
+                {job.isBatchItem ? <div className="mt-2.5 min-w-0 space-y-2.5">
+                    <div className="min-w-0 space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="font-medium text-[#a9d8bb]">Downloaded</span>
+                            <span className="font-mono tabular-nums text-[#c5d8cc]">{downloadPercent.toFixed(1)}%</span>
+                        </div>
+                        <ProgressBar percent={downloadPercent} muted={isQueued}/>
+                        {downloadTotal > 0
+                            ? <p className="font-mono text-[11px] tabular-nums text-[#789083]">
+                                Downloaded {formatFileSize(downloadTransfer)} / {formatFileSize(downloadTotal)}
+                              </p>
+                            : <p className="text-[11px] text-[#789083]">Waiting for file size</p>}
+                    </div>
+                    <div className="min-w-0 space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                            <span className="font-medium text-[#91c9ef]">Uploaded to storage</span>
+                            <span className="font-mono tabular-nums text-[#c5d8e4]">{storagePercent.toFixed(1)}%</span>
+                        </div>
+                        <ProgressBar
+                            percent={storagePercent}
+                            muted={isQueued}
+                            fillClassName="bg-gradient-to-r from-[#3387c7] to-[#56c7db]"
+                        />
+                        {storageTotal > 0
+                            ? storageTransfer > 0 && storageTransfer < storageTotal
+                                ? <TransferDetails transfer={storageTransfer} total={storageTotal} status="uploading" inline
+                                                   speed={uploadSpeed} eta={uploadEta}/>
+                                : <p className="font-mono text-[11px] tabular-nums text-[#789083]">
+                                    Uploaded {formatFileSize(storageTransfer)} / {formatFileSize(storageTotal)}
+                                  </p>
+                            : <p className="text-[11px] text-[#789083]">Waiting for storage upload</p>}
+                    </div>
+                </div> : isActive && hasTorrentItems ? <div className="mt-2.5 min-w-0 space-y-2.5">
                     <div className="space-y-1">
                         <div className="flex items-center justify-between gap-2 text-[11px]">
                             <span className="font-medium text-[#a9d8bb]">Overall download</span>
@@ -935,7 +1039,7 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
                 </div>}
 
 
-                {itemCount > 1 && items.length > 0 && <div className="mt-2.5 space-y-0.5 rounded-lg border border-[#29362e] bg-black/10 p-1.5">
+                {torrents.length > 0 && itemCount > 1 && items.length > 0 && <div className="mt-2.5 space-y-0.5 rounded-lg border border-[#29362e] bg-black/10 p-1.5">
                     {items.map((item, i) => <ItemRow
                         key={`${getFileName(item)}-${i}`}
                         item={item}
@@ -968,7 +1072,7 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
                     <Icon name="close" className="text-[17px]"/>
                 </button>
             </>}
-            {!isActive && <button type="button" onClick={() => onDismiss(job.jobId)} className={iconBtn}
+            {!isActive && (!job.isBatchItem || job.isBatchItemLast) && <button type="button" onClick={() => onDismiss(job.jobId)} className={iconBtn}
                                   title="Remove task from tray" aria-label={`Remove upload task ${job.name}`}>
                 <Icon name="close" className="text-[16px]"/>
             </button>}
@@ -1089,8 +1193,9 @@ export default function UploadJobsTray({
 
     if (!uploadJobs.length && !selectionJob && !fullscreen) return null;
 
-    const activeCount = uploadJobs.filter((job) => ["queued", "uploading", "paused"].includes(job.status)).length;
-    const totalCount = uploadJobs.length;
+    const displayJobs = uploadJobs.slice().reverse().flatMap((job) => expandBrowserFileQueue(job));
+    const activeCount = displayJobs.filter((job) => ["queued", "uploading", "paused"].includes(job.status)).length;
+    const totalCount = displayJobs.length;
     const trayMaximized = fullscreen || maximized;
 
     const leaveFullscreen = () => {
@@ -1176,14 +1281,16 @@ export default function UploadJobsTray({
                 </header>
 
                 <div className={`upload-tray-scrollbar min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2 ${trayMaximized ? "" : "max-h-[min(62dvh,36rem)]"}`}>
-                    {!uploadJobs.length && <div className="flex min-h-48 flex-col items-center justify-center px-4 py-10 text-center">
+                    {!displayJobs.length && <div className="flex min-h-48 flex-col items-center justify-center px-4 py-10 text-center">
                         <Icon name="checklist" className="text-3xl text-[#3b5144]"/>
                         <p className="mt-3 text-sm text-[#c6d2ca]">No uploads yet</p>
                         <p className="mt-1 text-xs text-[#718477]">Uploads and imports will appear here with live progress.</p>
                     </div>}
-                    {uploadJobs.slice().reverse().map((job) => <UploadJobCard key={job.jobId} job={job} onSelectFiles={openSelection}
-                                                                              onPause={pauseUploadJob} onResume={resumeUploadJob}
-                                                                              onCancel={cancelUploadJob} onDismiss={dismissUploadJob}/>)}
+                    {displayJobs.map((displayJob) => (
+                        <UploadJobCard key={displayJob.displayKey || displayJob.jobId} job={displayJob} onSelectFiles={openSelection}
+                                       onPause={pauseUploadJob} onResume={resumeUploadJob}
+                                       onCancel={cancelUploadJob} onDismiss={dismissUploadJob}/>
+                    ))}
                 </div>
             </>}
 

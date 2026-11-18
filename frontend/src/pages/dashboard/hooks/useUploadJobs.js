@@ -327,9 +327,38 @@ export default function useUploadJobs(refreshDirectory) {
                         return normalized;
                     }
                 }));
+                // A fully successful browser-file queue has no remaining work to show.
+                // Remove its terminal Redis batch as well as its tray cards so it does not
+                // return after a page reload. Link-import history and failed/cancelled tasks
+                // retain their existing dismissal behavior.
+                const completedFileBatches = batches.filter(
+                    (batch) => batch.kind === "file" && batch.status === "completed",
+                );
+                const completedFileBatchIds = new Set(completedFileBatches.map((batch) => batch.jobId));
+                const sessionToken = getToken();
+
+                if (sessionToken && completedFileBatches.length) {
+                    await Promise.all(completedFileBatches.map(async (batch) => {
+                        try {
+                            const deleteResponse = await fetch(
+                                `${API_URL}/auth/upload-batches/${encodeURIComponent(batch.jobId)}`,
+                                {method: "DELETE", headers: {Authorization: `Bearer ${sessionToken}`}, cache: "no-store"},
+                            );
+                            if (!deleteResponse.ok && deleteResponse.status !== 404) {
+                                const payload = await deleteResponse.json().catch(() => ({}));
+                                throw new Error(payload.detail || `Could not auto-remove completed upload (${deleteResponse.status})`);
+                            }
+                        } catch (error) {
+                            console.error("Could not automatically remove completed file upload:", error);
+                        }
+                    }));
+                }
+
+                const visibleBatches = batches.filter((batch) => !completedFileBatchIds.has(batch.jobId));
+
                 // Active batches stay near-real-time; while idle, the longer interval
                 // still discovers work started by another device without constant empty polls.
-                hasActiveUploads.current = batches.some((batch) => ["queued", "uploading", "paused"].includes(batch.status));
+                hasActiveUploads.current = visibleBatches.some((batch) => ["queued", "uploading", "paused"].includes(batch.status));
 
                 // Mirror pause/resume/cancel requests made from another signed-in device.
                 const batchById = new Map(batches.map((batch) => [batch.jobId, batch]));
@@ -353,10 +382,11 @@ export default function useUploadJobs(refreshDirectory) {
                     }
                 }
 
-                if (!cancelled) setUploadJobs(batches);
+                if (!cancelled) setUploadJobs(visibleBatches);
 
-                // Refresh only after the whole batch reaches a terminal state. Keep its tray
-                // record visible; completion history is user-dismissed, not auto-pruned.
+                // Refresh destination directories after terminal states. Successful browser-file
+                // batches were auto-dismissed above; failed/cancelled tasks and link-import
+                // history remain visible until the user dismisses them.
                 for (const batch of batches) {
                     if (!["completed", "error", "cancelled"].includes(batch.status) || refreshedTerminalIds.current.has(batch.jobId)) continue;
                     refreshedTerminalIds.current.add(batch.jobId);

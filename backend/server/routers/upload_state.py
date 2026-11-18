@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from json import dumps, loads
 from asyncio import CancelledError, Task, gather, sleep
 from pathlib import Path
 from time import time
@@ -106,6 +107,13 @@ async def register_upload_job(job_id: str, *, username: str, name: str, kind: st
 
                 if job_id not in children:
                     children.append(job_id)
+
+                if kind == "file":
+                    try:
+                        metadata["batch_item_index"] = max(0, int(batch.get("current_index") or 0))
+                    except (TypeError, ValueError):
+                        metadata["batch_item_index"] = max(0, len(children) - 1)
+                    await Redis.set_json(upload_job_key(job_id), metadata)
 
                 batch["child_job_ids"] = children
                 await Redis.set_json(upload_batch_key(batch_id), batch)
@@ -316,6 +324,12 @@ def user_upload_batches_key(username: str) -> str:
     return f"upload:user:{username}:batches"
 
 
+def upload_batch_progress_key(batch_id: str) -> str:
+    """Build the Redis hash key holding sparse progress for active batch items."""
+
+    return f"upload:batch-progress:{batch_id}"
+
+
 async def register_upload_batch(batch_id: str, *, username: str, name: str, kind: str, directory: str, data_center: str,
                                 items: list[dict[str, object]]) -> None:
     """Persist the whole user-selected upload as one queued tray task."""
@@ -355,6 +369,52 @@ async def get_upload_batch_metadata(batch_id: str) -> dict[str, object] | None:
 
     value: object | None = await Redis.get_json(upload_batch_key(batch_id))
     return value if isinstance(value, dict) else None
+
+
+async def update_upload_batch_item_progress(
+        batch_id: str,
+        username: str,
+        item_index: int,
+        *,
+        transfer: int,
+        total: int,
+        progress: float,
+        message: str,
+) -> dict[str, object]:
+    """Persist only the active item's changing progress, without rewriting the full batch metadata."""
+
+    lock = Redis.redis.lock(f"upload:batch-lock:{batch_id}", timeout=60, blocking_timeout=30)
+
+    async with lock:
+        metadata = await get_upload_batch_metadata(batch_id)
+
+        if metadata is None or metadata.get("username") != username:
+            raise KeyError(batch_id)
+
+        if (
+                metadata.get("cancelled")
+                or metadata.get("paused")
+                or metadata.get("status") in {"completed", "error", "cancelled"}
+                or int(metadata.get("current_index") or 0) != item_index
+        ):
+            return metadata
+
+        items = metadata.get("items")
+        if not isinstance(items, list) or not 0 <= item_index < len(items):
+            return metadata
+
+        item = items[item_index]
+        if not isinstance(item, dict) or item.get("status") not in {"uploading", "downloading", "waiting_upload"}:
+            return metadata
+
+        progress_state = {
+            "transfer": max(0, int(transfer)),
+            "total": max(0, int(total)),
+            "progress": max(0.0, min(100.0, float(progress))),
+            "message": str(message or "Uploading")[:300],
+        }
+        await Redis.redis.hset(upload_batch_progress_key(batch_id), str(item_index), dumps(progress_state))
+        return metadata
 
 
 async def update_upload_batch(batch_id: str, username: str, **updates: object) -> dict[str, object]:
@@ -610,6 +670,23 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
         items_raw = metadata.get("items") if isinstance(metadata.get("items"), list) else []
         items: list[dict[str, object]] = [cast("dict[str, object]", dict(item)) if isinstance(item, dict) else {"name": str(item)} for item in cast("Iterable[object]", items_raw)]
         current_index = int(metadata.get("current_index") or 0)
+
+        # Only the current browser-upload item has live sparse progress. Keeping it in a
+        # dedicated Redis hash avoids serializing the entire appendable batch on every byte update.
+        if str(metadata.get("kind") or "") == "file" and 0 <= current_index < len(items):
+            active_item = items[current_index]
+            if active_item.get("status") not in {"completed", "error", "failed", "cancelled", "skipped"}:
+                raw_progress = await Redis.redis.hget(upload_batch_progress_key(batch_id), str(current_index))
+                if raw_progress:
+                    try:
+                        progress_state: object = loads(raw_progress)
+                        if isinstance(progress_state, dict):
+                            for field in ("transfer", "total", "progress", "message"):
+                                if field in progress_state:
+                                    active_item[field] = progress_state[field]
+                    except (TypeError, ValueError):
+                        pass
+
         source_name = str(items[current_index].get("name") or "") if 0 <= current_index < len(items) else ""
         current_name_is_url = current_name.lower().startswith(("http://", "https://"))
 
@@ -623,6 +700,76 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
         placeholder_names = {"", "link", "upload", "torrent", "watch", "shorts", "embed", "live", "video", "update_name_from_backend"}
 
         items_changed = False
+
+        # Browser uploads run as sequential child jobs. Their child progress record is
+        # authoritative once the storage provider and File.save() have both completed.
+        # Reconcile every child by its recorded queue index so a missed browser PATCH
+        # cannot leave a fully uploaded file showing as "Uploading" indefinitely.
+        if str(metadata.get("kind") or "") == "file" and not metadata.get("cancelled"):
+            child_ids = [str(value) for value in metadata.get("child_job_ids", []) if str(value)]
+            for child_position, child_id in enumerate(child_ids):
+                child_metadata = await get_upload_job_metadata(child_id)
+                if (
+                        child_metadata is None
+                        or child_metadata.get("username") != username
+                        or str(child_metadata.get("batch_id") or "") != batch_id
+                        or child_metadata.get("kind") != "file"
+                ):
+                    continue
+
+                try:
+                    child_progress: Progress = cast("Progress", await Redis.get(child_id, "Progress"))
+                except KeyError:
+                    continue
+
+                child_status = resolve_upload_job_status(
+                    str(child_progress.message or ""),
+                    child_metadata,
+                )
+                try:
+                    item_index = int(child_metadata.get("batch_item_index", child_position))
+                except (TypeError, ValueError):
+                    item_index = child_position
+
+                if not 0 <= item_index < len(items):
+                    continue
+
+                item = items[item_index]
+                if not isinstance(item, dict):
+                    continue
+
+                if child_status == "completed":
+                    item_size = max(
+                        0,
+                        int(item.get("size") or item.get("total") or child_progress.total or child_metadata.get("total") or 0),
+                    )
+                    completed_values: dict[str, object] = {
+                        "status": "completed",
+                        "message": "Uploaded successfully",
+                        "transfer": item_size,
+                        "total": item_size,
+                        "size": item_size,
+                        "progress": 100.0,
+                        "download_transfer": item_size,
+                        "download_total": item_size,
+                        "upload_transfer": item_size,
+                        "upload_total": item_size,
+                        "download_speed": 0.0,
+                        "upload_speed": 0.0,
+                        "download_eta": None,
+                        "upload_eta": None,
+                    }
+                elif child_status in {"error", "cancelled"}:
+                    completed_values = {
+                        "status": child_status,
+                        "message": str(child_progress.message or ("Upload cancelled" if child_status == "cancelled" else "Upload failed"))[:300],
+                    }
+                else:
+                    continue
+
+                if any(item.get(key) != value for key, value in completed_values.items()):
+                    item.update(completed_values)
+                    items_changed = True
 
         if current_job_id:
             try:

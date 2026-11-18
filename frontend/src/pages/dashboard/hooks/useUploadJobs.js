@@ -367,9 +367,88 @@ export default function useUploadJobs(refreshDirectory) {
         });
     };
 
-    /** Stop the current transfer and prevent later items in the batch from starting. */
-    const cancelUploadJob = (jobId) => {
+    /**
+     * Cancel one expanded browser-file row, or the entire batch when no item index is supplied.
+     * @param {string} jobId
+     * @param {number | null} itemIndex
+     */
+    const cancelUploadJob = (jobId, itemIndex = null) => {
         const transfer = window.__storeLimitlessUploadTransfers?.get(jobId);
+        const token = getToken();
+        if (!token) return;
+
+        if (Number.isInteger(itemIndex)) {
+            // A file-row cancel must never set the batch-wide cancel token. The worker
+            // sees this item-local marker, aborts only this child's chunk XHRs, records
+            // the item as cancelled, and advances to the next selected file.
+            if (transfer) {
+                if (!(transfer.cancelledItemIndexes instanceof Set)) transfer.cancelledItemIndexes = new Set();
+                transfer.cancelledItemIndexes.add(itemIndex);
+                for (const xhr of transfer.xhrs || []) xhr.abort();
+            }
+
+            setUploadJobs((current) => current.map((job) => {
+                if (job.jobId !== jobId || !Array.isArray(job.items) || !job.items[itemIndex]) return job;
+                const items = job.items.map((item, index) => index === itemIndex
+                    ? {...item, status: "cancelled", message: "Cancelling this file"}
+                    : item);
+                return {...job, items};
+            }));
+
+            void fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(jobId)}/items/${itemIndex}/cancel`, {
+                method: "POST",
+                headers: {Authorization: `Bearer ${token}`},
+                cache: "no-store",
+            }).then(async (response) => {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data.detail || `Could not cancel file (${response.status})`);
+                }
+                const finalStatus = String(data.item_status || "cancelled");
+                if (finalStatus === "completed") transfer?.cancelledItemIndexes?.delete?.(itemIndex);
+                setUploadJobs((current) => current.map((job) => {
+                    if (job.jobId !== jobId || !Array.isArray(job.items) || !job.items[itemIndex]) return job;
+                    const items = job.items.map((item, index) => index === itemIndex
+                        ? {
+                            ...item,
+                            status: finalStatus,
+                            message: finalStatus === "completed" ? "Uploaded successfully" : "Cancelled by you",
+                            ...(finalStatus === "completed" && {
+                                progress: 100,
+                                transfer: Number(item.size || item.total) || 0,
+                                total: Number(item.size || item.total) || 0,
+                            }),
+                        }
+                        : item);
+                    return {...job, items};
+                }));
+            }).catch(async (error) => {
+                console.error("Could not cancel individual upload file:", error);
+                // If the batch-item route lost a race, fall back to cancelling the
+                // active child directly. File-child terminal reconciliation keeps the
+                // parent browser queue alive and advances it after this child stops.
+                const childId = String(transfer?.activeJobId || "");
+                if (childId) {
+                    try {
+                        const fallback = await fetch(`${API_URL}/auth/upload-jobs/${encodeURIComponent(childId)}/cancel`, {
+                            method: "POST",
+                            headers: {Authorization: `Bearer ${token}`},
+                            cache: "no-store",
+                        });
+                        if (!fallback.ok) {
+                            const data = await fallback.json().catch(() => ({}));
+                            throw new Error(data.detail || `Could not cancel active file (${fallback.status})`);
+                        }
+                    } catch (fallbackError) {
+                        console.error("Could not cancel active child upload:", fallbackError);
+                    }
+                }
+            });
+            return;
+        }
+
+        // Batch-level cancel retains the original behaviour: stop the current file
+        // and prevent all remaining queued items from starting.
         if (transfer) {
             transfer.cancelToken.cancelled = true;
             transfer.cancelToken.paused = false;
@@ -380,8 +459,6 @@ export default function useUploadJobs(refreshDirectory) {
         setUploadJobs((current) => current.map((job) => job.jobId === jobId ? {
             ...job, status: "cancelled", message: "Cancelling upload task",
         } : job));
-        const token = getToken();
-        if (!token) return;
         void fetch(`${API_URL}/auth/upload-batches/${encodeURIComponent(jobId)}/cancel`, {
             method: "POST", headers: {Authorization: `Bearer ${token}`}, cache: "no-store",
         }).then(async (response) => {
@@ -405,8 +482,9 @@ export default function useUploadJobs(refreshDirectory) {
                 throw new Error(data.detail || `Could not clear upload tray (${response.status})`);
             }
 
-            // The server returns the exact terminal batches it removed. Active
-            // queued/uploading/paused batches remain in both Redis and local state.
+            // Entire terminal batches are removed. Within an active multi-file batch,
+            // the server marks terminal rows dismissed without removing or reindexing
+            // the underlying items, so queued and uploading siblings remain untouched.
             const removedIds = new Set(
                 Array.isArray(data.removed_batch_ids)
                     ? data.removed_batch_ids.map((id) => String(id))
@@ -414,8 +492,27 @@ export default function useUploadJobs(refreshDirectory) {
                         .filter((job) => ["completed", "error", "failed", "cancelled"].includes(String(job.status)))
                         .map((job) => String(job.jobId))
             );
+            const dismissedItems = data.dismissed_items && typeof data.dismissed_items === "object"
+                ? data.dismissed_items
+                : {};
 
-            setUploadJobs((current) => current.filter((job) => !removedIds.has(String(job.jobId))));
+            setUploadJobs((current) => current
+                .filter((job) => !removedIds.has(String(job.jobId)))
+                .map((job) => {
+                    const indexes = new Set(
+                        Array.isArray(dismissedItems[String(job.jobId)])
+                            ? dismissedItems[String(job.jobId)].map(Number)
+                            : []
+                    );
+                    if (!indexes.size || !Array.isArray(job.items)) return job;
+                    return {
+                        ...job,
+                        items: job.items.map((item, index) => indexes.has(index)
+                            ? {...item, dismissed: true}
+                            : item),
+                    };
+                }));
+
             const transfers = window.__storeLimitlessUploadTransfers;
             for (const jobId of removedIds) transfers?.delete?.(jobId);
         }).catch((error) => console.error("Could not clear upload history:", error));

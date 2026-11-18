@@ -179,6 +179,11 @@ async def upload_growing_file(
                 break
 
             size: int = path.stat().st_size
+            if producer is not None and track_download and not download_from_path:
+                # Browser chunks arrive concurrently and can extend the physical file
+                # beyond a gap at the beginning. Only schedule provider parts that are
+                # fully inside the contiguous prefix confirmed by Redis.
+                size = min(size, max(0, int(file.size or 0)))
 
             while size >= (part - start_part + 1) * chunk_size and len(upload_tasks) < max(1, int(data_center.MAX_PARALLEL_UPLOADS)):
                 await honor_pause()

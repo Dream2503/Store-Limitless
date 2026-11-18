@@ -313,7 +313,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      * @param {(progress: {transfer: number, total: number, progress: number, message: string}, immediate?: boolean) => void} onProgress
      * @returns {Promise<void>}
      */
-    const uploadFileInChunks = async (jobId, selectedFile, uploadApiUrl, cancelToken, jobXhrs, onProgress = null) => {
+    const uploadFileInChunks = async (jobId, selectedFile, uploadApiUrl, cancelToken, jobXhrs, onProgress = null, isItemCancelled = () => false) => {
         const totalSize = selectedFile.size;
         // An empty file still sends one (empty) chunk so the server can finish.
         const chunkCount = Math.max(1, Math.ceil(totalSize / CHUNK_SIZE));
@@ -343,8 +343,9 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
          * @returns {Promise<void>}
          */
         const lane = async () => {
-            while (!cancelToken.cancelled) {
+            while (!cancelToken.cancelled && !isItemCancelled()) {
                 await waitWhilePaused(cancelToken);
+                if (cancelToken.cancelled || isItemCancelled()) throw new Error("File upload was cancelled.");
                 const index = nextIndex++;
 
                 if (index >= chunkCount) return;
@@ -355,7 +356,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
                 for (let attempt = 1; ; attempt++) {
                     await waitWhilePaused(cancelToken);
-                    if (cancelToken.cancelled) {
+                    if (cancelToken.cancelled || isItemCancelled()) {
                         throw new Error("File upload was cancelled.");
                     }
 
@@ -372,6 +373,9 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         activeChunkProgress.delete(index);
                         reportProgress();
 
+                        if (isItemCancelled()) {
+                            throw new Error("File upload was cancelled.");
+                        }
                         if (cancelToken.cancelled) {
                             throw error;
                         }
@@ -399,6 +403,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         };
 
         await Promise.all(Array.from({length: Math.min(PARALLEL_CHUNKS, chunkCount)}, lane));
+        if (isItemCancelled()) throw new Error("File upload was cancelled.");
         // The second half of the meter represents storage-provider upload, after
         // the browser has successfully sent every chunk to the server.
         onProgress?.({
@@ -616,7 +621,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 if (!createdBatchId) throw new Error("The server did not return an upload task ID.");
                 createdTasks.push({
                     batchId: createdBatchId,
-                    transfer: {cancelToken: {cancelled: false, paused: false, pauseWaiters: []}, xhrs: new Set(), activeJobId: ""},
+                    transfer: {cancelToken: {cancelled: false, paused: false, pauseWaiters: []}, xhrs: new Set(), activeJobId: "", cancelledItemIndexes: new Set()},
                 });
                 // Publish the task to the tray immediately after the server accepts
                 // it. Do not wait for the child worker or the tray's next polling tick.
@@ -921,8 +926,11 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
 
             /** Create one child upload job, and fully finish it before starting the next item. */
             const createJob = async (selectedFile, selectedLink = "", destinationDirectory = directory, displayName = selectedFile?.name || selectedLink, itemNumber = 1, itemDataCenter = dataCenter) => {
+                const isItemCancelled = () => uploadMode === "file"
+                    && batchTransfer?.cancelledItemIndexes?.has(itemNumber - 1);
                 await waitWhilePaused(cancelToken);
                 if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
+                if (isItemCancelled()) throw new Error("File upload was cancelled.");
 
                 // Resolve the direct tunnel before creating a child job. If discovery
                 // fails, no orphaned "Waiting for upload" child is left in Redis.
@@ -971,6 +979,17 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 const {job_id: jobId} = jobResult;
                 if (!jobId) throw new Error("The server did not return an upload job ID.");
                 const resolvedDisplayName = String(jobResult.file_name || displayName);
+                if (isItemCancelled()) {
+                    try {
+                        await fetch(`${API_URL}/auth/upload-jobs/${encodeURIComponent(jobId)}/cancel`, {
+                            method: "POST",
+                            headers: {Authorization: `Bearer ${token}`},
+                        });
+                    } catch (cancelError) {
+                        console.error("Could not cancel newly registered child upload:", cancelError);
+                    }
+                    throw new Error("File upload was cancelled.");
+                }
                 const isStoreLimitlessCopy = jobResult.import_type === "storelimitless-copy";
                 batchTransfer.activeJobId = jobId;
                 const telegramProcessing = uploadMode === "link" && isTelegramMessageUrl(selectedLink);
@@ -998,14 +1017,14 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 if (uploadMode === "file") {
                     try {
                         await waitWhilePaused(batchTransfer);
-                        await uploadFileInChunks(jobId, selectedFile, directUploadApiUrl, cancelToken, batchTransfer.xhrs);
+                        await uploadFileInChunks(jobId, selectedFile, directUploadApiUrl, cancelToken, batchTransfer.xhrs, null, isItemCancelled);
                         await waitWhilePaused(batchTransfer);
                         if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
                         // Sending browser chunks is not enough: wait until the storage provider
                         // confirms completion before the next queued file starts.
                         await waitForJobCompletion(jobId, token, cancelToken, null, {batchId, itemIndex: itemNumber - 1});
                     } catch (error) {
-                        const wasCancelled = cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "");
+                        const wasCancelled = cancelToken.cancelled || isItemCancelled() || /cancelled/i.test(error instanceof Error ? error.message : "");
                         if (!wasCancelled) {
                             const currentToken = localStorage.getItem("token");
                             if (currentToken) {
@@ -1061,6 +1080,14 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     if (!selectedFile) {
                         queueItem.status = "error";
                         queueItem.message = "The browser file is no longer available";
+                        index += 1;
+                        continue;
+                    }
+
+                    if (batchTransfer.cancelledItemIndexes?.has(index)) {
+                        queueItem.status = "cancelled";
+                        queueItem.message = "Cancelled by you";
+                        batchTransfer.cancelledItemIndexes.delete(index);
                         index += 1;
                         continue;
                     }
@@ -1152,9 +1179,10 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         // reaching FastAPI. Stop the shared queue instead of failing each
                         // queued file one by one against the same unavailable route.
                         if (error?.queueFatal) throw error;
-                        if (cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "")) {
+                        if (cancelToken.cancelled || batchTransfer.cancelledItemIndexes?.has(index) || /cancelled/i.test(error instanceof Error ? error.message : "")) {
                             queueItem.status = "cancelled";
-                            queueItem.message = "Cancelled";
+                            queueItem.message = "Cancelled by you";
+                            batchTransfer.cancelledItemIndexes?.delete(index);
                             index += 1;
                             continue;
                         }

@@ -37,6 +37,22 @@ def upload_session_key(job_id: str) -> str:
     return f"upload:session:{job_id}"
 
 
+def upload_activity_key(job_id: str) -> str:
+    """Build the Redis key tracking actual body activity for an in-flight chunk request."""
+
+    return f"upload:activity:{job_id}"
+
+
+async def touch_upload_activity(job_id: str, timestamp: float | None = None) -> None:
+    """Refresh the upload idle-timeout heartbeat without rewriting concurrent range metadata."""
+
+    await Redis.redis.set(
+        upload_activity_key(job_id),
+        str(time() if timestamp is None else timestamp),
+        ex=60 * 60,
+    )
+
+
 def upload_job_key(job_id: str) -> str:
     """Build the Redis key containing ownership and display metadata for a job."""
 
@@ -263,9 +279,15 @@ async def wait_for_all_chunks(job_id: str, file: File) -> None:
             return
 
         last_activity: float = float(state.get("last_activity", 0))
+        raw_activity = await Redis.redis.get(upload_activity_key(job_id))
+        if raw_activity is not None:
+            try:
+                last_activity = max(last_activity, float(raw_activity))
+            except (TypeError, ValueError):
+                pass
 
         if time() - last_activity > 120:
-            raise TimeoutError("No data received from the browser")
+            raise TimeoutError("No browser upload data received for 120 seconds")
 
         await sleep(0.25)
 
@@ -309,6 +331,7 @@ async def record_written_range(job_id: str, start: int, end: int) -> int:
             file_state["size"] = contiguous
 
         await Redis.set_json(session_key, state, ex=60 * 60)
+        await touch_upload_activity(job_id, state["last_activity"] if isinstance(state.get("last_activity"), (int, float)) else None)
         return contiguous
 
 
@@ -443,9 +466,27 @@ async def update_upload_batch(batch_id: str, username: str, **updates: object) -
                 dict(item) if isinstance(item, dict) else {"name": str(item)}
                 for item in metadata.get("items", [])
             ]
-            if len(incoming_items) < len(existing_items):
-                updates["items"] = list(incoming_items) + existing_items[len(incoming_items):]
-            updates["total_items"] = len(updates["items"])
+            normalized_items = [
+                dict(item) if isinstance(item, dict) else {"name": str(item)}
+                for item in incoming_items
+            ]
+
+            # A clear-tray action dismisses terminal rows without removing them from
+            # the underlying queue. Preserve that UI-only flag when the active browser
+            # worker later publishes a snapshot built from its original File objects.
+            for item_index, incoming_item in enumerate(normalized_items):
+                if (
+                        item_index < len(existing_items)
+                        and existing_items[item_index].get("dismissed")
+                        and not incoming_item.get("dismissed")
+                ):
+                    incoming_item["dismissed"] = True
+
+            if len(normalized_items) < len(existing_items):
+                normalized_items.extend(existing_items[len(normalized_items):])
+
+            updates["items"] = normalized_items
+            updates["total_items"] = len(normalized_items)
 
         metadata.update(updates)
         await Redis.set_json(upload_batch_key(batch_id), metadata)
@@ -553,6 +594,8 @@ async def cleanup_upload_artifacts(job_id: str) -> None:
                 paths.add(Path(raw_path))
 
         await Redis.delete_key(key)
+
+    await Redis.delete_key(upload_activity_key(job_id))
 
     for path in paths:
         path.unlink(missing_ok=True)
@@ -831,44 +874,65 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                         and child_status in {"error", "cancelled"}
                         and metadata.get("status") in {"queued", "uploading", "paused"}
                 ):
-                    metadata["status"] = child_status
-                    metadata["message"] = progress_message or (
-                        "Upload cancelled" if child_status == "cancelled" else "Upload failed"
-                    )
-                    # Ingestion jobs publish authoritative file-level outcomes from the
-                    # server. Preserve those successes/failures instead of overwriting them
-                    # with a generic parent-level cancellation/error snapshot.
-                    if ingestion_type == "google_drive_folder":
-                        for item in items:
-                            if child_status == "cancelled" and item.get("status") not in {"completed", "error", "failed"}:
-                                item["status"] = "cancelled"
-                                item["message"] = "Cancelled"
+                    if str(metadata.get("kind") or "") == "file":
+                        # Browser file queues own their sequencing. A cancelled or failed
+                        # child is a terminal outcome for just its current item; the browser
+                        # worker catches it and advances to the next selected file.
+                        try:
+                            child_item_index = int(child_metadata.get("batch_item_index", current_index))
+                        except (TypeError, ValueError):
+                            child_item_index = current_index
+                        if 0 <= child_item_index < len(items):
+                            child_item = items[child_item_index]
+                            target_status = "cancelled" if child_status == "cancelled" else "error"
+                            child_message = progress_message or (
+                                "Cancelled" if child_status == "cancelled" else "Upload failed"
+                            )
+                            if child_item.get("status") not in {"completed", "cancelled", "error", "failed", "skipped"}:
+                                child_item["status"] = target_status
+                                child_item["message"] = child_message[:300]
                                 items_changed = True
+                        metadata["completed_items"] = sum(1 for item in items if item.get("status") == "completed")
+                        items_changed = True
                     else:
-                        active_seen = False
-                        for item in items:
-                            if item.get("status") in {"downloading", "uploading"}:
-                                if child_status == "cancelled":
+                        metadata["status"] = child_status
+                        metadata["message"] = progress_message or (
+                            "Upload cancelled" if child_status == "cancelled" else "Upload failed"
+                        )
+                        # Ingestion jobs publish authoritative file-level outcomes from the
+                        # server. Preserve those successes/failures instead of overwriting them
+                        # with a generic parent-level cancellation/error snapshot.
+                        if ingestion_type == "google_drive_folder":
+                            for item in items:
+                                if child_status == "cancelled" and item.get("status") not in {"completed", "error", "failed"}:
                                     item["status"] = "cancelled"
                                     item["message"] = "Cancelled"
-                                elif not active_seen:
-                                    item["status"] = "error"
-                                    item["message"] = metadata["message"]
-                                    active_seen = True
-                                else:
+                                    items_changed = True
+                        else:
+                            active_seen = False
+                            for item in items:
+                                if item.get("status") in {"downloading", "uploading"}:
+                                    if child_status == "cancelled":
+                                        item["status"] = "cancelled"
+                                        item["message"] = "Cancelled"
+                                    elif not active_seen:
+                                        item["status"] = "error"
+                                        item["message"] = metadata["message"]
+                                        active_seen = True
+                                    else:
+                                        item["status"] = "skipped"
+                                        item["message"] = "Not started after failure"
+                                    items_changed = True
+                                elif child_status == "cancelled" and item.get("status") == "queued":
+                                    item["status"] = "cancelled"
+                                    item["message"] = "Cancelled"
+                                    items_changed = True
+                                elif child_status == "error" and item.get("status") == "queued":
                                     item["status"] = "skipped"
                                     item["message"] = "Not started after failure"
-                                items_changed = True
-                            elif child_status == "cancelled" and item.get("status") == "queued":
-                                item["status"] = "cancelled"
-                                item["message"] = "Cancelled"
-                                items_changed = True
-                            elif child_status == "error" and item.get("status") == "queued":
-                                item["status"] = "skipped"
-                                item["message"] = "Not started after failure"
-                                items_changed = True
-                    metadata["completed_items"] = sum(1 for item in items if item.get("status") == "completed")
-                    items_changed = True
+                                    items_changed = True
+                        metadata["completed_items"] = sum(1 for item in items if item.get("status") == "completed")
+                        items_changed = True
 
                 # The child process is the source of truth for torrent file-level progress.
                 # Rebuild the tray items from Redis on every batch poll so a frontend reload

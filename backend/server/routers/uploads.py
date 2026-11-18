@@ -50,6 +50,7 @@ from .upload_state import (
     update_upload_batch_item_progress,
     upload_batch_key,
     upload_batch_progress_key,
+    touch_upload_activity,
     user_upload_batches_key,
     upload_job_key,
     upload_session_key,
@@ -104,6 +105,15 @@ async def upload_file(
 
         if batch.get("cancelled") or batch.get("status") in {"cancelled", "completed", "error"}:
             raise HTTPException(status_code=409, detail="Upload task is no longer active")
+        try:
+            active_item_index = int(batch.get("current_index") or 0)
+        except (TypeError, ValueError):
+            active_item_index = 0
+        batch_items = batch.get("items")
+        if isinstance(batch_items, list) and 0 <= active_item_index < len(batch_items):
+            active_item = batch_items[active_item_index]
+            if isinstance(active_item, dict) and active_item.get("status") in {"cancelled", "completed", "error", "skipped"}:
+                raise HTTPException(status_code=409, detail="This upload queue item is already terminal")
 
     directory_obj: Directory | None = await Directory.get(user.username, path=Path(directory))
 
@@ -138,6 +148,22 @@ async def upload_file(
         total=file_size,
         batch_id=batch_id,
     )
+    if batch_id:
+        latest_batch = await get_upload_batch_metadata(batch_id)
+        if latest_batch is None or latest_batch.get("username") != user.username:
+            await cancel_upload_job_state(job_id, user.username)
+            raise HTTPException(status_code=409, detail="Upload queue is no longer available")
+        try:
+            registered_item_index = int(latest_batch.get("current_index") or 0)
+        except (TypeError, ValueError):
+            registered_item_index = 0
+        latest_items = latest_batch.get("items")
+        if isinstance(latest_items, list) and 0 <= registered_item_index < len(latest_items):
+            registered_item = latest_items[registered_item_index]
+            if isinstance(registered_item, dict) and registered_item.get("status") in {"cancelled", "completed", "error", "skipped"}:
+                await cancel_upload_job_state(job_id, user.username)
+                raise HTTPException(status_code=409, detail="This upload queue item was cancelled before it started")
+
     write_log(
         "INFO",
         Database,
@@ -753,6 +779,199 @@ async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_us
     return JSONResponse({"batch_id": batch_id, "status": "cancelled"})
 
 
+@router.post("/upload-batches/{batch_id}/items/{item_index}/cancel")
+async def cancel_upload_batch_item(
+        batch_id: str,
+        item_index: int,
+        user: User = Depends(get_current_user),
+) -> JSONResponse:
+    """Cancel only the active browser-file item and leave the remaining queue runnable."""
+
+    metadata = await get_upload_batch_metadata(batch_id)
+    if metadata is None or metadata.get("username") != user.username:
+        raise HTTPException(status_code=404, detail="Upload task not found")
+    if metadata.get("kind") != "file":
+        raise HTTPException(status_code=409, detail="Per-file cancellation is only available for browser file queues")
+    if metadata.get("cancelled") or metadata.get("status") in {"completed", "error", "cancelled"}:
+        raise HTTPException(status_code=409, detail="The upload queue is no longer active")
+
+    items = [dict(item) if isinstance(item, dict) else {"name": str(item)} for item in metadata.get("items", [])]
+    if not 0 <= item_index < len(items):
+        raise HTTPException(status_code=404, detail="Upload queue item not found")
+    if item_index != int(metadata.get("current_index") or 0):
+        raise HTTPException(status_code=409, detail="Only the currently uploading file can be cancelled")
+
+    item = items[item_index]
+    item_status = str(item.get("status") or "queued")
+    if item_status in {"completed", "error", "failed", "cancelled", "skipped"}:
+        return JSONResponse({
+            "batch_id": batch_id,
+            "item_index": item_index,
+            "item_status": item_status,
+            "status": str(metadata.get("status") or "uploading"),
+            "continued": True,
+        })
+
+    child_id = str(metadata.get("current_job_id") or "")
+    child_progress: Progress | None = None
+    child_metadata: dict[str, object] | None = None
+
+    # The child can be registered a moment before the browser publishes current_job_id.
+    # Recover that in-flight child from the batch's ordered child list during this window.
+    candidate_child_ids = [child_id] if child_id else []
+    candidate_child_ids.extend(
+        str(value) for value in reversed(metadata.get("child_job_ids", []))
+        if str(value) and str(value) not in candidate_child_ids
+    )
+    for candidate_id in candidate_child_ids:
+        candidate_metadata = await get_upload_job_metadata(candidate_id)
+        try:
+            candidate_item_index = int(candidate_metadata.get("batch_item_index", -1)) if candidate_metadata else -1
+        except (TypeError, ValueError):
+            candidate_item_index = -1
+        if (
+                candidate_metadata
+                and candidate_metadata.get("username") == user.username
+                and str(candidate_metadata.get("batch_id") or "") == batch_id
+                and candidate_item_index == item_index
+        ):
+            child_id = candidate_id
+            child_metadata = candidate_metadata
+            break
+
+    if child_id:
+        child_metadata = child_metadata or await get_upload_job_metadata(child_id)
+        if (
+                child_metadata is None
+                or child_metadata.get("username") != user.username
+                or str(child_metadata.get("batch_id") or "") != batch_id
+                or int(child_metadata.get("batch_item_index", -1)) != item_index
+        ):
+            raise HTTPException(status_code=409, detail="The active upload does not match this queue item")
+
+        try:
+            child_progress = cast("Progress", await Redis.get(child_id, "Progress"))
+        except KeyError:
+            child_progress = None
+
+        if child_progress is None:
+            # A pending child has no transfer worker yet, but its registration can
+            # still be cancelled safely and its staging metadata cleaned up.
+            try:
+                await cancel_upload_job_state(child_id, user.username)
+            except HTTPException as error:
+                if error.status_code != 409:
+                    raise
+
+        if child_progress is not None:
+            child_status = resolve_upload_job_status(str(child_progress.message or ""), child_metadata)
+            if child_status == "completed":
+                completed_size = max(0, int(item.get("size") or item.get("total") or child_progress.total or 0))
+                item.update({
+                    "status": "completed",
+                    "message": "Uploaded successfully",
+                    "size": completed_size,
+                    "total": completed_size,
+                    "transfer": completed_size,
+                    "progress": 100.0,
+                    "download_transfer": completed_size,
+                    "download_total": completed_size,
+                    "upload_transfer": completed_size,
+                    "upload_total": completed_size,
+                })
+                updated = await update_upload_batch(
+                    batch_id,
+                    user.username,
+                    items=items,
+                    completed_items=sum(entry.get("status") == "completed" for entry in items),
+                )
+                return JSONResponse({
+                    "batch_id": batch_id,
+                    "item_index": item_index,
+                    "item_status": "completed",
+                    "status": str(updated.get("status") or "uploading"),
+                    "continued": True,
+                })
+
+            if child_status == "uploading":
+                try:
+                    await cancel_upload_job_state(child_id, user.username)
+                except HTTPException as error:
+                    if error.status_code != 409:
+                        raise
+                    latest_progress = await Redis.get(child_id, "Progress")
+                    latest_metadata = await get_upload_job_metadata(child_id) or child_metadata
+                    if resolve_upload_job_status(str(latest_progress.message or ""), latest_metadata or {}) == "completed":
+                        completed_size = max(0, int(item.get("size") or item.get("total") or latest_progress.total or 0))
+                        item.update({
+                            "status": "completed",
+                            "message": "Uploaded successfully",
+                            "size": completed_size,
+                            "total": completed_size,
+                            "transfer": completed_size,
+                            "progress": 100.0,
+                            "download_transfer": completed_size,
+                            "download_total": completed_size,
+                            "upload_transfer": completed_size,
+                            "upload_total": completed_size,
+                        })
+                        updated = await update_upload_batch(
+                            batch_id,
+                            user.username,
+                            items=items,
+                            completed_items=sum(entry.get("status") == "completed" for entry in items),
+                        )
+                        return JSONResponse({
+                            "batch_id": batch_id,
+                            "item_index": item_index,
+                            "item_status": "completed",
+                            "status": str(updated.get("status") or "uploading"),
+                            "continued": True,
+                        })
+                    raise
+
+    # Preserve the last confirmed byte counters on the cancelled card. These are
+    # per-file values; the parent batch remains uploading so the browser can advance.
+    if child_progress is not None:
+        download_total = max(0, int(child_progress.download_total or item.get("size") or 0))
+        download_transfer = max(0, int(child_progress.download_transfer or 0))
+        upload_total = max(0, int(child_progress.total or item.get("size") or 0))
+        upload_transfer = max(0, int(child_progress.transfer or 0))
+        upload_transfer = min(upload_transfer, download_transfer)
+        item.update({
+            "download_transfer": download_transfer,
+            "download_total": download_total,
+            "upload_transfer": upload_transfer,
+            "upload_total": upload_total,
+        })
+
+    item["status"] = "cancelled"
+    item["message"] = "Cancelled by you"
+    updated = await update_upload_batch(
+        batch_id,
+        user.username,
+        items=items,
+        completed_items=sum(entry.get("status") == "completed" for entry in items),
+        message=f"Cancelled {str(item.get('name') or 'current file')}; continuing queue",
+    )
+    await Redis.redis.hdel(upload_batch_progress_key(batch_id), str(item_index))
+
+    write_log(
+        "INFO",
+        Database,
+        "UPLOAD QUEUE",
+        user.username,
+        f"Cancelled one file item batch_id={batch_id} item_index={item_index} child_job_id={child_id or '-'}; remaining items stay queued.",
+    )
+    return JSONResponse({
+        "batch_id": batch_id,
+        "item_index": item_index,
+        "item_status": "cancelled",
+        "status": str(updated.get("status") or "uploading"),
+        "continued": True,
+    })
+
+
 async def _delete_upload_batch(batch_id: str, username: str, *, cancel_active: bool = False) -> None:
     """Delete a terminal batch and the child job records belonging to it."""
 
@@ -844,18 +1063,23 @@ async def dismiss_upload_batch(batch_id: str, user: User = Depends(get_current_u
 
 @router.delete("/upload-batches")
 async def clear_upload_batches(user: User = Depends(get_current_user)) -> JSONResponse:
-    """Remove completed, failed, and cancelled tasks without interrupting active uploads."""
+    """Clear terminal tasks and terminal rows inside active multi-file batches."""
 
-    terminal_statuses = {"completed", "error", "failed", "cancelled"}
+    terminal_statuses = {"completed", "error", "failed", "cancelled", "skipped"}
     batch_ids = await Redis.redis.smembers(user_upload_batches_key(user.username))
     removed_batch_ids: list[str] = []
+    dismissed_items: dict[str, list[int]] = {}
+
+    # Reconcile child-job results before deciding what is terminal. In particular,
+    # a browser-file batch may still be uploading while earlier file rows completed
+    # or failed and later files remain queued.
+    await list_user_upload_batches(user.username)
 
     for raw_batch_id in list(batch_ids):
         batch_id = str(raw_batch_id)
         metadata = await get_upload_batch_metadata(batch_id)
 
-        # Clean stale account-index entries, but never touch a batch owned by
-        # another account or one that is still queued, uploading, or paused.
+        # Clean stale account-index entries, but never touch a batch owned by another user.
         if metadata is None:
             await _delete_upload_batch(batch_id, user.username)
             removed_batch_ids.append(batch_id)
@@ -864,15 +1088,43 @@ async def clear_upload_batches(user: User = Depends(get_current_user)) -> JSONRe
         if metadata.get("username") != user.username:
             continue
 
-        if str(metadata.get("status") or "queued") not in terminal_statuses:
+        batch_status = str(metadata.get("status") or "queued").lower()
+        if batch_status in terminal_statuses:
+            await _delete_upload_batch(batch_id, user.username)
+            removed_batch_ids.append(batch_id)
             continue
 
-        await _delete_upload_batch(batch_id, user.username)
-        removed_batch_ids.append(batch_id)
+        raw_items = metadata.get("items")
+        if not isinstance(raw_items, list):
+            continue
+
+        # Keep the original item indexes intact. The browser queue runner and its
+        # child jobs address items by index, so removing rows from this list would
+        # corrupt current_index and per-item cancellation/progress references.
+        items = [
+            dict(item) if isinstance(item, dict) else {"name": str(item)}
+            for item in raw_items
+        ]
+        terminal_indexes: list[int] = []
+
+        for item_index, item in enumerate(items):
+            item_status = str(item.get("status") or "queued").lower()
+            if item_status in terminal_statuses and not item.get("dismissed"):
+                item["dismissed"] = True
+                terminal_indexes.append(item_index)
+
+        if terminal_indexes:
+            await update_upload_batch(batch_id, user.username, items=items)
+            await Redis.redis.hdel(
+                upload_batch_progress_key(batch_id),
+                *(str(index) for index in terminal_indexes),
+            )
+            dismissed_items[batch_id] = terminal_indexes
 
     return JSONResponse({
         "message": "Terminal upload history cleared",
         "removed_batch_ids": removed_batch_ids,
+        "dismissed_items": dismissed_items,
     })
 
 
@@ -1121,8 +1373,14 @@ async def upload_chunk(
         raise HTTPException(status_code=416, detail="Chunk offset exceeds declared file size")
 
     position: int = offset
+    last_activity_heartbeat: float = 0.0
 
     try:
+        # Start the idle timer only once this authenticated chunk request is ready
+        # to receive bytes. Refresh it while the body is actively streaming.
+        await touch_upload_activity(job_id)
+        last_activity_heartbeat = time()
+
         async with aiofiles.open(file_path, "r+b") as buffer:
             await buffer.seek(offset)
 
@@ -1135,6 +1393,15 @@ async def upload_chunk(
 
                 await buffer.write(chunk)
                 position += len(chunk)
+
+                # A range is committed to Redis only after its complete request body
+                # arrives. Large/slow 8 MiB requests must still count as activity while
+                # their fragments are being written, or the producer's 120s idle timer
+                # can incorrectly fail a healthy transfer.
+                current_time = time()
+                if current_time - last_activity_heartbeat >= 5:
+                    await touch_upload_activity(job_id, current_time)
+                    last_activity_heartbeat = current_time
 
             # Flush once after the complete HTTP range has arrived. The range is
             # not published to Redis until after this point, so the storage worker

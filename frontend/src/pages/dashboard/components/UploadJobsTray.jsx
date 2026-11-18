@@ -828,7 +828,7 @@ function expandBrowserFileQueue(job) {
         if (job.status === "cancelled" && status === "queued") status = "cancelled";
 
         return {item, index, status};
-    });
+    }).filter(({item}) => !item.dismissed);
 
     return displayItems.map(({item, index, status}, displayIndex) => {
         const size = num(item.size) || num(item.total);
@@ -844,16 +844,19 @@ function expandBrowserFileQueue(job) {
         // so using it here incorrectly makes storage appear nearly 100% complete.
         const itemTotal = size || (isCurrent ? num(job.downloadTotal) || num(job.uploadTotal) || num(job.total) : 0);
         const itemCompleted = status === "completed";
-        const itemUploadTransfer = itemCompleted
-            ? itemTotal
-            : isCurrent
-                ? Math.min(itemTotal || Number.MAX_SAFE_INTEGER, Math.max(num(job.uploadTransfer), num(job.transfer)))
-                : Math.max(0, Math.min(itemTotal || Number.MAX_SAFE_INTEGER, num(item.upload_transfer ?? item.transfer)));
         const itemDownloadTransfer = itemCompleted
             ? itemTotal
             : isCurrent
                 ? Math.max(0, Math.min(itemTotal || Number.MAX_SAFE_INTEGER, num(job.downloadTransfer)))
                 : Math.max(0, Math.min(itemTotal || Number.MAX_SAFE_INTEGER, num(item.download_transfer)));
+        const rawItemUploadTransfer = itemCompleted
+            ? itemTotal
+            : isCurrent
+                ? Math.max(0, Math.min(itemTotal || Number.MAX_SAFE_INTEGER, Math.max(num(job.uploadTransfer), num(job.transfer))))
+                : Math.max(0, Math.min(itemTotal || Number.MAX_SAFE_INTEGER, num(item.upload_transfer ?? item.transfer)));
+        // Storage cannot have accepted more bytes than the contiguous browser prefix
+        // that was received and is eligible for upload. Clamp stale/ahead telemetry.
+        const itemUploadTransfer = Math.min(itemDownloadTransfer, rawItemUploadTransfer);
         const itemUploadTotal = itemTotal;
 
         item.name = name;
@@ -1084,8 +1087,11 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
                               title="Pause upload" aria-label={`Pause upload ${job.name}`}>
                         <Icon name="pause" className="text-[18px]"/>
                       </button>}
-                <button type="button" onClick={() => onCancel(job.jobId)} className={iconBtnDanger}
-                        title="Cancel this upload task and skip queued items" aria-label={`Cancel upload task ${job.name}`}>
+                <button type="button"
+                        onClick={() => onCancel(job.jobId, job.isBatchItem ? job.batchItemIndex : null)}
+                        className={iconBtnDanger}
+                        title={job.isBatchItem ? "Cancel this file and continue the queue" : "Cancel this upload task and skip queued items"}
+                        aria-label={job.isBatchItem ? `Cancel file ${job.name} and continue queue` : `Cancel upload task ${job.name}`}>
                     <Icon name="close" className="text-[17px]"/>
                 </button>
             </>}

@@ -910,7 +910,7 @@ function UploadJobCard({job, onSelectFiles, onPause, onResume, onCancel, onDismi
     // Browser file queues upload bytes in two internal stages, but should keep one
     // queue-level progress meter. Separate download/storage bars belong to link imports
     // that actually download a source before (or while) uploading it.
-    const showConcurrentProgress = isActive && job.kind === "link" && downloadActive && !hasTorrentItems;
+    const showConcurrentProgress = isActive && ["link", "copy"].includes(job.kind) && downloadActive && !hasTorrentItems;
     const torrents = job.torrentFiles || [];
     const items = Array.isArray(job.items) ? job.items : [];
     const canPause = job.kind === "file"

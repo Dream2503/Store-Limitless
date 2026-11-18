@@ -615,6 +615,7 @@ async def get_file_metadata(fid: int, user: User = Depends(get_current_user)) ->
         "name": file.name,
         "type": file.type,
         "size": max(0, int(file.size or 0)),
+        "data_center": file.data_center,
     }
 
 

@@ -928,6 +928,22 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                 current_upload_total = current_total
                 current_download_transfer = max(0, int(getattr(child_progress, "download_transfer", 0) or 0))
                 current_download_total = max(0, int(getattr(child_progress, "download_total", 0) or 0))
+                current_upload_transfer = current_transfer
+                current_upload_total = current_total
+                if str(metadata.get("kind") or "") == "copy":
+                    copy_item = items[0] if items else {}
+                    copy_item.update({
+                        "status": "uploading",
+                        "message": str(child_progress.message or "Copying"),
+                        "download_transfer": current_download_transfer,
+                        "download_total": current_download_total,
+                        "upload_transfer": current_transfer,
+                        "upload_total": current_total,
+                        "transfer": current_transfer,
+                        "total": current_total,
+                        "progress": min(99.0, current_transfer * 100 / current_total) if current_total > 0 else 0.0,
+                    })
+                    items_changed = True
 
                 # Reflect bytes currently arriving at FastAPI within each active chunk.
                 # Merge offsets with already-confirmed ranges instead of adding them to

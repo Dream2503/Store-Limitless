@@ -199,9 +199,13 @@ async def copy_file_to_directory(
             if expected_size and downloaded != expected_size:
                 raise IOError(f"Downloaded {downloaded} of {expected_size} expected bytes")
 
+            if not expected_size:
+                progress.total = downloaded
             progress.download_transfer = downloaded
             progress.download_total = downloaded
             progress.download_active = False
+            target_file.size = downloaded
+            progress.total = downloaded
             progress.message = f"Uploading to {destination_dc}"
             await Redis.set(job_id, progress)
             await update_upload_batch(
@@ -210,7 +214,7 @@ async def copy_file_to_directory(
             )
             async for value in file_upload(
                 target_file, stage_path, track_download=True,
-                download_total=downloaded, 
+                download_total=downloaded,
             ):
                 # file_upload would report only upload progress. Preserve the completed
                 # source-side counter and publish both lanes to the same copy tray task.
@@ -224,6 +228,7 @@ async def copy_file_to_directory(
                     upload_transfer=max(0, int(value.transfer or 0)), upload_total=max(0, int(value.total or downloaded)),
                     download_transfer=downloaded, download_total=downloaded, download_active=False,
                 )
+            target_file.size = downloaded
             completed = Progress(safe_name, f"Upload Complete of id={target_file.id}", downloaded)
             completed.transfer = downloaded
             completed.total = downloaded
@@ -241,7 +246,13 @@ async def copy_file_to_directory(
                             download_transfer=downloaded, download_total=downloaded)],
             )
         except CancelledError:
-            await Redis.set(job_id, Progress(safe_name, "Upload cancelled", 0))
+            cancelled_progress = Progress(safe_name, "Upload cancelled", max(0, int(source.size or 0)))
+            cancelled_progress.transfer = progress.transfer
+            cancelled_progress.total = progress.total
+            cancelled_progress.download_transfer = progress.download_transfer
+            cancelled_progress.download_total = progress.download_total
+            cancelled_progress.download_active = False
+            await Redis.set(job_id, cancelled_progress)
             await update_upload_batch(batch_id, user.username, status="cancelled", message="Copy cancelled")
         except Exception as error:
             detail = " ".join(sanitize_sensitive_urls(str(error)).split())[:400]

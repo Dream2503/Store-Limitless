@@ -33,6 +33,7 @@ async def file_upload(
         queue_slot_held: bool = False,
         pause_check: Callable[[], Awaitable[bool]] | None = None,
         bypass_queue: bool = False,
+        total_size: int = 0,
 ) -> AsyncGenerator[Progress]:
     """Upload a file, optionally bypassing the shared FIFO for interactive edits."""
 
@@ -62,7 +63,7 @@ async def file_upload(
 
         try:
             write_log("INFO", data_center, "UPLOAD", file.username, f"Found local upload source {file_path.name!r}")
-            progress: Progress = Progress(file.name, "Uploading File", 0)
+            progress: Progress = Progress(file.name, "Uploading File", max(0, int(total_size or 0)))
 
             async with aclosing(upload_growing_file(
                     file,
@@ -72,6 +73,7 @@ async def file_upload(
                     upload_task,
                     track_download=track_download,
                     download_total=download_total,
+                    total_size=max(0, int(total_size or 0)),
                     pause_check=pause_check,
             )) as upload_progress_stream:
                 async for progress_value in upload_progress_stream:

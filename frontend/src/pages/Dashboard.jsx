@@ -157,6 +157,7 @@ export default function DashboardPage({active = true} = {}) {
     });
     const [pasteDialogOpen, setPasteDialogOpen] = useState(false);
     const [pasteDataCenter, setPasteDataCenter] = useState("Discord");
+    const [pasteMetadataLoading, setPasteMetadataLoading] = useState(false);
     const [pasteLoading, setPasteLoading] = useState(false);
     const [pasteError, setPasteError] = useState("");
     const [menuPosition, setMenuPosition] = useState(null);
@@ -1088,8 +1089,37 @@ export default function DashboardPage({active = true} = {}) {
         if (action === "rename" && actionItems.length === 1) openRenameDialog(item); else if (action === "download" && item.type === "file") downloadFile(item.id); else if (action === "restore" && item.type === "file") restoreItem(item.id); else if (action === "restore" && item.type === "folder") restoreFolder(item.id);
     };
 
+    useEffect(() => {
+        if (!pasteDialogOpen || !clipboard?.fileId) return undefined;
+        const token = getToken();
+        if (!token) return undefined;
+        const controller = new AbortController();
+        let cancelled = false;
+        setPasteMetadataLoading(true);
+        fetch(`${API_URL}/auth/file/${encodeURIComponent(clipboard.fileId)}/metadata`, {
+            headers: {Authorization: `Bearer ${token}`},
+            signal: controller.signal,
+            cache: "no-store",
+        }).then(async (response) => {
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.detail || "Could not load source file metadata.");
+            if (!cancelled && getToken() === token && data.data_center) setPasteDataCenter(String(data.data_center));
+        }).catch((error) => {
+            if (error.name !== "AbortError") {
+                console.error("Could not load copy source metadata:", error);
+                if (!cancelled) setPasteError(error instanceof Error ? error.message : "Could not load source file metadata.");
+            }
+        }).finally(() => {
+            if (!cancelled) setPasteMetadataLoading(false);
+        });
+        return () => {
+            cancelled = true;
+            controller.abort();
+        };
+    }, [pasteDialogOpen, clipboard?.fileId]);
+
     const confirmPaste = async () => {
-        if (!clipboard || pasteLoading) return;
+        if (!clipboard || pasteLoading || pasteMetadataLoading) return;
         const token = getToken();
         if (!token) { navigate("/"); return; }
         setPasteLoading(true);
@@ -2321,7 +2351,7 @@ export default function DashboardPage({active = true} = {}) {
 
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
-    }, [active, activeTab, bulkActionLoading, cancelBulkConfirmation, confirmAction, confirmFocus, contextMenu, currentFolder, detailsSelection, detailsTarget, moveDialogItems, navigate, renameTarget, searchQuery, selectableItems, selectedItems, showUploadModal]);
+    }, [active, activeTab, bulkActionLoading, cancelBulkConfirmation, clipboard, confirmAction, confirmFocus, contextMenu, currentFolder, detailsSelection, detailsTarget, moveDialogItems, navigate, pasteDialogOpen, renameTarget, searchQuery, selectableItems, selectedItems, showUploadModal]);
 
     const breadcrumbSegments = useMemo(() => {
         // Keep the internal folder paths for navigation, but show `home` as the top-level location label.
@@ -2489,7 +2519,8 @@ export default function DashboardPage({active = true} = {}) {
                 <div className="space-y-4 p-5">
                     <div className="rounded-lg border border-[#293b30] bg-[#0c110e] p-3"><p className="text-[11px] text-[#718477]">Destination folder</p><p className="mt-1 break-all text-sm text-[#e8f0eb]">{currentFolder || "/home"}</p></div>
                     <label className="block space-y-2"><span className="text-xs font-medium text-[#c6d2ca]">Destination data center</span>
-                        <select value={pasteDataCenter} onChange={(event) => setPasteDataCenter(event.target.value)} disabled={pasteLoading} className="w-full rounded-lg border border-[#35483b] bg-[#0c110e] px-3 py-3 text-sm text-[#f3f7f4] outline-none focus:border-[#3ecf8e]">
+                        {pasteMetadataLoading && <span className="block text-[11px] text-[#718477]">Loading source provider…</span>}
+                        <select value={pasteDataCenter} onChange={(event) => setPasteDataCenter(event.target.value)} disabled={pasteLoading || pasteMetadataLoading} className="w-full rounded-lg border border-[#35483b] bg-[#0c110e] px-3 py-3 text-sm text-[#f3f7f4] outline-none focus:border-[#3ecf8e]">
                             <option value="Discord">Discord</option><option value="Telegram">Telegram</option>
                         </select>
                     </label>
@@ -2498,8 +2529,8 @@ export default function DashboardPage({active = true} = {}) {
                 </div>
                 <footer className="flex justify-end gap-2 border-t border-[#29362e] px-5 py-3">
                     <button type="button" disabled={pasteLoading} onClick={() => setPasteDialogOpen(false)} className="rounded-lg border border-[#35443a] bg-[#18211b] px-4 py-2 text-sm font-medium text-[#dce9e0] hover:bg-[#232f27] disabled:opacity-40">Cancel</button>
-                    <button type="button" disabled={pasteLoading} onClick={() => void confirmPaste()} className="inline-flex items-center gap-2 rounded-md border border-[#2e8058] bg-[#17643d] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1d794a] disabled:opacity-50">
-                        {pasteLoading && <span className="material-symbols-outlined animate-spin text-[15px]">progress_activity</span>}{pasteLoading ? "Copying…" : "Confirm paste"}
+                    <button type="button" disabled={pasteLoading || pasteMetadataLoading} onClick={() => void confirmPaste()} className="inline-flex items-center gap-2 rounded-md border border-[#2e8058] bg-[#17643d] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1d794a] disabled:opacity-50">
+                        {pasteLoading && <span className="material-symbols-outlined animate-spin text-[15px]">progress_activity</span>}{pasteMetadataLoading ? "Loading…" : pasteLoading ? "Copying…" : "Confirm paste"}
                     </button>
                 </footer>
             </section>

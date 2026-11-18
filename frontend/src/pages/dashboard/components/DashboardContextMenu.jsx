@@ -19,23 +19,29 @@ export default function DashboardContextMenu({menu, onClose, onAction, multipleS
             id: "upload", label: "Upload files", icon: "cloud_upload"
         },];
     } else if (menu.item?.is_deleted) {
-        items = [{id: "restore", label: "Restore", icon: "restore"}, ...(!multipleSelected ? [{
-            id: "details", label: "Details", icon: "info"
-        }] : []), {id: "delete", label: "Delete permanently", icon: "delete_forever", danger: true},];
+        items = [
+            {id: "restore", label: "Restore", icon: "restore"},
+            {id: "details", label: "Details", icon: "info"},
+            {id: "delete", label: "Delete permanently", icon: "delete_forever", danger: true},
+        ];
     } else if (menu.item?.type === "folder") {
-        items = [{id: "move", label: "Move to folder", icon: "drive_file_move"}, ...(!multipleSelected ? [{
-            id: "rename", label: "Rename", icon: "drive_file_rename_outline"
-        }, {id: "details", label: "Details", icon: "info"},] : []), ...(canDownloadZip ? [{
-            id: "download-zip", label: "Download as ZIP", icon: "folder_zip"
-        }] : []), {id: "delete", label: "Move to Trash", icon: "delete", danger: true},];
+        items = [
+            {id: "move", label: "Move to folder", icon: "drive_file_move"},
+            ...(!multipleSelected ? [{id: "rename", label: "Rename", icon: "drive_file_rename_outline"}] : []),
+            {id: "details", label: "Details", icon: "info"},
+            ...(canDownloadZip ? [{id: "download-zip", label: "Download as ZIP", icon: "folder_zip"}] : []),
+            {id: "delete", label: "Move to Trash", icon: "delete", danger: true},
+        ];
     } else {
-        items = [...(!multipleSelected ? [{id: "share", label: "Share", icon: "share"}] : []), {id: "move", label: "Move to folder", icon: "drive_file_move"}, ...(!multipleSelected ? [{
-            id: "rename", label: "Rename", icon: "drive_file_rename_outline"
-        }, {id: "details", label: "Details", icon: "info"}, {
-            id: "download", label: "Download", icon: "download"
-        }] : []), ...(canDownloadZip ? [{id: "download-zip", label: "Download as ZIP", icon: "folder_zip"}] : []), {
-            id: "delete", label: "Move to Trash", icon: "delete", danger: true
-        },];
+        items = [
+            ...(!multipleSelected ? [{id: "share", label: "Share", icon: "share"}] : []),
+            {id: "move", label: "Move to folder", icon: "drive_file_move"},
+            ...(!multipleSelected ? [{id: "rename", label: "Rename", icon: "drive_file_rename_outline"}] : []),
+            {id: "details", label: "Details", icon: "info"},
+            ...(!multipleSelected ? [{id: "download", label: "Download", icon: "download"}] : []),
+            ...(canDownloadZip ? [{id: "download-zip", label: "Download as ZIP", icon: "folder_zip"}] : []),
+            {id: "delete", label: "Move to Trash", icon: "delete", danger: true},
+        ];
     }
 
     return createPortal(<div
@@ -63,4 +69,3 @@ export default function DashboardContextMenu({menu, onClose, onAction, multipleS
 /* Dashboard Page                                                      */
 
 /* -------------------------------------------------------------------- */
-

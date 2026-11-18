@@ -36,19 +36,50 @@ async function getPreviewUrl(fileId, publicToken) {
 }
 
 /**
+ * Select only the visible file contents for Ctrl+A / Cmd+A.
+ * Stop propagation so the dashboard's global select-all shortcut does not
+ * replace the browser text selection with a selection of every file.
+ * @param {import("react").KeyboardEvent<HTMLElement>} event
+ */
+function selectAllPreviewContent(event) {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "a") return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const selection = window.getSelection();
+    if (!selection) return;
+
+    const range = document.createRange();
+    range.selectNodeContents(event.currentTarget);
+    selection.removeAllRanges();
+    selection.addRange(range);
+}
+
+/**
  * Render a plain text file or a small safe Markdown subset.
  * @param {{fileId: string, kind: "text" | "markdown", navigate: Function}} props
  */
 export default function FileContentPreview({fileId, kind, navigate, publicToken}) {
     const [content, setContent] = useState("");
+    const [draft, setDraft] = useState("");
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
+    const [editing, setEditing] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState("");
+    const [saveMessage, setSaveMessage] = useState("");
 
     useEffect(() => {
         let cancelled = false;
         setContent("");
+        setDraft("");
         setError("");
+        setSaveError("");
+        setSaveMessage("");
+        setEditing(false);
         setLoading(true);
+
         (async () => {
             try {
                 const streamUrl = await getPreviewUrl(fileId, publicToken);
@@ -56,7 +87,10 @@ export default function FileContentPreview({fileId, kind, navigate, publicToken}
                 if (!response.ok) throw new Error(`Could not read this file (${response.status}).`);
                 const value = await response.text();
                 if (value.length > 5_000_000) throw new Error("This text file is larger than the 5 MB preview limit.");
-                if (!cancelled) setContent(value);
+                if (!cancelled) {
+                    setContent(value);
+                    setDraft(value);
+                }
             } catch (err) {
                 if (!cancelled) {
                     const message = err instanceof Error ? err.message : "Could not read this file.";
@@ -67,24 +101,127 @@ export default function FileContentPreview({fileId, kind, navigate, publicToken}
                 if (!cancelled) setLoading(false);
             }
         })();
+
         return () => {
             cancelled = true;
         };
     }, [fileId, kind, navigate, publicToken]);
 
+    const canEdit = Boolean(fileId && !publicToken);
+
+    const beginEditing = () => {
+        setDraft(content);
+        setSaveError("");
+        setSaveMessage("");
+        setEditing(true);
+    };
+
+    const cancelEditing = () => {
+        setDraft(content);
+        setSaveError("");
+        setEditing(false);
+    };
+
+    const saveContent = async () => {
+        if (!canEdit || saving) return;
+        const sessionToken = localStorage.getItem("token");
+        if (!sessionToken) {
+            setSaveError("Sign in again to save this file.");
+            navigate("/");
+            return;
+        }
+
+        if (new TextEncoder().encode(draft).byteLength > 5_000_000) {
+            setSaveError("The edited file exceeds the 5 MB limit.");
+            return;
+        }
+
+        setSaving(true);
+        setSaveError("");
+        setSaveMessage("");
+
+        try {
+            const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(fileId)}/content`, {
+                method: "PUT",
+                headers: {
+                    Authorization: `Bearer ${sessionToken}`,
+                    "Content-Type": "text/plain; charset=utf-8",
+                },
+                body: draft,
+            });
+            const data = await response.json().catch(() => ({}));
+
+            if (response.status === 401) {
+                if (localStorage.getItem("token") === sessionToken) {
+                    endAuthSession(sessionToken);
+                    navigate("/");
+                }
+                throw new Error("Your session has expired. Sign in again to save this file.");
+            }
+            if (!response.ok) throw new Error(data.detail || "Could not save this file.");
+
+            setContent(draft);
+            setEditing(false);
+            setSaveMessage("Saved · storage links updated");
+        } catch (err) {
+            setSaveError(err instanceof Error ? err.message : "Could not save this file.");
+        } finally {
+            setSaving(false);
+        }
+    };
+
     if (loading) return <PreviewMessage message="Loading file…"/>;
     if (error) return <PreviewMessage message={error}/>;
-    if (kind === "text") return <div className="h-full min-h-0 w-full overflow-y-auto overflow-x-auto overscroll-contain bg-[#111111] p-4 sm:p-6"
-                                     style={{WebkitOverflowScrolling: "touch", scrollbarGutter: "stable"}}>
-        <div className="mx-auto min-h-full w-max min-w-full max-w-6xl rounded-xl border border-[#2e2e2e] bg-[#171717]">
-            <div className="flex items-center justify-between border-b border-[#2e2e2e] px-4 py-2 text-xs text-[#898989]">
-                <span>Plain text preview</span><span>{content.length.toLocaleString()} characters</span>
-            </div>
-            <pre className="overflow-visible whitespace-pre p-4 text-sm leading-6 text-[#d4d4d4]"><code>{content}</code></pre>
-        </div>
-    </div>;
 
-    return <MarkdownPreview content={content}/>;
+    return <div className="flex h-full min-h-0 w-full flex-col bg-[#111111]">
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[#2e2e2e] bg-[#171717] px-4 py-2.5">
+            <div className="min-w-0 text-xs text-[#898989]">
+                <span>{editing ? "Editing source" : kind === "markdown" ? "Markdown preview" : "Plain text preview"}</span>
+                <span className="ml-3">{(editing ? draft : content).length.toLocaleString()} characters</span>
+            </div>
+            <div className="flex items-center gap-2">
+                {saveError && <span role="alert" className="max-w-[min(22rem,50vw)] text-xs text-[#ff7278]">{saveError}</span>}
+                {saveMessage && !editing && <span role="status" className="text-xs text-[#7ed6a8]">{saveMessage}</span>}
+                {canEdit && (editing ? <>
+                    <button type="button" onClick={cancelEditing} disabled={saving}
+                            className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#c6d2ca] hover:bg-white/5 disabled:opacity-50">
+                        Cancel
+                    </button>
+                    <button type="button" onClick={() => void saveContent()} disabled={saving}
+                            className="flex items-center gap-1.5 rounded-md border border-[#2e8058] bg-[#17643d] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#1d794a] disabled:cursor-wait disabled:opacity-60">
+                        {saving && <span className="material-symbols-outlined animate-spin text-[15px]" aria-hidden="true">progress_activity</span>}
+                        {saving ? "Saving…" : "Save"}
+                    </button>
+                </> : <button type="button" onClick={beginEditing}
+                             className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#e7eee9] hover:border-[#3ecf8e]/50 hover:bg-white/5">
+                    Edit
+                </button>)}
+            </div>
+        </header>
+
+        {editing ? <textarea
+            aria-label="Edit file content"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoComplete="off"
+            autoCorrect="off"
+            className="min-h-0 w-full flex-1 resize-none overflow-auto bg-[#111111] p-4 font-mono text-sm leading-6 text-[#d4d4d4] outline-none focus:ring-1 focus:ring-inset focus:ring-[#3ecf8e]/40 sm:p-6"
+        /> : kind === "text" ? <div className="min-h-0 w-full flex-1 overflow-y-auto overflow-x-auto overscroll-contain bg-[#111111] p-4 sm:p-6"
+                                  style={{WebkitOverflowScrolling: "touch", scrollbarGutter: "stable"}}>
+            <div className="mx-auto min-h-full w-max min-w-full max-w-6xl rounded-xl border border-[#2e2e2e] bg-[#171717]">
+                <pre
+                    tabIndex={0}
+                    aria-label="File contents"
+                    onKeyDown={selectAllPreviewContent}
+                    className="overflow-visible whitespace-pre p-4 text-sm leading-6 text-[#d4d4d4] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#3ecf8e]/40"
+                ><code>{content}</code></pre>
+            </div>
+        </div> : <div className="min-h-0 w-full flex-1 overflow-hidden">
+            <MarkdownPreview content={content}/>
+        </div>}
+    </div>;
 }
 
 /**
@@ -165,8 +302,13 @@ function MarkdownPreview({content}) {
             <br/>}{inline(part)}</span>)}</p>);
     }
 
-    return <article className="h-full min-h-0 w-full overflow-y-auto overflow-x-auto overscroll-contain bg-[#151515] px-5 py-8 sm:px-10"
-                    style={{WebkitOverflowScrolling: "touch", scrollbarGutter: "stable"}}>
+    return <article
+        tabIndex={0}
+        aria-label="Markdown file contents"
+        onKeyDown={selectAllPreviewContent}
+        className="h-full min-h-0 w-full overflow-y-auto overflow-x-auto overscroll-contain bg-[#151515] px-5 py-8 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[#3ecf8e]/40 sm:px-10"
+        style={{WebkitOverflowScrolling: "touch", scrollbarGutter: "stable"}}
+    >
         <div
             className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-4 rounded-xl border border-[#2e2e2e] bg-[#1b1b1b] p-5 sm:p-8">{blocks}</div>
     </article>;

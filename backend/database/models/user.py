@@ -5,7 +5,7 @@ directory.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, UTC
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
@@ -27,7 +27,7 @@ class User(BaseModel):
     password: str
     first_name: str
     last_name: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __repr__(self) -> str:
         """Return a readable representation of the user without exposing the password."""
@@ -56,7 +56,7 @@ class User(BaseModel):
                     INSERT INTO directories (path, modified_at, deleted_at, username)
                     VALUES (%s, %s, %s, %s);
                     """,
-                    ("/home", datetime.now(UTC), None, self.username),
+                    ("/home", datetime.now(timezone.utc), None, self.username),
                 )
                 connection.commit()
 

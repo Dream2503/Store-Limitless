@@ -3,7 +3,7 @@ Directory model and persistence operations. A directory is represented by a path
 cached in Redis.
 """
 
-from datetime import datetime, timezone, UTC
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
@@ -21,7 +21,7 @@ class Directory(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int | None = None
     path: Path
-    modified_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    modified_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     deleted_at: datetime | None = None
     username: str
 
@@ -164,7 +164,7 @@ class Directory(BaseModel):
         if self.id is None:
             raise ValueError("Directory has no ID")
 
-        self.modified_at = datetime.now(UTC)
+        self.modified_at = datetime.now(timezone.utc)
         self.deleted_at = self.modified_at
         await self.update()
 
@@ -229,5 +229,5 @@ class Directory(BaseModel):
             raise ValueError("Directory has no ID")
 
         self.deleted_at = None
-        self.modified_at = datetime.now(UTC)
+        self.modified_at = datetime.now(timezone.utc)
         await self.update()

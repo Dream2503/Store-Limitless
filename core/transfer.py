@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from asyncio import Task
+from contextlib import aclosing
 from pathlib import Path
 from traceback import format_exc
 from typing import AsyncGenerator
@@ -37,7 +38,7 @@ async def file_upload(
         write_log("INFO", data_center, "UPLOAD", file.username, f"Found local file: {file_path.name}")
         progress: Progress = Progress(file.name, "Uploading File", 0)
 
-        async for progress_value in upload_growing_file(
+        async with aclosing(upload_growing_file(
                 file,
                 file_path,
                 data_center,
@@ -45,8 +46,9 @@ async def file_upload(
                 upload_task,
                 track_download=track_download,
                 download_total=download_total,
-        ):
-            yield progress_value
+        )) as upload_progress_stream:
+            async for progress_value in upload_progress_stream:
+                yield progress_value
 
         if not intermediate:
             await file.save()
@@ -88,8 +90,9 @@ async def link_upload(file: File, link: str, selected_torrent_files: set[int] | 
         is_torrent: bool = parsed.scheme.lower() == "magnet"
 
         if is_google_drive_folder_url(link):
-            async for progress_value in download_google_drive_folder(file, link):
-                yield progress_value
+            async with aclosing(download_google_drive_folder(file, link)) as folder_stream:
+                async for progress_value in folder_stream:
+                    yield progress_value
 
             # Folder imports create one database file row per child, not a placeholder
             # record for the submitted folder URL.
@@ -102,8 +105,11 @@ async def link_upload(file: File, link: str, selected_torrent_files: set[int] | 
             if not link.lower().startswith("magnet:?") or not has_info_hash:
                 raise ValueError("Expected a valid torrent magnet URI with an xt info-hash topic")
 
-            async for progress_value in download_torrent(file, link, selected_torrent_files):
-                yield progress_value
+            # Closing the parent link generator must close the torrent generator too,
+            # otherwise its finally block may not pause/remove the libtorrent handle.
+            async with aclosing(download_torrent(file, link, selected_torrent_files)) as torrent_stream:
+                async for progress_value in torrent_stream:
+                    yield progress_value
 
             write_log("INFO", data_center, "DOWNLOAD", user.username, f"Torrent download and upload complete ({sanitize_sensitive_urls(link)})")
             return
@@ -118,8 +124,9 @@ async def link_upload(file: File, link: str, selected_torrent_files: set[int] | 
             else:
                 downloader = download_unprocessed_link
 
-        async for progress_value in downloader(file, link):
-            yield progress_value
+        async with aclosing(downloader(file, link)) as download_stream:
+            async for progress_value in download_stream:
+                yield progress_value
 
         await file.save()
         write_log("INFO", data_center, "DOWNLOAD", user.username, f"Download and upload complete `{file.name}`")

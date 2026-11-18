@@ -32,7 +32,7 @@ function isYouTubeUrl(value) {
     }
 }
 
-const PLACEHOLDER_NAMES = new Set(["link", "upload", "torrent", "watch", "shorts", "embed", "live", "video", "update_name_from_backend"]);
+const PLACEHOLDER_NAMES = new Set(["link", "upload", "torrent", "watch", "shorts", "embed", "live", "video", "view", "download", "file", "uc", "open", "update_name_from_backend"]);
 
 /** True when the backend hasn't produced a real title yet (still a URL, video id or placeholder). */
 function isUnresolvedName(value, sourceIsYouTube) {
@@ -572,15 +572,21 @@ function describeJob(job) {
     const usableCurrent = currentName && !isUnresolvedName(rawCurrentName, sourceIsYouTube) ? currentName : "";
     const singleName = singleItem ? getFileName(singleItem) : "";
     const usableItem = singleName && !isUnresolvedName(rawItemName, sourceIsYouTube) ? singleName : "";
+    // A link may be cancelled before its metadata resolves. At that point the
+    // backend can only know the URL's final path segment (for example, "view"),
+    // which is an endpoint name, not the imported file's name. Do not promote
+    // those generic segments over the stable batch title.
+    const usableSingleName = singleName && !isUnresolvedName(singleName, sourceIsYouTube) ? singleName : "";
     const torrentName = String(torrents[0]?.name || "").trim();
     const firstItemName = items.length ? getFileName(items[0]) : "";
+    const usableFirstItemName = firstItemName && !isUnresolvedName(firstItemName, sourceIsYouTube) ? firstItemName : "";
     // Use the torrent's root name as the parent heading. The current child filename
     // belongs in its per-file row, not in the task title.
     const title = torrentName
         || (singleItem
-            ? usableCurrent || usableItem || (sourceIsYouTube ? "YouTube video" : singleName || job.name || "Upload task")
+            ? usableCurrent || usableItem || (sourceIsYouTube ? "YouTube video" : usableSingleName || job.name || "Upload task")
             : job.kind === "link"
-                ? usableCurrent || firstItemName || job.name || "Upload task"
+                ? usableCurrent || usableFirstItemName || job.name || "Upload task"
                 : job.name || "Upload task");
 
     /*

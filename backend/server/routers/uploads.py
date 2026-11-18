@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from asyncio import CancelledError, Task, create_task
+from contextlib import aclosing
 from datetime import datetime, timezone
 from mimetypes import guess_type
 from pathlib import Path
@@ -426,8 +427,11 @@ async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_us
                                           max(int(metadata.get("completed_items") or 0), current_index + 1))
         metadata["message"] = "Cancelled remaining items; the active item completed as cancellation arrived"
 
-    for index, item in enumerate(item_states):
-        if item.get("status") in {"queued", "uploading"}:
+    for item in item_states:
+        # A torrent row can be actively downloading without having entered the
+        # uploading phase. Treat every nonterminal phase as cancelled so stale
+        # download progress cannot remain visible after the parent is cancelled.
+        if item.get("status") not in {"completed", "error", "failed", "cancelled", "skipped"}:
             item["status"] = "cancelled"
             item["message"] = "Cancelled or skipped"
 
@@ -963,79 +967,83 @@ async def upload_link(
                 await Redis.set(job_id, Progress(file.name, "Upload cancelled", 0))
                 return
 
-            async for progress in link_upload(file, download_link, selected_torrent_files):
-                latest_metadata = await get_upload_job_metadata(job_id)
+            # The task is cancelled while the async generator is paused at a
+            # yielded progress update. Explicitly close the stream so the torrent
+            # generator's finally block pauses/removes libtorrent and cancels uploads.
+            async with aclosing(link_upload(file, download_link, selected_torrent_files)) as link_progress:
+                async for progress in link_progress:
+                    latest_metadata = await get_upload_job_metadata(job_id)
 
-                if latest_metadata is None or latest_metadata.get("cancelled"):
-                    await Redis.set(job_id, Progress(file.name, "Upload cancelled", 0))
-                    return
+                    if latest_metadata is None or latest_metadata.get("cancelled"):
+                        await Redis.set(job_id, Progress(file.name, "Upload cancelled", 0))
+                        return
 
-                if is_youtube and batch_id:
-                    candidate_name = str(progress.name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
-                    original_name = link_name
-                    normalized_candidate = candidate_name.casefold()
-                    placeholder_names = {"", "link", "upload", "torrent", "watch", "shorts", "embed", "live", "video", "update_name_from_backend"}
-                    is_video_id = len(candidate_name) == 11 and all(character.isalnum() or character in "_-" for character in candidate_name)
-                    is_resolved_name = (
-                            candidate_name
-                            and normalized_candidate not in placeholder_names
-                            and candidate_name != original_name
-                            and not candidate_name.lower().startswith(("http://", "https://"))
-                            and not is_video_id
-                    )
-                    latest_batch = await get_upload_batch_metadata(batch_id)
-
-                    if latest_batch and latest_batch.get("username") == user.username:
-                        batch_updates: dict[str, Any] = {}
-
-                        if is_resolved_name:
-                            if str(latest_batch.get("current_name") or "") != candidate_name:
-                                batch_updates["current_name"] = candidate_name
-
-                            batch_items: Any = latest_batch.get("items")
-
-                            if isinstance(batch_items, list):
-                                normalized_items: list[dict[str, Any]] = [
-                                    dict(item) if isinstance(item, dict) else {"name": str(item)}
-                                    for item in batch_items
-                                ]
-                                item_index: int = int(latest_batch.get("current_index") or 0)
-
-                                if 0 <= item_index < len(normalized_items) and str(normalized_items[item_index].get("name") or "") != candidate_name:
-                                    normalized_items[item_index]["name"] = candidate_name
-                                    batch_updates["items"] = normalized_items
-
-                        stage_message = str(progress.message or "").strip()
-
-                        if (
-                                stage_message.casefold() in {"downloading video", "downloading audio", "merging audio and video", "uploading file"}
-                                and str(latest_batch.get("message") or "") != stage_message
-                        ):
-                            batch_updates["message"] = stage_message
-
-                        if batch_updates:
-                            await update_upload_batch(batch_id, user.username, **batch_updates)
-
-                if is_telegram_message_link and batch_id:
-                    stage_message: str = str(progress.message or "").strip().casefold()
-                    display_stage: str | None = None
-
-                    if stage_message in {"downloading and uploading file", "downloading file"}:
-                        display_stage = "Downloading file"
-                    elif stage_message.startswith("upload complete of id="):
-                        display_stage = "Finalizing upload"
-
-                    if display_stage:
+                    if is_youtube and batch_id:
+                        candidate_name = str(progress.name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+                        original_name = link_name
+                        normalized_candidate = candidate_name.casefold()
+                        placeholder_names = {"", "link", "upload", "torrent", "watch", "shorts", "embed", "live", "video", "update_name_from_backend"}
+                        is_video_id = len(candidate_name) == 11 and all(character.isalnum() or character in "_-" for character in candidate_name)
+                        is_resolved_name = (
+                                candidate_name
+                                and normalized_candidate not in placeholder_names
+                                and candidate_name != original_name
+                                and not candidate_name.lower().startswith(("http://", "https://"))
+                                and not is_video_id
+                        )
                         latest_batch = await get_upload_batch_metadata(batch_id)
 
-                        if (
-                                latest_batch
-                                and latest_batch.get("username") == user.username
-                                and str(latest_batch.get("message") or "") != display_stage
-                        ):
-                            await update_upload_batch(batch_id, user.username, message=display_stage)
+                        if latest_batch and latest_batch.get("username") == user.username:
+                            batch_updates: dict[str, Any] = {}
 
-                await Redis.set(job_id, progress)
+                            if is_resolved_name:
+                                if str(latest_batch.get("current_name") or "") != candidate_name:
+                                    batch_updates["current_name"] = candidate_name
+
+                                batch_items: Any = latest_batch.get("items")
+
+                                if isinstance(batch_items, list):
+                                    normalized_items: list[dict[str, Any]] = [
+                                        dict(item) if isinstance(item, dict) else {"name": str(item)}
+                                        for item in batch_items
+                                    ]
+                                    item_index: int = int(latest_batch.get("current_index") or 0)
+
+                                    if 0 <= item_index < len(normalized_items) and str(normalized_items[item_index].get("name") or "") != candidate_name:
+                                        normalized_items[item_index]["name"] = candidate_name
+                                        batch_updates["items"] = normalized_items
+
+                            stage_message = str(progress.message or "").strip()
+
+                            if (
+                                    stage_message.casefold() in {"downloading video", "downloading audio", "merging audio and video", "uploading file"}
+                                    and str(latest_batch.get("message") or "") != stage_message
+                            ):
+                                batch_updates["message"] = stage_message
+
+                            if batch_updates:
+                                await update_upload_batch(batch_id, user.username, **batch_updates)
+
+                    if is_telegram_message_link and batch_id:
+                        stage_message: str = str(progress.message or "").strip().casefold()
+                        display_stage: str | None = None
+
+                        if stage_message in {"downloading and uploading file", "downloading file"}:
+                            display_stage = "Downloading file"
+                        elif stage_message.startswith("upload complete of id="):
+                            display_stage = "Finalizing upload"
+
+                        if display_stage:
+                            latest_batch = await get_upload_batch_metadata(batch_id)
+
+                            if (
+                                    latest_batch
+                                    and latest_batch.get("username") == user.username
+                                    and str(latest_batch.get("message") or "") != display_stage
+                            ):
+                                await update_upload_batch(batch_id, user.username, message=display_stage)
+
+                    await Redis.set(job_id, progress)
 
             # The storage worker, not the browser's polling loop, owns successful completion.
             # This avoids leaving a finished link/torrent batch stuck at 95% when a proxy

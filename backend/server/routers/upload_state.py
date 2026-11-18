@@ -770,6 +770,22 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
                 items[current_index]["name"] = current_name
                 items_changed = True
 
+        # Cancellation is terminal for the parent batch. Do not let a stale child
+        # progress snapshot resurrect rows that were still downloading or waiting in
+        # the upload FIFO when the user cancelled the torrent/folder import.
+        if metadata.get("cancelled") or str(metadata.get("status") or "") == "cancelled":
+            for item in items:
+                item_status = str(item.get("status") or "queued")
+                if item_status not in {"completed", "error", "failed", "cancelled", "skipped"}:
+                    item["status"] = "cancelled"
+                    item["message"] = "Cancelled"
+                    items_changed = True
+
+            completed_count = sum(str(item.get("status") or "") == "completed" for item in items)
+            if int(metadata.get("completed_items") or 0) != completed_count:
+                metadata["completed_items"] = completed_count
+                items_changed = True
+
         if items_changed:
             metadata["items"] = items
             await Redis.set_json(upload_batch_key(batch_id), metadata)
@@ -816,8 +832,13 @@ async def list_user_upload_batches(username: str) -> list[dict[str, Any]]:
         else:
             progress = 100.0 if status == "completed" else min(99.0, ((completed_items + current_fraction) / total_items) * 100.0)
 
-        if metadata.get("cancelled"):
+        if metadata.get("cancelled") or status == "cancelled":
             status = "cancelled"
+            current_download_active = False
+            current_download_speed = 0.0
+            current_upload_speed = 0.0
+            current_download_eta = None
+            current_upload_eta = None
 
         batches.append({
             "batch_id": batch_id,

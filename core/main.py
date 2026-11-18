@@ -107,7 +107,7 @@ def _read_startup_log(path: Path, line_count: int = 30) -> str:
 
 
 def _schedule_transfer_cleanup() -> None:
-    """Move transient staging directories aside and delete them in a detached process."""
+    """Move all transfer contents aside and delete them in a detached process."""
 
     if not TRANSFER_PATH.is_dir():
         return
@@ -120,10 +120,6 @@ def _schedule_transfer_cleanup() -> None:
 
     moved_paths: list[Path] = []
     for path in TRANSFER_PATH.iterdir():
-        # Cached chunks are reusable and are indexed on the next startup.
-        if path.name == "cached":
-            continue
-
         try:
             destination = cleanup_root / path.name
             replace(path, destination)

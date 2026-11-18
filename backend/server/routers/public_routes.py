@@ -537,7 +537,10 @@ async def public_media_tracks(token: str, request: Request) -> JSONResponse:
     media_info = await _public_media_info(file, token, request)
     if media_info is None:
         return Response(status_code=204, headers=_media_response_headers(request))
-    return JSONResponse(media_info, headers=_media_response_headers(request))
+    return JSONResponse(
+        {**media_info, "segment_duration": _MEDIA_SEGMENT_SECONDS},
+        headers=_media_response_headers(request),
+    )
 
 
 @router.get("/hls/{token}/master.m3u8")
@@ -682,7 +685,7 @@ async def public_hls_segment(
 ) -> Response:
     """Generate one MPEG-TS transport segment on demand and return it directly from memory."""
 
-    if kind not in {"video", "audio"}:
+    if kind not in {"video", "audio", "subtitle"}:
         raise HTTPException(status_code=404, detail="Media segment not found.")
 
     file = await _owned_public_file(token, request)
@@ -698,14 +701,30 @@ async def public_hls_segment(
         stream_index = int(media_info["video"]["index"])
         if track != stream_index:
             raise HTTPException(status_code=404, detail="Video track not found.")
-    else:
+    elif kind == "audio":
         audio_track = next((item for item in media_info["audio"] if int(item["index"]) == track), None)
         if audio_track is None:
             raise HTTPException(status_code=404, detail="Audio track not found.")
         stream_index = int(audio_track["index"])
+    else:
+        subtitle_track = next((item for item in media_info["subtitles"] if int(item["index"]) == track), None)
+        if subtitle_track is None:
+            raise HTTPException(status_code=404, detail="Subtitle track not found.")
+        if not subtitle_track["selectable"]:
+            raise HTTPException(status_code=415, detail="This bitmap subtitle format cannot be converted to selectable text captions.")
+        stream_index = int(subtitle_track["index"])
 
     start = index * _MEDIA_SEGMENT_SECONDS
     segment_duration = min(_MEDIA_SEGMENT_SECONDS, duration - start)
+    if kind == "subtitle":
+        return await public_hls_subtitles(
+            token,
+            stream_index,
+            request,
+            start_seconds=start,
+            duration_seconds=segment_duration,
+        )
+
     ffmpeg_path, _ = _media_tool_paths()
     command = [
         ffmpeg_path,
@@ -770,7 +789,7 @@ async def public_hls_subtitles(
     stream_index: int,
     request: Request,
     start_seconds: float = Query(default=0, ge=0),
-    duration_seconds: float = Query(default=120, gt=0, le=120),
+    duration_seconds: float = Query(default=_MEDIA_SEGMENT_SECONDS, gt=0, le=120),
 ) -> Response:
     """Stream one extracted WebVTT track as FFmpeg produces cues; no sidecar file is stored."""
 
@@ -801,8 +820,8 @@ async def public_hls_subtitles(
         ffmpeg_path,
         "-hide_banner", "-loglevel", "error", "-nostdin",
         # Keep subtitle packet timestamps aligned to the original media timeline
-        # while seeking to a bounded window. -start_at_zero removes any container
-        # start-time offset but retains the requested seek position (e.g. 120 seconds).
+        # while seeking to a short, bounded window. -start_at_zero removes any container
+        # start-time offset but retains the requested seek position.
         "-copyts", "-start_at_zero",
         "-rw_timeout", "300000000",
         # Input-side seek speeds up demuxing. The output-side seek below is also

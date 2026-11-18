@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from asyncio import CancelledError, Queue, Task, create_task, gather, sleep, to_thread
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
@@ -67,13 +68,15 @@ def download_google_drive_file(link: str, output: Path) -> None:
     # concurrent reader immediately.
     try:
         with output.open("wb", buffering=0) as destination:
-            gdown.download(
+            downloaded = gdown.download(
                 url=link,
                 output=destination,
                 quiet=True,
                 use_cookies=False,
             )
             destination.flush()
+            if downloaded is None:
+                raise OSError("Google Drive download failed")
     except Exception:
         output.unlink(missing_ok=True)
         raise
@@ -1145,16 +1148,17 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
                         "download_transfer": local_size,
                         "download_total": local_size,
                     })
-                    async for upload_progress in file_upload(remote_file, local_path, intermediate=True):
-                        transferred = min(local_size, max(0, int(upload_progress.transfer or 0)))
-                        item.update({
-                            "transfer": transferred,
-                            "upload_transfer": transferred,
-                            "upload_total": local_size,
-                            "status": "uploading",
-                            "message": f"Uploading · {transferred * 100 / local_size:.1f}%" if local_size else "Uploading file",
-                        })
-                        await sleep(0)
+                    async with aclosing(file_upload(remote_file, local_path, intermediate=True)) as upload_stream:
+                        async for upload_progress in upload_stream:
+                            transferred = min(local_size, max(0, int(upload_progress.transfer or 0)))
+                            item.update({
+                                "transfer": transferred,
+                                "upload_transfer": transferred,
+                                "upload_total": local_size,
+                                "status": "uploading",
+                                "message": f"Uploading · {transferred * 100 / local_size:.1f}%" if local_size else "Uploading file",
+                            })
+                            await sleep(0)
 
                     await remote_file.save()
                     # Match the database conflict-resolution name if a duplicate existed.
@@ -1381,22 +1385,23 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
                     "status": "uploading",
                     "message": "Uploading",
                 })
-                async for upload_progress in file_upload(torrent_file, local_path, intermediate=True):
-                    transferred: int = min(local_size, max(0, int(upload_progress.transfer or 0)))
-                    item.update({
-                        "transfer": transferred,
-                        "total": local_size,
-                        "download_transfer": local_size,
-                        "download_total": local_size,
-                        "upload_transfer": transferred,
-                        "upload_total": local_size,
-                        "status": "uploading",
-                        "message": (
-                            f"Uploading · {transferred * 100 / local_size:.1f}%"
-                            if local_size else "Uploading"
-                        ),
-                    })
-                    await sleep(0)
+                async with aclosing(file_upload(torrent_file, local_path, intermediate=True)) as upload_stream:
+                    async for upload_progress in upload_stream:
+                        transferred: int = min(local_size, max(0, int(upload_progress.transfer or 0)))
+                        item.update({
+                            "transfer": transferred,
+                            "total": local_size,
+                            "download_transfer": local_size,
+                            "download_total": local_size,
+                            "upload_transfer": transferred,
+                            "upload_total": local_size,
+                            "status": "uploading",
+                            "message": (
+                                f"Uploading · {transferred * 100 / local_size:.1f}%"
+                                if local_size else "Uploading"
+                            ),
+                        })
+                        await sleep(0)
 
                 await torrent_file.save()
                 local_path.unlink(missing_ok=True)

@@ -181,7 +181,7 @@ async def main() -> None:
 
     if not frozen and HOST != "CLOUD":
         frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
-        await to_thread(ensure_frontend_dependencies, cast(Path, frontend_dir))
+        await to_thread(ensure_frontend_dependencies, cast("Path", frontend_dir))
 
     redis_process: Popen[bytes] | None = start_redis_server()
     frontend_process: Popen[bytes] | None = None

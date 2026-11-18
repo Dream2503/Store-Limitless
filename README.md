@@ -2,7 +2,7 @@
 
 StoreLimitless is a self-hosted personal cloud-storage application. It combines a React/Vite web interface, a Python/FastAPI service layer, PostgreSQL
 metadata, Redis-backed coordination, and Discord/Telegram as remote storage providers. It supports multi-file and nested-folder uploads, one-source-at-a-time remote imports, torrent file selection, resumable downloads, seekable HTTP
-streaming, on-the-fly multi-file ZIP downloads, file previews, folder/trash management, keyboard and touch workflows, and an FTP-compatible virtual
+streaming, on-the-fly multi-file ZIP downloads, file previews, folder/trash management, keyboard and touch workflows, a unified upload/download **Task tray**, custom video controls, and an FTP-compatible virtual
 filesystem. A separate Next.js service under `backend/storelimitlessbackend/` supplies the stable Vercel API proxy used by
 `CLOUD` mode.
 
@@ -20,6 +20,7 @@ The web UI is branded **DriveBot** in places, while the overall application and 
 
 ## Contents
 
+- [Prebuilt release binaries](#prebuilt-release-binaries)
 - [What it does](#what-it-does)
 - [Architecture](#architecture)
 - [Repository layout](#repository-layout)
@@ -42,6 +43,23 @@ The web UI is branded **DriveBot** in places, while the overall application and 
 - [Known boundaries and verification notes](#known-boundaries-and-verification-notes)
 
 ---
+
+## Prebuilt release binaries
+
+The current published release is **StoreLimitless Server v0.1.0**. Download the executable that matches both your operating system and deployment mode. These are the exact uploaded asset names; the Windows `LOCAL` filename intentionally uses an underscore before the version.
+
+| Platform | Configuration | Download |
+|---|---|---|
+| Linux | LOCAL | [`StoreLimitlessServer.LOCAL._0.1.0`](https://github.com/Dream2503/Store-Limitless/releases/download/v0.1.0/StoreLimitlessServer.LOCAL._0.1.0) |
+| Linux | CLOUD | [`StoreLimitlessServer.CLOUD._0.1.0`](https://github.com/Dream2503/Store-Limitless/releases/download/v0.1.0/StoreLimitlessServer.CLOUD._0.1.0) |
+| Windows | LOCAL | [`StoreLimitlessServer.LOCAL_0.1.0.exe`](https://github.com/Dream2503/Store-Limitless/releases/download/v0.1.0/StoreLimitlessServer.LOCAL_0.1.0.exe) |
+| Windows | CLOUD | [`StoreLimitlessServer.CLOUD._0.1.0.exe`](https://github.com/Dream2503/Store-Limitless/releases/download/v0.1.0/StoreLimitlessServer.CLOUD._0.1.0.exe) |
+
+- **LOCAL** bundles the built web frontend with the Python server. Use it when the same executable should serve the dashboard and API.
+- **CLOUD** omits the frontend bundle, uses the hosted [StoreLimitless website](https://storelimitless.vercel.app), and exposes the API through the configured Cloudflare tunnel/Upstash proxy flow. It still requires valid service credentials and configuration.
+- Both modes require the external services and provider setup described below. A packaged executable does not automatically configure PostgreSQL, Redis, Discord/Telegram credentials, firewall rules, or a secure public deployment.
+
+See the [v0.1.0 release page](https://github.com/Dream2503/Store-Limitless/releases/tag/v0.1.0) for all assets and the release summary.
 
 ## What it does
 
@@ -73,27 +91,27 @@ The application provides these user-facing capabilities:
   and run sequentially; chunks within the current browser file may transfer concurrently.
 - After the server registers the task, the upload dialog closes automatically. The task and its per-item statuses remain in the dashboard tray after
   completion, failure, or cancellation until the user removes that task.
-- Expand the upload tray into the dedicated full-screen `/upload-tray` page, then return to the directory from which it was opened.
+- Track upload/import jobs and browser downloads in one shared **Task tray**. Minimize or maximize it, or open the full-screen `/upload-tray` route and return to the dashboard directory that launched it.
 - Cancel an active batch from the tray to abort active browser chunk requests, stop the current backend worker where possible, skip queued items, and
   clean up the uncommitted browser-upload temporary state. The backend locks database finalization against cancellation so an interrupted browser file
   is not saved as a partial database record.
-- Remove one terminal task with its row's **X** control or use **Clear all** to cancel active tasks and clear the tray history.
+- Remove completed/failed tasks individually and clear task history. Active uploads/imports can be cancelled; browser downloads expose pause/resume and removal where the browser supports resumable downloads.
 - Apply optimistic UI updates for single and bulk deletes and item moves, then reconcile with the backend in the background. If a mutation fails, the
   tree is refreshed and an error is shown.
-- Import a single remote source per task, including direct HTTP(S) downloads, Google Drive, YouTube, magnet torrents, and supported Telegram file-message links.
+- Import a single remote source per task, including direct HTTP(S) downloads, Google Drive files or public folders, YouTube, magnet torrents, and supported Telegram file-message links.
 - Download direct HTTP (S) file URLs, import Google Drive files, process YouTube URLs, and select individual files from magnet torrents.
 - Show YouTube processing stages in the upload tray: downloading video, downloading audio, merging audio/video, and uploading to the selected storage
   provider.
 - Track upload batches and individual torrent-file states in a persistent, Redis-backed dashboard tray, including queued, downloading, uploading,
   completed, failed, skipped, and cancelled states where applicable.
-- Download stored files through a pause/resume tray in browsers that support the File System Access API. Byte-range requests and an IndexedDB job
-  record allow supported downloads to resume after a page reload.
+- Download stored files through the shared Task tray. In browsers that support the File System Access API, byte-range requests and an IndexedDB job
+  record allow downloads to pause and resume after a page reload.
 - Download one folder, multiple files, multiple folders, or a mixed file/folder selection as a named ZIP archive. Folder paths are preserved, and the
   server streams the ZIP while reading source files from remote storage instead of staging a complete archive on disk. Paused ZIP downloads can resume
   from saved browser-storage bytes through HTTP byte ranges when the selected archive has not changed.
 - Use dashboard keyboard shortcuts for selection, opening, renaming, trashing, permanent deletion, details, and parent-folder navigation. Mouse and touch
   users can also use context menus, drag selection, long-press selection, and drag-and-drop moves.
-- Stream videos directly from their original storage chunks using HTTP byte ranges, with no server-side transcoding or track extraction. Copy the signed stream URL to open the raw video in VLC; browser playback depends on the source codec. Preview PDFs, audio, Markdown, and common text/source formats.
+- Stream videos directly from their original storage chunks using HTTP byte ranges, with no server-side transcoding or track extraction. The custom player includes playback-speed controls (0.25x–2x), seeking, volume, and fullscreen; on touch devices, double-tapping the left or right side seeks by 10 seconds. Copy the signed stream URL to open the raw video in VLC. Preview PDFs, audio, Markdown, and common text/source formats.
 - Use keyboard shortcuts on the upload page to return to the dashboard or trigger the upload/import action.
 - Rename and move files and folders, including bulk move operations. The move dialog supports browsing destinations and toggling an already-selected
   destination off.
@@ -457,8 +475,8 @@ The server chooses the downloader from the URL host or URI scheme:
 - **Direct HTTP(S) file URLs** use a streamed download. The response should contain file bytes, not an ordinary web page. The downloader uses filename
   metadata where available, rejects likely HTML pages that do not look like file downloads, and attempts to resume an interrupted transfer with HTTP
   `Range` requests. Resume is safe only when the origin confirms the exact requested byte offset and supports byte-range responses.
-- **Google Drive links** (`drive.google.com`) use the Google Drive downloader. The current implementation requests file name/size metadata through the
-  Google Drive API, so the configured Google API key and access to the file are required.
+- **Google Drive file links** (`drive.google.com`) use the Google Drive downloader. Single-file imports write into a growing, unbuffered destination so the upload worker can consume chunks while the file is still downloading. The current single-file metadata path requests information through the Google Drive API, so the configured Google API key and access to the file are required.
+- **Google Drive folder links** preserve relative folder paths. File downloads run through a bounded worker pool and each completed file is queued for upload as soon as it is ready, rather than waiting for the entire folder to finish downloading. Per-file download/upload progress is published to the Task tray; public-link access and Google Drive compatibility still apply.
 - **YouTube links** (`youtube.com`, its subdomains, and `youtu.be`) use `yt-dlp` and FFmpeg to download/process media. The downloader resolves a
   stable media filename from metadata/output paths and publishes separate progress phases for video download, audio download, audio/video merging, and
   storage upload. Merging does not necessarily have a meaningful percentage.
@@ -629,17 +647,15 @@ Add expiry/revocation behavior before relying on links for sensitive files.
 
 ### Browser download manager and resumable downloads
 
-The dashboard has a separate **Downloads** tray for local downloads (distinct from the Redis-backed upload tray). In browsers supporting the File
-System Access API, choosing a file download opens the browser's save-file picker and writes verified byte ranges directly to that file rather than
-buffering a multi-gigabyte download entirely in JavaScript memory.
+The dashboard has one shared **Task tray** for uploads/imports and local browser downloads. The upload/import jobs are synchronized through the backend's Redis-backed task API, while resumable browser-download metadata and file handles are stored in IndexedDB. The download list is rendered by `DownloadJobsTray.jsx` inside `UploadJobsTray.jsx`, not as a separate top-level tray. In browsers supporting the File System Access API, choosing a file download opens the browser's save-file picker and writes verified byte ranges directly to that file rather than buffering a multi-gigabyte download entirely in JavaScript memory.
 
 - The frontend requests a signed download token, then checks the file with `HEAD` for total size and an `ETag`.
 - The download is split into **8 MiB byte-range requests**. Each range must return `206 Partial Content`, the exact expected `Content-Range`, and the
   expected number of bytes before the frontend writes it to disk. Transient range failures are retried up to five attempts.
 - `If-Range` and the recorded `ETag` guard against continuing a partial file when the stored representation has changed.
 - Download task metadata and the browser file handle are stored in IndexedDB. A page reload restores in-progress jobs as **paused**, and the user can
-  resume them from the tray if browser permission for the chosen file is still available. Completed tasks can be cleared from the tray.
-- The UI exposes progress, pause, resume, remove-task, and clear-completed actions. If the File System Access API is unavailable, the app falls back
+  resume them from the shared Task tray if browser permission for the chosen file is still available. Completed downloads can be cleared from the tray.
+- The UI exposes progress, pause, resume, remove-task, and clear-completed actions inside the shared Task tray. If the File System Access API is unavailable, the app falls back
   to
   a normal browser download; resumable tray controls are not available on that fallback path.
 
@@ -810,20 +826,9 @@ All dashboard-specific modules are under `src/pages/dashboard/`:
 - `components/UploadModal.jsx` handles multi-file and nested-folder uploads, plus one-source-at-a-time HTTP(S), Google Drive, YouTube, magnet, and
   Telegram message-link imports. Local file/folder selections are registered as one batch; a remote URL is one import task. The dialog closes once the
   server has accepted the task, then work continues in the tray.
-- `components/UploadJobsTray.jsx` displays persistent upload/import jobs with aggregate and per-file progress, cancellation, per-task dismissal, Clear all,
-  and a maximize/pop-out control. The full-screen `/upload-tray` view uses the same Redis-backed task list and can return to the directory that opened it.
-  A single-file batch uses the compact single-file row layout; folder and multi-file batches retain the nested per-item status list. Torrent items
-  show
-  distinct queued/downloading/downloaded/uploading/completed/failed/cancelled states and per-file progress. YouTube task headings use the resolved
-  media
-  filename when available instead of the source URL; the status line shows the processing stage and percentage without repeating that filename.
-  YouTube
-  links can surface video/audio download, merge, and storage-upload phases. Completed task history stays visible until dismissed. The
-  torrent-selection
-  modal uses checked boxes to determine the upload set; arrow-key focus movement is not itself selection.
-- `src/pages/UploadTrayPage.jsx` wraps the shared upload tray in a full-screen route and preserves the dashboard route to return to when minimized.
-- `components/DownloadJobsTray.jsx` displays browser-local resumable download tasks, with pause/resume, progress, removal, and clearing completed
-  jobs.
+- `components/UploadJobsTray.jsx` renders the unified **Task tray** for Redis-backed upload/import jobs and browser-local resumable downloads. It supports aggregate and per-file progress, upload cancellation, task dismissal, clearing tasks, minimize/maximize, and the full-screen route. The tray keeps terminal upload history visible until dismissed. A single-file upload uses the compact row layout; folders and multi-file batches retain nested per-item status. Torrent items show queued/downloading/downloaded/uploading/completed/failed/cancelled states and per-file progress. YouTube headings use the resolved media filename when available, with separate video-download, audio-download, merge, and storage-upload stages. Torrent selection checkboxes determine the import set; keyboard focus alone does not select a file.
+- `src/pages/UploadTrayPage.jsx` hosts the shared Task tray at `/upload-tray` and returns to the dashboard directory from which it was opened.
+- `components/DownloadJobsTray.jsx` is the embedded browser-download list used by the Task tray; it provides pause/resume, progress, removal, and clearing completed downloads.
 - `utils/resumableDownloads.js` stores resumable download metadata and browser file handles in IndexedDB.
 - `uploadFiles.js` extracts files and relative paths from file drops, including supported dropped directory trees.
 - `components/ViewFile.jsx` routes by file extension and streams the original video URL directly in the native browser player. Its **Copy stream URL** action gives VLC the original signed byte-range URL.
@@ -839,9 +844,11 @@ fenced code blocks, lists, blockquotes, horizontal rules, and HTTP (S) links; it
 
 #### Video streaming and VLC
 
-Video playback uses the original file's raw HTTP byte-range stream. StoreLimitless does not dynamically transcode the video or extract separate audio and
-subtitle tracks. Use the **Copy stream URL** action to copy the signed `/public/stream/{token}` URL, then open it in VLC. Browser preview depends on the
-browser's supported codecs; VLC can handle formats the browser cannot.
+Video playback uses the original file's raw HTTP byte-range stream. StoreLimitless does not dynamically transcode media or extract separate audio and
+subtitle tracks on the server. The custom player provides playback speeds from 0.25x through 2x, progress seeking, volume/mute, fullscreen, and keyboard
+shortcuts; a double-click toggles fullscreen, and on touch devices a double-tap in the left/right zones seeks backward/forward by 10 seconds while a
+tap in the center toggles playback. Use the **Copy stream URL** action to copy the signed `/public/stream/{token}` URL, then open it in VLC. Browser
+preview depends on the browser's supported codecs; VLC can handle formats the browser cannot.
 
 Treat the copied stream URL as a bearer link: anyone who has it can access the shared file, and the current signed-token format has no expiry timestamp.
 
@@ -1604,6 +1611,19 @@ This project should be treated as a self-hosted application that requires securi
 - `data/transfer/` in source mode (or the equivalent frozen data-directory path) is temporary. Canonical file bytes live in the configured storage
   provider, and canonical metadata lives in PostgreSQL.
 
+### Python typing and linting
+
+The project targets Python 3.13. Ruff is configured with the `ANN`, `UP`, and `TCH` rule families, and mypy is configured in strict mode for `backend/` and `core/`. Install the development tools with `python -m pip install -r requirements-dev.txt`, then run:
+
+```bash
+python -m compileall -q backend core
+ruff check --select ANN .
+ruff check .
+mypy --strict backend core
+```
+
+`typing-checklist.md` inventories the tracked Python files. The strict mypy baseline still has unresolved diagnostics; do not treat the typing work as complete until those have been reviewed and the checks pass. Keep annotation changes behavior-preserving, particularly around FastAPI/Pydantic runtime annotations, async generators, upload/download coordination, and filesystem operations.
+
 ### Recommended verification after a change
 
 At minimum, test the affected workflow through the same path a user uses:
@@ -1694,9 +1714,9 @@ For licensing terms, see the repository's `LICENSE` file.
   confirms the requested offset, so unsupported range servers fail instead of silently producing a corrupted file.
 - Multiple selected active files can be downloaded as a named ZIP. The ZIP64 writer streams from remote file readers without first staging source files or
   a complete archive on the server; its signed download token is short-lived.
-- The upload tray has a dedicated `/upload-tray` full-screen route and returns to its originating dashboard folder when minimized. Sidebar Upload controls
-  open the upload dialog. An app-managed top-edge gesture reloads the page after an intentional upward mouse-wheel gesture or downward touch pull at the
-  top of the scroll chain.
+- Uploads/imports and browser downloads now appear together in a single **Task tray** that can be minimized or maximized. The full-screen `/upload-tray` route returns to its originating dashboard folder. Upload and torrent items retain per-file progress, while supported browser downloads expose resumable progress and pause/resume controls. Sidebar Upload controls open the upload dialog. An app-managed top-edge gesture reloads the page after an intentional upward mouse-wheel gesture or downward touch pull at the top of the scroll chain.
+- The custom raw-stream video player exposes playback speed from 0.25x to 2x, progress/volume/fullscreen controls, keyboard shortcuts, and mobile double-tap seeking by 10 seconds in the left or right screen zones. Media stays in the original byte-range stream rather than being transcoded on the server.
+- Google Drive file imports use a growing unbuffered destination for concurrent download/upload. Google Drive folder imports use bounded parallel file downloads and submit each ready file for upload as it completes, with per-file progress instead of waiting for the whole folder to finish.
 - Public file, stream, and ZIP responses include production-origin CORS headers so browser downloads can follow the stable Vercel proxy to the current
   Cloudflare tunnel. The allowlist is in `backend/server/routers/public_routes.py` and must be kept in sync with the deployed frontend origin.
 - The Redis process started by StoreLimitless writes stdout/stderr to `logs.log`; discord.py's default console logging handler is disabled so client and

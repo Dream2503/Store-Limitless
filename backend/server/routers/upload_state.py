@@ -127,7 +127,7 @@ async def get_upload_job_metadata(job_id: str) -> dict[str, object] | None:
     """Return persisted metadata for a job, if it still exists."""
 
     value: object | None = await Redis.get_json(upload_job_key(job_id))
-    return cast(dict[str, object], value) if isinstance(value, dict) else None
+    return cast("dict[str, object]", value) if isinstance(value, dict) else None
 
 
 async def list_user_upload_jobs(username: str) -> list[dict[str, object]]:
@@ -146,7 +146,7 @@ async def list_user_upload_jobs(username: str) -> list[dict[str, object]]:
             continue
 
         try:
-            progress: Progress = cast(Progress, await Redis.get(job_id, "Progress"))
+            progress: Progress = cast("Progress", await Redis.get(job_id, "Progress"))
 
         except KeyError:
             await Redis.redis.srem(index_key, job_id)
@@ -262,7 +262,7 @@ async def record_written_range(job_id: str, start: int, end: int) -> int:
         if not isinstance(state, dict):
             raise HTTPException(status_code=404, detail="Upload session expired")
 
-        ranges_raw: Iterable[object] = cast(Iterable[object], state.get("ranges", []))
+        ranges_raw: Iterable[object] = cast("Iterable[object]", state.get("ranges", []))
         ranges: list[list[int]] = [[int(item[0]), int(item[1])] for item in ranges_raw if isinstance(item, (list, tuple)) and len(item) == 2]
 
         if end > start:
@@ -379,7 +379,7 @@ async def reconcile_completed_link_batch(batch_id: str, username: str, child_job
         return False
 
     try:
-        progress: Progress = cast(Progress, await Redis.get(child_job_id, "Progress"))
+        progress: Progress = cast("Progress", await Redis.get(child_job_id, "Progress"))
     except KeyError:
         return False
 
@@ -387,7 +387,7 @@ async def reconcile_completed_link_batch(batch_id: str, username: str, child_job
         return False
 
     raw_items = batch.get("items") if isinstance(batch.get("items"), list) else []
-    items = [dict(item) if isinstance(item, dict) else {"name": str(item)} for item in raw_items]
+    items: list[dict[str, object]] = [cast("dict[str, object]", dict(item)) if isinstance(item, dict) else {"name": str(item)} for item in raw_items]
     child_items = getattr(progress, "torrent_items", []) or []
     by_file_index = {
         int(item["file_index"]): item
@@ -404,7 +404,7 @@ async def reconcile_completed_link_batch(batch_id: str, username: str, child_job
     # YouTube, or selected-torrent import has finished. Therefore every selected batch item
     # can be reconciled to completed, even if a browser polling request was interrupted.
     for item in items:
-        child_item = None
+        child_item: dict[str, object] | None = None
         if item.get("file_index") is not None:
             try:
                 child_item = by_file_index.get(int(item["file_index"]))
@@ -479,7 +479,7 @@ async def cancel_upload_job_state(job_id: str, username: str) -> str:
             raise HTTPException(status_code=404, detail="Upload job not found")
 
         try:
-            current: Progress = cast(Progress, await Redis.get(job_id, "Progress"))
+            current: Progress = cast("Progress", await Redis.get(job_id, "Progress"))
 
         except KeyError:
             raise HTTPException(status_code=404, detail="Upload job not found")
@@ -570,7 +570,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
         current_message = str(metadata.get("message") or "")
         current_job_id = str(metadata.get("current_job_id") or "")
         items_raw = metadata.get("items") if isinstance(metadata.get("items"), list) else []
-        items = [dict(item) if isinstance(item, dict) else {"name": str(item)} for item in cast(Iterable, items_raw)]
+        items: list[dict[str, object]] = [cast("dict[str, object]", dict(item)) if isinstance(item, dict) else {"name": str(item)} for item in cast("Iterable[object]", items_raw)]
         current_index = int(metadata.get("current_index") or 0)
         source_name = str(items[current_index].get("name") or "") if 0 <= current_index < len(items) else ""
         current_name_is_url = current_name.lower().startswith(("http://", "https://"))
@@ -588,7 +588,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
 
         if current_job_id:
             try:
-                child_progress: Progress = cast(Progress, await Redis.get(current_job_id, "Progress"))
+                child_progress: Progress = cast("Progress", await Redis.get(current_job_id, "Progress"))
                 current_transfer = max(0, int(child_progress.transfer or 0))
                 current_total = max(0, int(child_progress.total or 0))
                 current_download_transfer = max(0, int(getattr(child_progress, "download_transfer", 0) or 0))
@@ -712,6 +712,7 @@ async def list_user_upload_batches(username: str) -> list[dict[str, object]]:
                     for item in items:
                         if item.get("file_index") is None:
                             continue
+                        child_item: dict[str, object] | None
                         try:
                             child_item = child_by_index.get(int(item["file_index"]))
                         except (TypeError, ValueError):

@@ -30,7 +30,7 @@ def lock() -> Lock:
     if CACHE_LOCK is None:
         CACHE_LOCK = Lock()
 
-    return cast(Lock, CACHE_LOCK)
+    return cast("Lock", CACHE_LOCK)
 
 
 def part_path(cache_dir: Path, fid: str, part: int) -> Path:

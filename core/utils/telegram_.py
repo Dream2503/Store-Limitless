@@ -40,7 +40,7 @@ class Telegram(DataCenter, metaclass=ConfigMeta):
             progress.transfer += current - last
             last = current
 
-        message: Message | None = cast(Message | None, await Telegram.FILE_DUMP.send_file(
+        message: Message | None = cast("Message | None", await Telegram.FILE_DUMP.send_file(
             Telegram.FILE_DUMP_ID,
             chunk,
             file_name=filename,
@@ -58,7 +58,7 @@ class Telegram(DataCenter, metaclass=ConfigMeta):
 
         for attempt in range(5):
             try:
-                message: Message | None = cast(Message | None, await Telegram.FILE_DUMP.get_messages(Telegram.FILE_DUMP_ID, ids=int(flink)))
+                message: Message | None = cast("Message | None", await Telegram.FILE_DUMP.get_messages(Telegram.FILE_DUMP_ID, ids=int(flink)))
 
                 if message is None or message.media is None:
                     raise OSError(f"Telegram message not found: {flink}")

@@ -75,7 +75,7 @@ def sanitize_sensitive_urls(value: str) -> str:
                 hostname = f"[{hostname}]"
 
             try:
-                port = parsed.port
+                port: int | None = parsed.port
 
             except ValueError:
                 port = None

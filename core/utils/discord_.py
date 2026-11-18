@@ -47,7 +47,7 @@ class Discord(DataCenter, metaclass=ConfigMeta):
                 message: Message = await wrap_future(send_future)
                 return str(message.id)
 
-            except (ClientPayloadError, ClientConnectionError, AsyncTimeoutError, TimeoutError) as error:
+            except (ClientPayloadError, ClientConnectionError, TimeoutError) as error:
                 if attempt >= max_attempts:
                     raise
 
@@ -111,7 +111,7 @@ class Discord(DataCenter, metaclass=ConfigMeta):
 
                         return data
 
-            except (ClientPayloadError, ClientConnectionError, AsyncTimeoutError, TimeoutError, OSError) as error:
+            except (ClientPayloadError, ClientConnectionError, TimeoutError, OSError) as error:
                 last_error = error
 
                 if attempt == 5:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from asyncio import CancelledError, Task, create_task
 from contextlib import aclosing
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from mimetypes import guess_type
 from pathlib import Path
 from time import time
@@ -89,11 +89,11 @@ async def upload_file(
     job_id: str = str(uuid4())
     file_path: Path = TRANSFER_PATH / user.username / job_id / file_name
     file: File = File(
-        directory_id=cast(int, directory_obj.id),
+        directory_id=cast("int", directory_obj.id),
         name=file_name,
         type=guess_type(file_name)[0] or "application/octet-stream",
         size=0,
-        modified_at=datetime.now(timezone.utc),
+        modified_at=datetime.now(UTC),
         links=[],
         data_center=data_center,
         username=user.username
@@ -287,7 +287,7 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, object] = Body(..
 
     if "item_index" in payload and "item_status" in payload:
         try:
-            item_index = int(cast(str | int | float | bool, payload.get("item_index")))
+            item_index = int(cast("str | int | float | bool", payload.get("item_index")))
 
         except (TypeError, ValueError):
             raise HTTPException(status_code=422, detail="Invalid upload item index")
@@ -394,7 +394,7 @@ async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_us
             continue
 
         try:
-            child_progress: Progress = cast(Progress, await Redis.get(child_id, "Progress"))
+            child_progress: Progress = cast("Progress", await Redis.get(child_id, "Progress"))
             child_status = resolve_upload_job_status(str(child_progress.message or ""), child_meta)
 
         except KeyError:
@@ -411,7 +411,7 @@ async def cancel_upload_batch(batch_id: str, user: User = Depends(get_current_us
                 raise
 
             try:
-                finished_progress: Progress = cast(Progress, await Redis.get(child_id, "Progress"))
+                finished_progress: Progress = cast("Progress", await Redis.get(child_id, "Progress"))
                 finished_meta = await get_upload_job_metadata(child_id)
                 completed_during_cancel = resolve_upload_job_status(str(finished_progress.message or ""), finished_meta or {}) == "completed"
 
@@ -478,7 +478,7 @@ async def _delete_upload_batch(batch_id: str, username: str, *, cancel_active: b
                 continue
 
             try:
-                child_progress: Progress = cast(Progress, await Redis.get(child_id, "Progress"))
+                child_progress: Progress = cast("Progress", await Redis.get(child_id, "Progress"))
                 child_status = resolve_upload_job_status(str(child_progress.message or ""), child_meta)
 
             except KeyError:
@@ -550,7 +550,7 @@ async def get_upload_job_status(job_id: str, user: User = Depends(get_current_us
             raise HTTPException(status_code=404, detail="Upload job not found")
 
         try:
-            progress: Progress = cast(Progress, await Redis.get(job_id, "Progress"))
+            progress: Progress = cast("Progress", await Redis.get(job_id, "Progress"))
 
         except KeyError:
             progress = Progress(str(metadata.get("name") or "Upload"), "Upload status unavailable", 0)
@@ -602,7 +602,7 @@ async def dismiss_upload_job(job_id: str, user: User = Depends(get_current_user)
         raise HTTPException(status_code=404, detail="Upload job not found")
 
     try:
-        current: Progress = cast(Progress, await Redis.get(job_id, "Progress"))
+        current: Progress = cast("Progress", await Redis.get(job_id, "Progress"))
 
     except KeyError:
         current = Progress(str(metadata.get("name") or "Upload"), "Upload failed", 0)
@@ -643,7 +643,7 @@ async def fail_upload_job(job_id: str, message: str = Body(..., embed=True, max_
         raise HTTPException(status_code=400, detail="Only browser file uploads can report transfer failures")
 
     try:
-        current: Progress = cast(Progress, await Redis.get(job_id, "Progress"))
+        current: Progress = cast("Progress", await Redis.get(job_id, "Progress"))
 
     except KeyError:
         raise HTTPException(status_code=404, detail="Upload job not found")
@@ -806,7 +806,7 @@ async def torrent_preview(link: str, user: User = Depends(get_current_user)) -> 
     """Return torrent file names and sizes without downloading their payload."""
     raw_link: str = link.strip()
     parsed_link: SplitResult = urlsplit(raw_link)
-    query: dict[str, list[str]] = {cast(str, key.lower()): cast(list[str], values) for key, values in parse_qs(parsed_link.query).items()}
+    query: dict[str, list[str]] = {cast("str", key.lower()): cast("list[str]", values) for key, values in parse_qs(parsed_link.query).items()}
     has_info_hash: bool = any(topic.lower().startswith(("urn:btih:", "urn:btmh:")) for topic in query.get("xt", []))
 
     if parsed_link.scheme.lower() != "magnet" or not raw_link.lower().startswith("magnet:?") or not has_info_hash:
@@ -842,7 +842,7 @@ async def upload_link(
     is_magnet: bool = parsed_link.scheme.lower() == "magnet"
 
     if is_magnet:
-        query: dict[str, list[str]] = {cast(str, key.lower()): cast(list[str], values) for key, values in parse_qs(parsed_link.query).items()}
+        query: dict[str, list[str]] = {cast("str", key.lower()): cast("list[str]", values) for key, values in parse_qs(parsed_link.query).items()}
         exact_topics: list[str] = query.get("xt", [])
         has_info_hash: bool = any(topic.lower().startswith(("urn:btih:", "urn:btmh:")) for topic in exact_topics)
 
@@ -861,7 +861,7 @@ async def upload_link(
             raise HTTPException(status_code=400, detail="Select at least one valid torrent file")
 
     else:
-        selected_torrent_files: set[int] | None = None
+        selected_torrent_files = None
         link = perform_validation(raw_link, "link")
         parsed_link = urlsplit(link)
         raw_name = "Telegram message" if is_telegram_message_link else (unquote(Path(parsed_link.path).name).strip() or (parsed_link.hostname or "Link import"))
@@ -886,11 +886,11 @@ async def upload_link(
         raise HTTPException(status_code=404, detail="Directory not found")
 
     file: File = File(
-        directory_id=cast(int, directory_obj.id),
+        directory_id=cast("int", directory_obj.id),
         name=link_name,
         type="application/octet-stream",
         size=0,
-        modified_at=datetime.now(timezone.utc),
+        modified_at=datetime.now(UTC),
         links=[],
         data_center=data_center,
         username=user.username
@@ -1123,7 +1123,7 @@ async def upload_link(
             except Exception as status_error:
                 write_log(
                     "ERROR",
-                    cast(type[DataCenter], DataCenter(file.data_center)),
+                    cast("type[DataCenter]", DataCenter(file.data_center)),
                     "UPLOAD",
                     file.username,
                     f"Could not persist failed upload job {job_id} ({type(status_error).__name__})"

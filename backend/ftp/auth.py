@@ -1,7 +1,7 @@
 """FTP authentication and permission handling for StoreLimitless users."""
 
-from asyncio import run_coroutine_threadsafe
-from typing import Any
+from asyncio import AbstractEventLoop, run_coroutine_threadsafe
+from typing import Protocol
 
 from pyftpdlib.authorizers import AuthenticationFailed, DummyAuthorizer
 
@@ -11,10 +11,17 @@ from core.data_center import Database
 from core.utils import write_log
 
 
+class FTPAuthHandler(Protocol):
+    """Expose the authentication state required from the FTP command handler."""
+
+    event_loop: AbstractEventLoop
+    store_limitless_user: User | None
+
+
 class StoreLimitlessAuthorizer(DummyAuthorizer):
     """Authenticate FTP users against StoreLimitless and define their FTP permissions."""
 
-    def validate_authentication(self, username: str, password: str, handler: Any) -> None:
+    def validate_authentication(self, username: str, password: str, handler: FTPAuthHandler) -> None:
         """Load the user on the application's event loop and verify the supplied password."""
 
         user: User | None = run_coroutine_threadsafe(User.get(username), handler.event_loop).result()

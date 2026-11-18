@@ -5,7 +5,8 @@ from __future__ import annotations
 from asyncio import Task, create_task, gather, sleep, to_thread, wait
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncGenerator
+from typing import TYPE_CHECKING
+from collections.abc import AsyncGenerator
 
 from core.utils import write_log, read_chunk
 
@@ -73,7 +74,7 @@ async def upload_growing_file(
         track_download: bool = False,
         download_total: int = 0,
         download_from_path: bool = False,
-) -> AsyncGenerator[Progress, None]:
+) -> AsyncGenerator[Progress]:
     """Upload completed chunks as a file grows, bounded by the selected provider's own parallelism."""
 
     chunk_size: int = int(data_center.MAX_SIZE)

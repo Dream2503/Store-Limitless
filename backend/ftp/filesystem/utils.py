@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Coroutine
 from concurrent.futures import Future
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from backend.ftp.filesystem.download import FTPDownloadFile
     from backend.ftp.filesystem.filesystem import StoreLimitlessFS
 
-T: TypeVar = TypeVar("T")
+T = TypeVar("T")
 
 
 async def request_async(self: FTPDownloadFile, start: int, end: int) -> bytes:
@@ -171,7 +171,7 @@ class FilesystemUtils:
                 return
 
             file.size = size
-            file.modified_at = datetime.now(timezone.utc)
+            file.modified_at = datetime.now(UTC)
             self.run(self.upload_file(file, path))
 
         except Exception:
@@ -226,8 +226,8 @@ class FilesystemUtils:
 
         if file is not None:
             file.name = name
-            file.directory_id = cast(int, destination_directory.id)
-            file.modified_at = datetime.now(timezone.utc)
+            file.directory_id = cast("int", destination_directory.id)
+            file.modified_at = datetime.now(UTC)
             self.run(file.save())
             return
 
@@ -240,11 +240,11 @@ class FilesystemUtils:
         new_path: Path = destination_directory.path / name
         descendants: list[Directory] = self.get_descendant_directories(old_path)
         source_directory.path = new_path
-        source_directory.modified_at = datetime.now(timezone.utc)
+        source_directory.modified_at = datetime.now(UTC)
         self.run(source_directory.save())
 
         for descendant in descendants:
             relative_path: Path = descendant.path.relative_to(old_path)
             descendant.path = new_path / relative_path
-            descendant.modified_at = datetime.now(timezone.utc)
+            descendant.modified_at = datetime.now(UTC)
             self.run(descendant.save())

@@ -5,6 +5,7 @@ table when the format argument is pretty.
 
 import os
 from argparse import ArgumentParser, Namespace
+from collections.abc import Iterable
 from pathlib import Path
 from typing import cast
 
@@ -42,7 +43,7 @@ except Exception as e:
 for table in tables:
     print(f"Downloading table: {table}...")
     try:
-        primary_key: str = cast(str, pd.read_sql(
+        primary_key: str = cast("str", pd.read_sql(
             f"""
             SELECT kcu.column_name
             FROM information_schema.table_constraints tc
@@ -67,12 +68,13 @@ for table in tables:
             DATABASE_URL
         )
 
+        filename: Path
         if args.format == "pretty":
-            filename: Path = BACKUP_DIR / f"{table}.txt"
-            filename.write_text(tabulate(df, headers="keys", tablefmt="pretty", showindex=False), encoding="utf-8")
+            filename = BACKUP_DIR / f"{table}.txt"
+            filename.write_text(tabulate(cast("Iterable[Iterable[object]]", df), headers="keys", tablefmt="pretty", showindex=False), encoding="utf-8")
 
         else:
-            filename: Path = BACKUP_DIR / f"{table}.csv"
+            filename = BACKUP_DIR / f"{table}.csv"
             df.to_csv(filename, index=False)
 
         print(f"Saved {len(df)} rows to {filename}")

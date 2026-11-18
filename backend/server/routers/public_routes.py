@@ -8,7 +8,8 @@ import unicodedata
 from hashlib import sha256
 from pathlib import Path
 from mimetypes import guess_type
-from typing import AsyncGenerator, cast
+from typing import cast
+from collections.abc import AsyncGenerator
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -46,7 +47,7 @@ async def upload_status(job_id: str, user: User = Depends(get_current_user)) -> 
         raise HTTPException(status_code=404, detail="Upload job not found")
 
     try:
-        progress: Progress = cast(Progress, await Redis.get(job_id, "Progress"))
+        progress: Progress = cast("Progress", await Redis.get(job_id, "Progress"))
 
     except KeyError:
         raise HTTPException(status_code=404, detail="Upload job not found")
@@ -127,7 +128,7 @@ def _content_disposition(filename: str, attachment: bool) -> str:
 
 
 
-async def _stream_while_connected(stream: Stream, request: Request) -> AsyncGenerator[bytes, None]:
+async def _stream_while_connected(stream: Stream, request: Request) -> AsyncGenerator[bytes]:
     """Stop reading remote storage chunks when the HTTP client disconnects."""
 
     iterator = stream.stream()
@@ -270,7 +271,7 @@ async def _owned_public_file(token: str, request: Request) -> File:
         raise HTTPException(status_code=404, detail="Invalid public download link", headers=_public_cors_headers(request)) from error
 
     await _ensure_private_link_session_active(payload, request)
-    file = await File.get(cast(str, payload["username"]), fid=int(cast(int, payload["file_id"])))
+    file = await File.get(cast("str", payload["username"]), fid=int(cast("int", payload["file_id"])))
 
     if file is None or file.username != payload["username"]:
         raise HTTPException(status_code=404, detail="File not found", headers=_public_cors_headers(request))
@@ -350,9 +351,9 @@ async def public_zip_download(
 
     await _ensure_private_link_session_active(payload, request)
 
-    username = cast(str, payload["username"])
-    file_ids = cast(list[int], payload.get("file_ids", []))
-    folder_ids = cast(list[int], payload.get("folder_ids", []))
+    username = cast("str", payload["username"])
+    file_ids = cast("list[int]", payload.get("file_ids", []))
+    folder_ids = cast("list[int]", payload.get("folder_ids", []))
 
     all_directories = await Directory.get_all(username)
     # The UI intentionally hides these internal marker records; ZIP archives must
@@ -412,7 +413,7 @@ async def public_zip_download(
         folder_roots.append(folder)
         folder_root_paths.append(folder_path)
 
-    async def stream_file(file: File) -> AsyncGenerator[bytes, None]:
+    async def stream_file(file: File) -> AsyncGenerator[bytes]:
         try:
             source = await Stream.prepare(file)
         except (OSError, ValueError) as error:
@@ -629,7 +630,7 @@ async def public_zip_download(
             media_type="application/zip",
         )
 
-    async def stream_zip_range() -> AsyncGenerator[bytes, None]:
+    async def stream_zip_range() -> AsyncGenerator[bytes]:
         """Replay the deterministic archive and emit only the requested byte range."""
 
         position = 0

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from asyncio import AbstractEventLoop
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from mimetypes import guess_type
 from os import stat_result
 from pathlib import Path
@@ -32,7 +32,7 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
         """Initialize the virtual filesystem with the authenticated user and application event loop."""
 
         super().__init__(root, cmd_channel)
-        self.user: User = cast(User, cmd_channel.store_limitless_user)
+        self.user: User = cast("User", cmd_channel.store_limitless_user)
         self.event_loop: AbstractEventLoop = cmd_channel.event_loop
         TRANSFER_PATH.mkdir(parents=True, exist_ok=True)
 
@@ -180,7 +180,7 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
         if directory is None:
             raise OSError(2, "No such file or directory", parent)
 
-        self.run(Directory(path=directory.path / name, modified_at=datetime.now(timezone.utc), username=self.user.username).save())
+        self.run(Directory(path=directory.path / name, modified_at=datetime.now(UTC), username=self.user.username).save())
         write_log("INFO", Database, "FTP FILESYSTEM", self.user.username, f"Created directory path={path}")
 
     def remove(self, path: str) -> None:
@@ -267,10 +267,10 @@ class StoreLimitlessFS(AbstractedFS, FilesystemUtils):
                     raise OSError(17, "File exists", filename)
 
             file: File = File(
-                directory_id=cast(int, directory.id),
+                directory_id=cast("int", directory.id),
                 name=name, type=guess_type(name)[0] or "application/octet-stream",
                 size=0,
-                modified_at=datetime.now(timezone.utc),
+                modified_at=datetime.now(UTC),
                 links=[],
                 data_center=getattr(self.user, "data_center", None) or "Discord",
                 username=self.user.username

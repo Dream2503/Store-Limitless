@@ -2,7 +2,7 @@
 File model and persistence operations. File metadata is stored in PostgreSQL and mirrored in Redis for lookup, listing, trash, and restore operations.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from pathlib import Path
 from typing import cast
 
@@ -23,7 +23,7 @@ class File(BaseModel):
     name: str
     type: str
     size: int
-    modified_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    modified_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     deleted_at: datetime | None = None
     data_center: str
     links: list[str]
@@ -63,7 +63,7 @@ class File(BaseModel):
 
         with POOL.connection() as connection:
             try:
-                self.id = cast(dict[str, int], connection.execute(
+                self.id = cast("dict[str, int]", connection.execute(
                     """
                     INSERT INTO files (directory_id, name, type, size, modified_at, data_center, links, deleted_at, username)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -104,7 +104,7 @@ class File(BaseModel):
 
         if fid is not None:
             try:
-                file: File = cast(File, await Redis.get(f"user:{username}:files {fid}", "File"))
+                file: File = cast("File", await Redis.get(f"user:{username}:files {fid}", "File"))
 
             except KeyError:
                 return None
@@ -115,7 +115,7 @@ class File(BaseModel):
             return file
 
         elif did is not None and name is not None:
-            files: list[File] = cast(list[File], await Redis.get(f"user:{username}:files", "File"))
+            files: list[File] = cast("list[File]", await Redis.get(f"user:{username}:files", "File"))
 
             for file in files:
                 if file.directory_id != did or file.name != name or trash != (file.deleted_at is not None):
@@ -129,7 +129,7 @@ class File(BaseModel):
     async def get_all(cls, username: str, *, directory_id: int | None = None, file_name: str | None = None, trash: bool = False) -> list["File"]:
         """Return the user’s files, optionally filtered by directory, case-insensitive name substring, and trash state."""
 
-        files: list[File] = cast(list[File], await Redis.get(f"user:{username}:files", "File"))
+        files: list[File] = cast("list[File]", await Redis.get(f"user:{username}:files", "File"))
         query: str | None = file_name.strip().casefold() if file_name else None
         result: list[File] = []
 
@@ -195,7 +195,7 @@ class File(BaseModel):
         if self.id is None:
             raise ValueError("File has no ID")
 
-        self.modified_at = datetime.now(timezone.utc)
+        self.modified_at = datetime.now(UTC)
         self.deleted_at = self.modified_at
         await self.update()
 
@@ -230,15 +230,15 @@ class File(BaseModel):
             raise ValueError("File has no ID")
 
         self.deleted_at = None
-        self.modified_at = datetime.now(timezone.utc)
+        self.modified_at = datetime.now(UTC)
         await self.update()
 
     @classmethod
     async def purge_expired(cls, username: str, older_than_days: int = 30) -> None:
         """Permanently delete files that have remained in the user’s trash longer than older_than_days, removing their Redis entries too."""
 
-        files: list[File] = cast(list[File], await Redis.get(f"user:{username}:files", "File"))
-        cutoff: datetime = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        files: list[File] = cast("list[File]", await Redis.get(f"user:{username}:files", "File"))
+        cutoff: datetime = datetime.now(UTC) - timedelta(days=older_than_days)
         expired: list[File] = [file for file in files if file.deleted_at is not None and file.deleted_at < cutoff]
 
         if not expired:

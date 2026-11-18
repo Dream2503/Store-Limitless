@@ -6,7 +6,7 @@ from asyncio import CancelledError, Queue, Task, create_task, gather, sleep, to_
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from functools import partial
 from html import unescape
 import inspect
@@ -405,7 +405,7 @@ def youtube_progress_hook(data: Mapping[str, object], *, file: File, progress_st
     resolved_name: str | None = get_download_name(data)
 
     if resolved_name is not None and resolved_name != file.name:
-        update_progress_name(file, cast(str, resolved_name), progress_state)
+        update_progress_name(file, cast("str", resolved_name), progress_state)
 
     filename: str = str(data.get("filename") or "")
 
@@ -534,7 +534,7 @@ def raise_torrent_error(status: object) -> None:
     raise OSError(f"Torrent engine error: {detail}")
 
 
-async def wait_for_torrent_metadata(handle: TorrentHandle, progress: Progress, fallback_name: str) -> AsyncGenerator[Progress, None]:
+async def wait_for_torrent_metadata(handle: TorrentHandle, progress: Progress, fallback_name: str) -> AsyncGenerator[Progress]:
     """Wait for magnet metadata and report peer discovery while waiting."""
 
     while True:
@@ -554,14 +554,14 @@ async def wait_for_torrent_metadata(handle: TorrentHandle, progress: Progress, f
 
 
 async def wait_for_torrent_download(
-        handle: object,
+        handle: TorrentHandle,
         progress: Progress,
         torrent_name: str,
         expected_total: int,
         processed_download: dict[str, bool],
         torrent_files: TorrentFileStorage | None = None,
         selected_indices: set[int] | None = None,
-) -> AsyncGenerator[Progress, None]:
+) -> AsyncGenerator[Progress]:
     """Report torrent download stages until libtorrent confirms completion."""
 
     while True:
@@ -583,7 +583,7 @@ async def wait_for_torrent_download(
             if torrent_files is not None:
                 try:
                     file_progress: list[int] = [int(value) for value in handle.file_progress()]
-                    padding_check: Callable[[int], bool] | None = cast(Callable[[int], bool] | None, getattr(torrent_files, "pad_file_at", None))
+                    padding_check: Callable[[int], bool] | None = cast("Callable[[int], bool] | None", getattr(torrent_files, "pad_file_at", None))
                     item_progress: list[JsonObject] = []
 
                     for file_index in range(int(torrent_files.num_files())):
@@ -655,7 +655,7 @@ async def ensure_torrent_directory(username: str, base_directory: Directory, rel
                 child = Directory(path=next_path, username=username)
                 await child.save()
 
-        current = cast(Directory, child)
+        current = cast("Directory", child)
 
     return current
 
@@ -669,7 +669,7 @@ async def preview_torrent_files(link: str, timeout_seconds: int = 120) -> JsonOb
     deadline: float = monotonic() + timeout_seconds
 
     try:
-        session = cast(TorrentSession, libtorrent.session({
+        session = cast("TorrentSession", libtorrent.session({
             "listen_interfaces": "0.0.0.0:0",
             "enable_dht": True,
             "enable_lsd": True,
@@ -693,9 +693,9 @@ async def preview_torrent_files(link: str, timeout_seconds: int = 120) -> JsonOb
             await sleep(0.5)
 
         info: TorrentInfo = handle.torrent_file()
-        torrent_files: object = info.files()
+        torrent_files: TorrentFileStorage = info.files()
         torrent_name: str = safe_torrent_component(str(info.name()))
-        padding_check: Callable = cast(Callable, getattr(torrent_files, "pad_file_at", None))
+        padding_check: Callable[[int], bool] | None = cast("Callable[[int], bool] | None", getattr(torrent_files, "pad_file_at", None))
         entries: list[JsonObject] = []
 
         for index in range(int(torrent_files.num_files())):
@@ -734,7 +734,7 @@ def get_downloadable_torrent_files(
     download_root: Path = temp_dir.resolve()
     downloadable_files: list[tuple[int, Path, tuple[str, ...]]] = []
     file_count: int = int(torrent_files.num_files())
-    padding_check: Callable = cast(Callable, getattr(torrent_files, "pad_file_at", None))
+    padding_check: Callable[[int], bool] | None = cast("Callable[[int], bool] | None", getattr(torrent_files, "pad_file_at", None))
 
     for index in range(file_count):
         if (selected_indices is not None and index not in selected_indices) or callable(padding_check) and padding_check(index):
@@ -787,7 +787,7 @@ async def download_torrent_to_disk(
         fallback_name: str,
         result: JsonObject,
         selected_indices: set[int] | None = None,
-) -> AsyncGenerator[Progress, None]:
+) -> AsyncGenerator[Progress]:
     """Download a complete torrent and return its metadata through ``result``."""
 
     try:
@@ -797,24 +797,24 @@ async def download_torrent_to_disk(
         raise RuntimeError("Torrent downloads require the optional 'python-libtorrent' dependency") from error
 
     torrent_session: TorrentSession | None = None
-    handle: object | None = None
+    handle: TorrentHandle | None = None
     processed_download: bool = False
 
     try:
-        torrent_session = cast(TorrentSession, libtorrent.session({
+        torrent_session = cast("TorrentSession", libtorrent.session({
             "listen_interfaces": "0.0.0.0:0",
             "enable_dht": True,
             "enable_lsd": True,
             "enable_upnp": True,
             "enable_natpmp": True,
-        })
+        }))
         handle = torrent_session.add_torrent({"url": link, "save_path": str(temp_dir)})
 
         async for progress_value in wait_for_torrent_metadata(handle, progress, fallback_name):
             yield progress_value
 
         torrent_info: TorrentInfo = handle.torrent_file()
-        torrent_files: object = torrent_info.files()
+        torrent_files: TorrentFileStorage = torrent_info.files()
         torrent_name_raw: str = str(torrent_info.name())
         torrent_name_parts: tuple[str, ...] = torrent_relative_parts(torrent_name_raw)
 
@@ -825,7 +825,7 @@ async def download_torrent_to_disk(
         torrent_name: str = safe_torrent_component(torrent_name_raw)
         file_count: int = int(torrent_files.num_files())
         expected_total: int = 0
-        padding_check: Callable = cast(Callable, getattr(torrent_files, "pad_file_at", None))
+        padding_check: Callable[[int], bool] | None = cast("Callable[[int], bool] | None", getattr(torrent_files, "pad_file_at", None))
         if selected_indices is not None:
             if not selected_indices or any(index < 0 or index >= file_count for index in selected_indices):
                 raise ValueError("Torrent file selection is empty or contains invalid file indexes")
@@ -969,7 +969,7 @@ def _download_google_drive_entry(
     return actual_path
 
 
-async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[Progress, None]:
+async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[Progress]:
     """Download a public Drive folder concurrently and upload each ready file through the shared FIFO."""
 
     from core.transfer import file_upload
@@ -1163,11 +1163,11 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
             try:
                 name = local_path.name
                 remote_file = File(
-                    directory_id=cast(int, target_directory.id),
+                    directory_id=cast("int", target_directory.id),
                     name=name,
                     type=guess_type(name)[0] or "application/octet-stream",
                     size=max(0, local_path.stat().st_size),
-                    modified_at=datetime.now(timezone.utc),
+                    modified_at=datetime.now(UTC),
                     links=[],
                     data_center=file.data_center,
                     username=file.username,
@@ -1255,7 +1255,7 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
         root_name = safe_torrent_component(await to_thread(_public_google_drive_folder_title, link))
         progress.name = root_name
         progress.message = "Creating directories"
-        base_directory = cast(Directory, await Directory.get(file.username, did=file.directory_id))
+        base_directory = cast("Directory", await Directory.get(file.username, did=file.directory_id))
         await ensure_torrent_directory(file.username, base_directory, (root_name,))
 
         descriptors: list[tuple[object, tuple[str, ...], Directory]] = []
@@ -1371,7 +1371,7 @@ async def download_google_drive_folder(file: File, link: str) -> AsyncGenerator[
         rmtree(temp_dir, ignore_errors=True)
 
 
-async def download_torrent(file: File, link: str, selected_indices: set[int] | None = None) -> AsyncGenerator[Progress, None]:
+async def download_torrent(file: File, link: str, selected_indices: set[int] | None = None) -> AsyncGenerator[Progress]:
     """Upload each selected torrent file in the background as soon as it finishes downloading."""
 
     from core.transfer import file_upload
@@ -1392,8 +1392,8 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
     progress: Progress = Progress(file.name or "Torrent", "Connecting to torrent network", 0)
     progress.ingestion_type = "torrent"
     progress.download_active = True
-    torrent_session: object | None = None
-    handle: object | None = None
+    torrent_session: TorrentSession | None = None
+    handle: TorrentHandle | None = None
     active_uploads: dict[int, Task[File]] = {}
     pending_uploads: dict[int, tuple[File, Path, JsonObject, str, int, int, IngestionUploadTicket]] = {}
     max_concurrent_file_uploads: int = max(1, min(2, int(data_center.MAX_PARALLEL_UPLOADS)))
@@ -1499,20 +1499,20 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
 
     try:
         write_log("INFO", data_center, "TORRENT", file.username, f"Starting magnet download: {safe_link}")
-        torrent_session = libtorrent.session({
+        torrent_session = cast("TorrentSession", libtorrent.session({
             "listen_interfaces": "0.0.0.0:0",
             "enable_dht": True,
             "enable_lsd": True,
             "enable_upnp": True,
             "enable_natpmp": True,
-        })
+        }))
         handle = torrent_session.add_torrent({"url": link, "save_path": str(temp_dir)})
 
         async for progress_value in wait_for_torrent_metadata(handle, progress, file.name or "Torrent"):
             yield progress_value
 
-        torrent_info: object = handle.torrent_file()
-        torrent_files: object = torrent_info.files()
+        torrent_info: TorrentInfo = handle.torrent_file()
+        torrent_files: TorrentFileStorage = torrent_info.files()
         torrent_name_raw: str = str(torrent_info.name())
         torrent_name_parts: tuple[str, ...] = torrent_relative_parts(torrent_name_raw)
 
@@ -1522,7 +1522,7 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
         torrent_name_raw = torrent_name_parts[0]
         torrent_name: str = safe_torrent_component(torrent_name_raw)
         file_count: int = int(torrent_files.num_files())
-        padding_check: Callable = cast(Callable, getattr(torrent_files, "pad_file_at", None))
+        padding_check: Callable[[int], bool] | None = cast("Callable[[int], bool] | None", getattr(torrent_files, "pad_file_at", None))
         selected: set[int] = set(selected_indices) if selected_indices is not None else {
             index for index in range(file_count)
             if not callable(padding_check) or not padding_check(index)
@@ -1686,19 +1686,19 @@ async def download_torrent(file: File, link: str, selected_indices: set[int] | N
 
                 if first_saved_id is None and saved_count == 0 and not active_uploads and not pending_uploads:
                     torrent_file: File = file
-                    torrent_file.directory_id = cast(int, target_directory.id)
+                    torrent_file.directory_id = cast("int", target_directory.id)
                     torrent_file.name = target_name
                     torrent_file.type = guess_type(target_name)[0] or "application/octet-stream"
                     torrent_file.size = local_size
-                    torrent_file.modified_at = datetime.now(timezone.utc)
+                    torrent_file.modified_at = datetime.now(UTC)
                     torrent_file.links = []
                 else:
                     torrent_file = File(
-                        directory_id=cast(int, target_directory.id),
+                        directory_id=cast("int", target_directory.id),
                         name=target_name,
                         type=guess_type(target_name)[0] or "application/octet-stream",
                         size=local_size,
-                        modified_at=datetime.now(timezone.utc),
+                        modified_at=datetime.now(UTC),
                         links=[],
                         data_center=file.data_center,
                         username=file.username,

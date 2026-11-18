@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import cast
 
@@ -75,7 +75,7 @@ async def create_folder(directory: str, name: str, user: User = Depends(get_curr
 
     folder: Directory = Directory(
         path=Path(perform_validation(directory, "directory")) / perform_validation(name, "file_name"),
-        modified_at=datetime.now(timezone.utc),
+        modified_at=datetime.now(UTC),
         username=user.username,
     )
     await folder.save()
@@ -424,7 +424,7 @@ async def move_items(directory: str = Body(...), items: list[dict[str, object]] 
     seen: set[tuple[str, int]] = set()
 
     for item_type, item_id in validated_items:
-        identity: tuple[str, int] = (cast(str, item_type), cast(int, item_id))
+        identity: tuple[str, int] = (cast("str", item_type), cast("int", item_id))
 
         if identity in seen:
             continue
@@ -433,9 +433,9 @@ async def move_items(directory: str = Body(...), items: list[dict[str, object]] 
 
         try:
             result: dict[str, object] = await (
-                _move_file_to_directory(user, cast(int, item_id), destination)
+                _move_file_to_directory(user, cast("int", item_id), destination)
                 if item_type == "file"
-                else _move_directory_to_destination(user, cast(int, item_id), destination)
+                else _move_directory_to_destination(user, cast("int", item_id), destination)
             )
 
             if result.get("status") == "unchanged":

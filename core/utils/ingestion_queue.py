@@ -5,7 +5,8 @@ from __future__ import annotations
 from asyncio import Task, CancelledError, create_task, gather, sleep, current_task
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator, Final
+from typing import Final
+from collections.abc import AsyncIterator
 from uuid import uuid4
 
 from backend.database.redis_server import Redis

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from asyncio import Task, create_task, sleep, to_thread
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from email.message import Message
 from mimetypes import guess_type
 from pathlib import Path
 from shutil import rmtree
 from traceback import format_exc
-from typing import AsyncGenerator, cast
+from typing import cast
+from collections.abc import AsyncGenerator
 from urllib.parse import parse_qs, unquote, urlparse, ParseResult
 from uuid import uuid4
 
@@ -39,7 +40,7 @@ from core.utils.upload_manager import (
 )
 
 
-async def download_processed_link(file: File, link: str, selected_torrent_files: set[int] | None = None, ) -> AsyncGenerator[Progress, None]:
+async def download_processed_link(file: File, link: str, selected_torrent_files: set[int] | None = None, ) -> AsyncGenerator[Progress]:
     """Download and upload a YouTube media URL or a torrent magnet URI."""
 
     from core.transfer import file_upload
@@ -83,7 +84,7 @@ async def download_processed_link(file: File, link: str, selected_torrent_files:
         update_progress_name(file, output.name, progress_state)
         file.size = output.stat().st_size
         file.type = guess_type(file.name)[0] or "application/octet-stream"
-        file.modified_at = datetime.now(timezone.utc)
+        file.modified_at = datetime.now(UTC)
         yield progress_state.current
 
         async for progress_value in file_upload(file, output, intermediate=True):
@@ -93,7 +94,7 @@ async def download_processed_link(file: File, link: str, selected_torrent_files:
         rmtree(temp_dir, ignore_errors=True)
 
 
-async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Progress, None]:
+async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Progress]:
     """Download a Google Drive file or direct HTTP(S) file while uploading completed chunks."""
 
     data_center: type[DataCenter] | None = DataCenter(file.data_center)
@@ -139,7 +140,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
                 if not metadata_response.ok:
                     raise OSError(f"Google Drive API error: {metadata_response.status_code}: {metadata_response.text}")
 
-                metadata: dict[str, object] = cast(dict[str, object], metadata_response.json())
+                metadata: dict[str, object] = cast("dict[str, object]", metadata_response.json())
 
             finally:
                 metadata_response.close()
@@ -196,7 +197,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
 
             output = temp_dir / file.name
             output.touch()
-            download_response: Response = cast(Response, response)
+            download_response: Response = cast("Response", response)
             download_task = create_task(to_thread(stream_response, download_response, output, link))
 
         file.type = guess_type(file.name)[0] or response_type or file.type or "application/octet-stream"
@@ -230,7 +231,7 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
 
         file.size = output.stat().st_size
         file.type = guess_type(file.name)[0] or response_type or "application/octet-stream"
-        file.modified_at = datetime.now(timezone.utc)
+        file.modified_at = datetime.now(UTC)
         write_log(
             "INFO", data_center, "UPLOAD", file.username,
             f"Direct-link original chunks uploaded name={file.name!r} size={file.size}.",

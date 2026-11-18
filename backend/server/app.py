@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
-from starlette.types import RequestResponseEndpoint
+from starlette.middleware.base import RequestResponseEndpoint
 
 from backend.server.routers import auth, public
 from core.data_center import Database

@@ -6,7 +6,7 @@ from asyncio import Task
 from contextlib import aclosing
 from pathlib import Path
 from traceback import format_exc
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 from urllib.parse import ParseResult, parse_qs, urlparse
 
 from backend.database.models import File, User
@@ -31,7 +31,7 @@ async def file_upload(
         track_download: bool = False,
         download_total: int = 0,
         queue_slot_held: bool = False,
-) -> AsyncGenerator[Progress, None]:
+) -> AsyncGenerator[Progress]:
     """Upload one file through the shared FIFO, optionally leaving its database save to the caller."""
 
     data_center: type[DataCenter] | None = DataCenter(file.data_center)
@@ -43,7 +43,7 @@ async def file_upload(
     if not queue_slot_held:
         ticket = await enqueue_ingestion_upload(file.name, file.username)
 
-    async def upload_and_finalize() -> AsyncGenerator[Progress, None]:
+    async def upload_and_finalize() -> AsyncGenerator[Progress]:
         """Upload the original and persist it when this caller owns finalization."""
 
         write_log(
@@ -103,7 +103,7 @@ async def file_upload(
             await cancel_ingestion_upload(ticket)
 
 
-async def link_upload(file: File, link: str, selected_torrent_files: set[int] | None = None) -> AsyncGenerator[Progress, None]:
+async def link_upload(file: File, link: str, selected_torrent_files: set[int] | None = None) -> AsyncGenerator[Progress]:
     """Import a direct URL, YouTube link, or selected torrent files into the provider."""
 
     from core.utils.download_utils import download_torrent

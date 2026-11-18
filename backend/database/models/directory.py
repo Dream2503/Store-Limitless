@@ -3,7 +3,7 @@ Directory model and persistence operations. A directory is represented by a path
 cached in Redis.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import cast
 
@@ -21,7 +21,7 @@ class Directory(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int | None = None
     path: Path
-    modified_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    modified_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     deleted_at: datetime | None = None
     username: str
 
@@ -52,7 +52,7 @@ class Directory(BaseModel):
 
         with POOL.connection() as connection:
             try:
-                self.id = cast(dict[str, int], connection.execute(
+                self.id = cast("dict[str, int]", connection.execute(
                     """
                     INSERT INTO directories (path, modified_at, deleted_at, username)
                     VALUES (%s, %s, %s, %s)
@@ -81,7 +81,7 @@ class Directory(BaseModel):
 
         if did is not None:
             try:
-                directory: Directory = cast(Directory, await Redis.get(f"user:{username}:directories {did}", "Directory"))
+                directory: Directory = cast("Directory", await Redis.get(f"user:{username}:directories {did}", "Directory"))
 
             except KeyError:
                 return None
@@ -92,7 +92,7 @@ class Directory(BaseModel):
             return directory
 
         elif path is not None:
-            directories: list[Directory] = cast(list[Directory], await Redis.get(f"user:{username}:directories", "Directory"))
+            directories: list[Directory] = cast("list[Directory]", await Redis.get(f"user:{username}:directories", "Directory"))
 
             for directory in directories:
                 if directory.path != path or trash != (directory.deleted_at is not None):
@@ -113,7 +113,7 @@ class Directory(BaseModel):
     ) -> list["Directory"]:
         """Return a user’s directories, optionally filtered to direct children of a path, by case-insensitive name substring, and by trash state."""
 
-        directories: list[Directory] = cast(list[Directory], await Redis.get(f"user:{username}:directories", "Directory"))
+        directories: list[Directory] = cast("list[Directory]", await Redis.get(f"user:{username}:directories", "Directory"))
         query: str | None = directory_name.strip().casefold() if directory_name else None
         result: list[Directory] = []
 
@@ -164,7 +164,7 @@ class Directory(BaseModel):
         if self.id is None:
             raise ValueError("Directory has no ID")
 
-        self.modified_at = datetime.now(timezone.utc)
+        self.modified_at = datetime.now(UTC)
         self.deleted_at = self.modified_at
         await self.update()
 
@@ -229,5 +229,5 @@ class Directory(BaseModel):
             raise ValueError("Directory has no ID")
 
         self.deleted_at = None
-        self.modified_at = datetime.now(timezone.utc)
+        self.modified_at = datetime.now(UTC)
         await self.update()

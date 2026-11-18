@@ -17,6 +17,7 @@ from core.utils import env as env_config, write_log
 from core.utils.env import TELEGRAM_API_HASH, TELEGRAM_API_ID
 from core.utils.telegram_ import Telegram
 
+
 class TelegramEventLike(Protocol):
     """Describe the message-event interface used by the Telethon callback."""
 
@@ -39,7 +40,7 @@ def _message_entity_text(text: str, offset: int, length: int) -> str:
     return encoded[offset * 2:(offset + length) * 2].decode("utf-16-le", errors="ignore")
 
 
-_SMALL_CAPITAL_TRANSLATION = str.maketrans({
+_SMALL_CAPITAL_TRANSLATION: dict[int, str] = str.maketrans({
     "ᴀ": "a",
     "ʙ": "b",
     "ᴄ": "c",
@@ -78,7 +79,7 @@ def _message_buttons(message: object) -> list[object]:
     """Return Telegram buttons from either Telethon's wrapper or raw reply markup."""
 
     buttons_value: object = getattr(message, "buttons", None) or []
-    buttons: Iterable[Iterable[object]] = cast(Iterable[Iterable[object]], buttons_value)
+    buttons: Iterable[Iterable[object]] = cast("Iterable[Iterable[object]]", buttons_value)
     flattened: list[object] = [button for row in buttons for button in (row or [])]
 
     if flattened:
@@ -86,11 +87,11 @@ def _message_buttons(message: object) -> list[object]:
 
     markup = getattr(message, "reply_markup", None)
     rows_value: object = getattr(markup, "rows", None) or []
-    rows: Iterable[object] = cast(Iterable[object], rows_value)
+    rows: Iterable[object] = cast("Iterable[object]", rows_value)
     return [
         button
         for row in rows
-        for button in cast(Iterable[object], getattr(row, "buttons", None) or [])
+        for button in cast("Iterable[object]", getattr(row, "buttons", None) or [])
     ]
 
 
@@ -382,7 +383,7 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
     try:
         try:
             await wait_for(client.connect(), timeout=15)
-        except AsyncTimeoutError as error:
+        except TimeoutError as error:
             raise TimeoutError("Could not connect to Telegram within 15 seconds") from error
 
         if not await client.is_user_authorized():
@@ -425,7 +426,7 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
                     return None
 
                 source_message = await wait_for(find_message_in_history(), timeout=20)
-        except (RPCError, AsyncTimeoutError) as error:
+        except (TimeoutError, RPCError) as error:
             error_name: str = type(error).__name__
             if error_name in {"ChannelPrivateError", "ChannelInvalidError", "UsernameInvalidError", "UsernameNotOccupiedError"}:
                 raise ValueError(
@@ -477,7 +478,7 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
                     client.forward_messages(TELEGRAM_PROCESSING_BOT, source_message),
                     timeout=20,
                 )
-            except (RPCError, AsyncTimeoutError) as error:
+            except (TimeoutError, RPCError) as error:
                 raise RuntimeError(f"Could not forward the Telegram file to @{TELEGRAM_PROCESSING_BOT}: {type(error).__name__}") from error
 
             if not forwarded:
@@ -504,7 +505,7 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
 
                 try:
                     response = await wait_for(responses.get(), timeout=remaining)
-                except AsyncTimeoutError as error:
+                except TimeoutError as error:
                     if received_bot_response:
                         raise ValueError(
                             f"@{TELEGRAM_PROCESSING_BOT} responded, but no FAST DOWNLOAD hyperlink "
@@ -553,7 +554,7 @@ async def _resolve_telegram_message_link(link: str) -> tuple[str, str]:
                 finally:
                     response.close()
 
-            except (RequestException, AsyncTimeoutError):
+            except (TimeoutError, RequestException):
                 final_url = fast_url
 
             final_parsed = urlsplit(final_url)

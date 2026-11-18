@@ -5,7 +5,7 @@ directory.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import cast
 
@@ -27,7 +27,7 @@ class User(BaseModel):
     password: str
     first_name: str
     last_name: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def __repr__(self) -> str:
         """Return a readable representation of the user without exposing the password."""
@@ -56,7 +56,7 @@ class User(BaseModel):
                     INSERT INTO directories (path, modified_at, deleted_at, username)
                     VALUES (%s, %s, %s, %s);
                     """,
-                    ("/home", datetime.now(timezone.utc), None, self.username),
+                    ("/home", datetime.now(UTC), None, self.username),
                 )
                 connection.commit()
 
@@ -69,14 +69,14 @@ class User(BaseModel):
     async def home(self) -> Directory:
         """Return the user’s default /home directory from the directory model."""
 
-        return cast(Directory, await Directory.get(self.username, path=Path("/home")))
+        return cast("Directory", await Directory.get(self.username, path=Path("/home")))
 
     @classmethod
     async def get(cls, username: str) -> User | None:
         """Retrieve a user from Redis when cached, otherwise query PostgreSQL and cache the result. Return None when the username does not exist."""
 
         try:
-            return cast(User, await Redis.get(f"user:{username}", "User"))
+            return cast("User", await Redis.get(f"user:{username}", "User"))
 
         except KeyError:
             pass

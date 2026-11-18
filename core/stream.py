@@ -7,7 +7,7 @@ from bisect import bisect_right
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from re import Match, fullmatch
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 
 from backend.database.models.file import File
 from core.data_center import DataCenter, Database
@@ -34,7 +34,7 @@ class Stream:
         end: int
 
     @classmethod
-    async def prepare(cls, file: File, range_header: str | None = None) -> "Stream":
+    async def prepare(cls, file: File, range_header: str | None = None) -> Stream:
         """Build a range stream from persisted metadata without waiting for an unrelated storage read."""
 
         if not file.links:
@@ -147,7 +147,7 @@ class Stream:
 
         return data
 
-    async def stream(self) -> AsyncGenerator[bytes, None]:
+    async def stream(self) -> AsyncGenerator[bytes]:
         """Yield bytes in order while fetching one storage link at a time."""
 
         from core.utils.download_manager import ordered_parallel_downloads
@@ -206,7 +206,7 @@ class Stream:
             raise
 
 
-async def _indexed_parallel_chunks(stream: AsyncIterator[bytes], first_index: int) -> AsyncGenerator[tuple[int, bytes], None]:
+async def _indexed_parallel_chunks(stream: AsyncIterator[bytes], first_index: int) -> AsyncGenerator[tuple[int, bytes]]:
     """Attach monotonically increasing chunk indices to ordered download results."""
 
     index = first_index

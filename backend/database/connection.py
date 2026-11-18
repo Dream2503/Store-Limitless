@@ -18,7 +18,7 @@ try:
     FileDict: TypeAlias = dict[str, int | str | datetime | list[str] | None]
 
     POOL: ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]] = cast(
-        ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]], cast(object, ConnectionPool(
+        "ConnectionPool[Connection[dict[str, int | str | datetime | list[str] | None]]]", cast("object", ConnectionPool(
             DATABASE_URL,
             kwargs={"row_factory": dict_row},
         ))

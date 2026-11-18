@@ -5,7 +5,7 @@ from __future__ import annotations
 from asyncio import Task, create_task, gather, sleep, to_thread, wait
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 from core.utils import write_log, read_chunk
 
@@ -73,7 +73,6 @@ async def upload_growing_file(
         track_download: bool = False,
         download_total: int = 0,
         download_from_path: bool = False,
-        source_ready: Callable[[Path], Awaitable[None]] | None = None,
 ) -> AsyncGenerator[Progress, None]:
     """Upload completed chunks as a file grows, bounded by the selected provider's own parallelism."""
 
@@ -183,12 +182,6 @@ async def upload_growing_file(
 
             path = candidates[0]
             size = path.stat().st_size
-
-        # The complete local source is now available, but the final original-file
-        # chunks may still be uploading. Start video preparation here so FFmpeg can
-        # work alongside the remaining original upload without starting a second upload.
-        if source_ready is not None:
-            await source_ready(path)
 
         total_size = size
         offset: int = (part - start_part) * chunk_size

@@ -1542,9 +1542,6 @@ export default function ViewFile() {
     const [status, setStatus] = useState("Preparing video…");
     const [error, setError] = useState("");
     const [copyStatus, setCopyStatus] = useState("");
-    const [videoProcessing, setVideoProcessing] = useState(null);
-    const [processingRetryNonce, setProcessingRetryNonce] = useState(0);
-    const [processingRetrying, setProcessingRetrying] = useState(false);
     const copyTimer = useRef(null);
 
     // Backspace or Escape returns to the previous page/folder, unless the user is editing text.
@@ -1663,75 +1660,6 @@ export default function ViewFile() {
         };
     }, [fileId, kind, navigate, publicToken]);
 
-    // New uploads use preprocessed HLS. Legacy videos remain playable through the
-    // existing on-demand encoder until the separate one-time backfill is implemented.
-    useEffect(() => {
-        if (kind !== "video" || !source?.publicToken) {
-            setVideoProcessing(null);
-            return;
-        }
-
-        let cancelled = false;
-        let timeoutId = null;
-        setVideoProcessing({status: "checking", stage: "checking", progress: 0, message: "Checking video processing status…"});
-
-        const pollStatus = async () => {
-            try {
-                const response = await fetch(
-                    `${API_URL}/public/video-processing/${encodeURIComponent(source.publicToken)}/status`,
-                    {cache: "no-store"},
-                );
-                const payload = await response.json();
-                if (!response.ok) throw new Error(payload.detail || "Could not check video processing status.");
-                if (cancelled) return;
-
-                setVideoProcessing(payload);
-                if (["ready", "untracked", "failed"].includes(payload.status)) return;
-            } catch (statusError) {
-                if (cancelled) return;
-                setVideoProcessing((current) => ({
-                    ...(current || {}),
-                    status: "checking",
-                    stage: "checking",
-                    message: statusError?.message || "Checking video processing status…",
-                }));
-            }
-
-            timeoutId = window.setTimeout(pollStatus, 1800);
-        };
-
-        void pollStatus();
-        return () => {
-            cancelled = true;
-            if (timeoutId !== null) window.clearTimeout(timeoutId);
-        };
-    }, [kind, source?.publicToken, processingRetryNonce]);
-
-    const retryVideoProcessing = useCallback(async () => {
-        if (!source?.publicToken || processingRetrying) return;
-        setProcessingRetrying(true);
-
-        try {
-            const response = await fetch(
-                `${API_URL}/public/video-processing/${encodeURIComponent(source.publicToken)}/retry`,
-                {method: "POST", cache: "no-store"},
-            );
-            const payload = await response.json();
-            if (!response.ok) throw new Error(payload.detail || "Could not retry video processing.");
-            setVideoProcessing(payload);
-            setProcessingRetryNonce((value) => value + 1);
-        } catch (retryError) {
-            setVideoProcessing((current) => ({
-                ...(current || {}),
-                status: "failed",
-                stage: "failed",
-                message: retryError?.message || "Could not retry video processing.",
-            }));
-        } finally {
-            setProcessingRetrying(false);
-        }
-    }, [processingRetrying, source?.publicToken]);
-
     return (<div className="flex h-screen flex-col bg-[#171717] text-[#fafafa]"
                  style={{fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"}}>
         <header className="flex h-14 shrink-0 items-center gap-3 border-b border-[#2e2e2e] px-5">
@@ -1799,63 +1727,7 @@ export default function ViewFile() {
                     </div>) : !source ? (<div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-[#898989]">
                         <span className="material-symbols-outlined animate-spin text-[32px]" aria-hidden="true">progress_activity</span>
                         {status}
-                    </div>) : !["ready", "untracked"].includes(videoProcessing?.status) ? (() => {
-                        const progress = Math.max(0, Math.min(100, Number(videoProcessing?.progress) || 0));
-                        const stage = String(videoProcessing?.stage || "checking").replaceAll("_", " ");
-                        const processedSeconds = Math.max(0, Number(videoProcessing?.processed_seconds) || 0);
-                        const durationSeconds = Math.max(0, Number(videoProcessing?.duration) || 0);
-                        const remainingSeconds = Math.max(0, durationSeconds - processedSeconds);
-                        const failed = videoProcessing?.status === "failed";
-                        return (<div className="flex h-full items-center justify-center overflow-y-auto px-5 py-8">
-                            <section className="w-full max-w-xl rounded-2xl border border-[#343a36] bg-[#1d211f] p-6 shadow-2xl shadow-black/20 sm:p-8" aria-live="polite">
-                                <div className="mb-5 flex items-start gap-4">
-                                    <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border ${failed ? "border-[#7f3838] bg-[#3b2020] text-[#ff7777]" : "border-[#3ecf8e]/25 bg-[#3ecf8e]/10 text-[#3ecf8e]"}`}>
-                                        <span className={`material-symbols-outlined text-[26px]${failed ? "" : " animate-pulse"}`} aria-hidden="true">{failed ? "error" : "movie"}</span>
-                                    </div>
-                                    <div className="min-w-0 flex-1">
-                                        <h2 className="text-lg font-semibold text-white">{failed ? "Video processing failed" : "Preparing your video for streaming"}</h2>
-                                        <p className="mt-1 text-sm leading-6 text-[#a7ada9]">{failed ? (videoProcessing?.error || videoProcessing?.message || "The streaming copy could not be prepared.") : "Your original upload is safe. StoreLimitless is preparing a separate streaming copy so playback can start faster and seek more smoothly."}</p>
-                                    </div>
-                                </div>
-                                <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-sm font-medium capitalize text-[#d7ddd9]">{stage}</span>
-                                    <span className="shrink-0 font-mono text-sm tabular-nums text-[#d7ddd9]">{Math.floor(progress)}%</span>
-                                </div>
-                                <div className="h-2 overflow-hidden rounded-full bg-[#303632]" role="progressbar" aria-label="Video processing progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(progress)}>
-                                    <div className={`h-full rounded-full transition-[width] duration-500 ${failed ? "bg-[#d75d5d]" : "bg-[#3ecf8e]"}`} style={{width: `${progress}%`}}/>
-                                </div>
-                                {videoProcessing?.source_size > 0 && videoProcessing?.stage === "downloading_source" && (
-                                    <p className="mt-3 text-xs text-[#9ca59f]">Reading original: {Math.min(Number(videoProcessing.bytes_downloaded) || 0, Number(videoProcessing.source_size)).toLocaleString()} / {Number(videoProcessing.source_size).toLocaleString()} bytes</p>
-                                )}
-                                {durationSeconds > 0 && ["processing", "packaging", "storing"].includes(videoProcessing?.stage) && (
-                                    <div className="mt-4 grid grid-cols-2 gap-3">
-                                        <div className="rounded-lg border border-[#343a36] bg-[#171a18] p-3">
-                                            <p className="text-xs text-[#8f9992]">Media timeline processed</p>
-                                            <p className="mt-1 text-sm font-medium tabular-nums text-[#e6ebe7]">{fmtTime(Math.min(processedSeconds, durationSeconds))} / {fmtTime(durationSeconds)}</p>
-                                        </div>
-                                        <div className="rounded-lg border border-[#343a36] bg-[#171a18] p-3">
-                                            <p className="text-xs text-[#8f9992]">Media timeline remaining</p>
-                                            <p className="mt-1 text-sm font-medium tabular-nums text-[#e6ebe7]">{fmtTime(remainingSeconds)}</p>
-                                        </div>
-                                    </div>
-                                )}
-                                {Number(videoProcessing?.total_segments) > 0 && (
-                                    <p className="mt-3 text-xs text-[#9ca59f]">Segments packaged: {Math.min(Number(videoProcessing.completed_segments) || 0, Number(videoProcessing.total_segments))} / {Number(videoProcessing.total_segments)}</p>
-                                )}
-                                {failed ? (
-                                    <button type="button" onClick={() => void retryVideoProcessing()} disabled={processingRetrying} className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg border border-[#3ecf8e]/30 bg-[#17643d] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#1d794a] disabled:cursor-wait disabled:opacity-60">
-                                        <span className={`material-symbols-outlined text-[18px]${processingRetrying ? " animate-spin" : ""}`} aria-hidden="true">{processingRetrying ? "progress_activity" : "refresh"}</span>
-                                        {processingRetrying ? "Queueing retry…" : "Retry processing"}
-                                    </button>
-                                ) : (
-                                    <div className="mt-5 flex items-start gap-2 rounded-lg border border-[#343a36] bg-[#171a18] p-3 text-xs leading-5 text-[#a7ada9]">
-                                        <span className="material-symbols-outlined mt-0.5 text-[16px] text-[#3ecf8e]" aria-hidden="true">info</span>
-                                        <p>{videoProcessing?.message || "Processing is queued. This page will start playback automatically when the streaming copy is ready. You can leave and return later."}</p>
-                                    </div>
-                                )}
-                            </section>
-                        </div>);
-                    })() : (<div className="flex h-full w-full min-h-0 flex-col">
+                    </div>) : (<div className="flex h-full w-full min-h-0 flex-col">
                         <div className="min-h-0 min-w-0 flex-1">
                             <VideoPlayer file={{name}} streamUrl={source.streamUrl} publicToken={source.publicToken} heightClass="h-full"/>
                         </div>

@@ -3,7 +3,6 @@ File model and persistence operations. File metadata is stored in PostgreSQL and
 """
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,22 +11,6 @@ from backend.database.connection import POOL
 from backend.database.redis_server import Redis
 from core.data_center import Database
 from core.utils import write_log
-
-
-_VIDEO_EXTENSIONS = {
-    ".3g2", ".3gp", ".asf", ".avi", ".divx", ".flv", ".m2ts", ".m2v", ".m4v",
-    ".mkv", ".mov", ".mp4", ".mpe", ".mpeg", ".mpg", ".mts", ".mxf", ".ogv",
-    ".rm", ".rmvb", ".ts", ".vob", ".webm", ".wmv",
-}
-
-
-def is_video_file(name: str, mime_type: str = "") -> bool:
-    """Return whether a file's stored MIME type or extension identifies video media."""
-
-    if str(mime_type or "").split(";", 1)[0].strip().lower().startswith("video/"):
-        return True
-
-    return Path(str(name or "")).suffix.lower() in _VIDEO_EXTENSIONS
 
 
 class File(BaseModel):
@@ -76,12 +59,6 @@ class File(BaseModel):
 
             self.name = f"{stem}({i}){extension}"
 
-        video_file: bool = is_video_file(self.name, self.type)
-        has_local_preparation: bool = False
-        if video_file:
-            from backend.server.video_processing import has_local_video_preparation
-
-            has_local_preparation = has_local_video_preparation(self)
 
         with POOL.connection() as connection:
             try:
@@ -106,31 +83,6 @@ class File(BaseModel):
 
                 connection.commit()
                 await Redis.set(f"user:{self.username}:files", self)
-
-                if self.id is not None and video_file:
-                    from backend.server.video_processing import (
-                        enqueue_video_processing_job,
-                        notify_video_file_saved,
-                    )
-
-                    await enqueue_video_processing_job(
-                        int(self.id),
-                        status="preparing" if has_local_preparation else "queued",
-                        message=(
-                            "Preparing a local streaming copy alongside the original upload."
-                            if has_local_preparation else "Waiting for video processing."
-                        ),
-                        source_size=self.size,
-                        username=self.username,
-                        name=self.name,
-                    )
-                    write_log(
-                        "INFO", Database, "VIDEO PROCESSING", self.username,
-                        f"Original file saved file_id={self.id} name={self.name!r} size={self.size} "
-                        f"chunks={len(self.links)}; local_preparation={has_local_preparation}.",
-                    )
-                    if has_local_preparation:
-                        await notify_video_file_saved(self)
 
             except Exception as e:
                 connection.rollback()
@@ -264,9 +216,6 @@ class File(BaseModel):
                 )
                 connection.commit()
                 await Redis.delete(f"user:{self.username}:files {self.id}", "File")
-                from backend.server.video_processing import delete_video_processing_job
-
-                await delete_video_processing_job(int(self.id))
 
             except Exception as e:
                 connection.rollback()
@@ -311,12 +260,8 @@ class File(BaseModel):
                 )
                 connection.commit()
 
-                from backend.server.video_processing import delete_video_processing_job
-
                 for file in expired:
                     await Redis.delete(f"user:{username}:files {file.id}", "File")
-                    if file.id is not None:
-                        await delete_video_processing_job(int(file.id))
 
             except Exception as e:
                 connection.rollback()

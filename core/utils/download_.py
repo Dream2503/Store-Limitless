@@ -112,7 +112,6 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
     download_task: Task[Any] | None = None
     response: Response | None = None
     ticket: IngestionUploadTicket | None = None
-    upload_finished: bool = False
     temp_dir / "pending-download"
     response_type: str | None = None
 
@@ -210,21 +209,6 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             f"Direct-link import ready for queued upload name={file.name!r} source_host={urlparse(link).hostname!r}.",
         )
 
-        async def source_ready(source_path: Path) -> None:
-            """Start FFmpeg preparation as soon as the complete local download is available."""
-
-            from backend.database.models.file import is_video_file
-            from backend.server.video_processing import start_local_video_preprocessing
-
-            if not is_video_file(file.name, file.type):
-                return
-            try:
-                await start_local_video_preprocessing(file, source_path)
-            except Exception as error:
-                write_log(
-                    "ERROR", data_center, "VIDEO PROCESSING", file.username,
-                    f"Could not stage local processing source for link import {file.name!r}: {error}",
-                )
 
         try:
             async with ingestion_upload_slot(ticket):
@@ -238,7 +222,6 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
                         track_download=True,
                         download_total=total_size,
                         download_from_path=True,
-                        source_ready=source_ready,
                 ):
                     yield progress_value
         finally:
@@ -252,12 +235,8 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
             "INFO", data_center, "UPLOAD", file.username,
             f"Direct-link original chunks uploaded name={file.name!r} size={file.size}.",
         )
-        upload_finished = True
 
     except Exception as error:
-        from backend.server.video_processing import abort_local_video_preparation
-
-        await abort_local_video_preparation(file, str(error))
         write_log(
             "ERROR", data_center, "UPLOAD", file.username,
             f"Remote download/upload failed name={file.name!r}: "
@@ -266,10 +245,6 @@ async def download_unprocessed_link(file: File, link: str) -> AsyncGenerator[Pro
         raise
 
     finally:
-        if not upload_finished:
-            from backend.server.video_processing import abort_local_video_preparation
-
-            await abort_local_video_preparation(file, "Direct-link upload ended before the original file was saved.")
         try:
             if response is not None:
                 response.close()

@@ -71,22 +71,6 @@ try:
                         REFERENCES users (username)
             );
 
-            -- Video processing progress and queue state are maintained in Redis.
-
-            CREATE TABLE IF NOT EXISTS processed_videos (
-                id BIGINT PRIMARY KEY,
-                data_center TEXT NOT NULL,
-                pack_size BIGINT NOT NULL,
-                pack_links TEXT[] NOT NULL,
-                media_info JSONB NOT NULL,
-                assets JSONB NOT NULL,
-                processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                CONSTRAINT fk_processed_video_file
-                    FOREIGN KEY (id)
-                        REFERENCES files (id)
-                        ON UPDATE CASCADE
-                        ON DELETE CASCADE
-            );
             """
         )
         connection.commit()

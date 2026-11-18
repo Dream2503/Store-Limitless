@@ -52,24 +52,6 @@ async def file_upload(
             f"data_center={file.data_center!r} intermediate={intermediate}.",
         )
 
-        async def source_ready(source_path: Path) -> None:
-            """Start local video preparation without delaying the original chunk upload."""
-
-            from backend.server.video_processing import start_local_video_preprocessing
-            from backend.database.models.file import is_video_file
-
-            if not is_video_file(file.name, file.type):
-                return
-
-            try:
-                await start_local_video_preprocessing(file, source_path)
-            except Exception as error:
-                # The original upload must still complete. File.save() leaves a durable
-                # queue entry which can recover through the restart/fallback processor.
-                write_log(
-                    "ERROR", data_center, "VIDEO PROCESSING", file.username,
-                    f"Could not stage local processing source for name={file.name!r}: {error}",
-                )
 
         try:
             write_log("INFO", data_center, "UPLOAD", file.username, f"Found local upload source {file_path.name!r}")
@@ -83,7 +65,6 @@ async def file_upload(
                     upload_task,
                     track_download=track_download,
                     download_total=download_total,
-                    source_ready=source_ready,
             )) as upload_progress_stream:
                 async for progress_value in upload_progress_stream:
                     yield progress_value
@@ -100,9 +81,6 @@ async def file_upload(
                 file_path.unlink(missing_ok=True)
 
         except Exception as error:
-            from backend.server.video_processing import abort_local_video_preparation
-
-            await abort_local_video_preparation(file, str(error))
             write_log(
                 "ERROR", data_center, "UPLOAD", file.username,
                 f"Original upload failed file_id={file.id} name={file.name!r}: "
@@ -120,13 +98,6 @@ async def file_upload(
             async with ingestion_upload_slot(ticket):
                 async for progress in upload_and_finalize():
                     yield progress
-    except BaseException as error:
-        # Async-generator cancellation bypasses ordinary Exception handlers.
-        # Release local preparation if the original upload never reaches File.save().
-        from backend.server.video_processing import abort_local_video_preparation
-
-        await abort_local_video_preparation(file, str(error))
-        raise
     finally:
         if ticket is not None and not ticket.claimed:
             await cancel_ingestion_upload(ticket)
@@ -207,11 +178,3 @@ async def link_upload(file: File, link: str, selected_torrent_files: set[int] | 
         details: str = sanitize_sensitive_urls(f"{error}\n{format_exc()}")
         write_log("ERROR", data_center, "DOWNLOAD", user.username, f"Link upload failed: {details}")
         raise
-
-    finally:
-        if file.id is None:
-            # A direct-link generator may finish uploading its chunks just before the
-            # caller is cancelled. Clean up prepared source if File.save() never ran.
-            from backend.server.video_processing import abort_local_video_preparation
-
-            await abort_local_video_preparation(file, "Link import ended before the original database record was saved.")

@@ -1771,8 +1771,8 @@ async def upload_link(
         raise HTTPException(status_code=404, detail="Directory not found")
 
     if storelimitless_token:
-        # These links use an existing StoreLimitless storage record. Create a separate
-        # recipient-owned database row while reusing the original provider message links.
+        # Resolve the source record through the public share token. The recipient
+        # always receives a new database row owned by their account.
         try:
             share_payload: dict[str, str | int] = verify_public_stream_token(storelimitless_token)
         except ValueError:
@@ -1806,47 +1806,244 @@ async def upload_link(
         if source_file is None or source_file.username != source_username:
             raise HTTPException(status_code=404, detail="The shared StoreLimitless file no longer exists")
 
-        copied_file = File(
+        # When both accounts use the same provider, a new recipient-owned row can
+        # safely reuse the original storage references without moving any file bytes.
+        if data_center == source_file.data_center:
+            copied_file = File(
+                directory_id=cast("int", directory_obj.id),
+                name=source_file.name,
+                type=source_file.type,
+                size=source_file.size,
+                modified_at=source_file.modified_at,
+                deleted_at=None,
+                data_center=source_file.data_center,
+                links=list(source_file.links),
+                username=user.username,
+            )
+            await copied_file.save()
+
+            job_id = str(uuid4())
+            progress = Progress(copied_file.name, f"StoreLimitless copy complete (file id={copied_file.id})", 0)
+            await Redis.set(job_id, progress)
+            await register_upload_job(
+                job_id,
+                username=user.username,
+                name=copied_file.name,
+                kind="link",
+                directory=str(directory_obj.path),
+                data_center=copied_file.data_center,
+                total=0,
+                batch_id=batch_id,
+            )
+            write_log(
+                "INFO",
+                Database,
+                "STORELIMITLESS COPY",
+                user.username,
+                f"Copied file metadata source_user={source_username!r} source_file_id={source_file_id} "
+                f"new_file_id={copied_file.id} name={copied_file.name!r} shared_parts={len(copied_file.links)} "
+                f"directory={directory_obj.path}",
+            )
+            return JSONResponse({
+                "job_id": job_id,
+                "import_type": "storelimitless-copy",
+                "file_id": copied_file.id,
+                "file_name": copied_file.name,
+                "file_size": copied_file.size,
+            })
+
+        # Different providers require a real transfer. Never expose the source
+        # account's provider message IDs as file links in the recipient's database.
+        source_provider = DataCenter(source_file.data_center)
+        destination_provider = DataCenter(data_center)
+        if source_provider is None or destination_provider is None:
+            raise HTTPException(status_code=422, detail="Unsupported source or destination data center")
+        if not source_file.links:
+            raise HTTPException(status_code=409, detail="The shared StoreLimitless file has no stored chunks to transfer")
+
+        expected_size = max(0, int(source_file.size or 0))
+        safe_name = Path(source_file.name).name
+        job_id = str(uuid4())
+        stage_path = TRANSFER_PATH / user.username / "shared-copies" / job_id / safe_name
+        stage_path.parent.mkdir(parents=True, exist_ok=True)
+        target_file = File(
             directory_id=cast("int", directory_obj.id),
-            name=source_file.name,
+            name=safe_name,
             type=source_file.type,
-            size=source_file.size,
-            modified_at=source_file.modified_at,
+            size=0,
+            modified_at=datetime.now(timezone.utc),
             deleted_at=None,
-            data_center=source_file.data_center,
-            links=list(source_file.links),
+            data_center=data_center,
+            links=[],
             username=user.username,
         )
-        await copied_file.save()
 
-        job_id = str(uuid4())
-        progress = Progress(copied_file.name, f"StoreLimitless copy complete (file id={copied_file.id})", 0)
-        await Redis.set(job_id, progress)
+        initial_progress = Progress(
+            safe_name,
+            f"Copying shared file from {source_file.data_center} to {data_center}",
+            expected_size,
+        )
+        initial_progress.download_active = True
+        initial_progress.download_total = expected_size
+        await Redis.set(job_id, initial_progress)
         await register_upload_job(
             job_id,
             username=user.username,
-            name=copied_file.name,
+            name=safe_name,
             kind="link",
             directory=str(directory_obj.path),
-            data_center=copied_file.data_center,
-            total=0,
+            data_center=data_center,
+            total=expected_size,
             batch_id=batch_id,
         )
+
+        async def run_shared_file_transfer() -> None:
+            """Download source chunks and upload them to the recipient's selected provider."""
+            producer_task: Task[None] | None = None
+            latest_progress = initial_progress
+            ticket = None
+
+            async def download_source() -> None:
+                """Write source chunks in their original order as concurrent reads complete."""
+                downloaded = 0
+                async with aiofiles.open(stage_path, "wb") as output:
+                    async for chunk in ordered_parallel_downloads(
+                        range(len(source_file.links)),
+                        lambda part_index: source_provider.download(source_file.links[part_index]),
+                        concurrency=source_provider.MAX_PARALLEL_DOWNLOADS,
+                        slot_key=source_provider.NAME,
+                    ):
+                        metadata = await get_upload_job_metadata(job_id)
+                        if metadata is None or metadata.get("cancelled"):
+                            raise CancelledError()
+                        if not isinstance(chunk, (bytes, bytearray)):
+                            raise TypeError(f"{source_file.data_center} returned a non-byte chunk")
+                        if not chunk:
+                            continue
+
+                        await output.write(chunk)
+                        await output.flush()
+                        downloaded += len(chunk)
+                        if expected_size and downloaded > expected_size:
+                            raise IOError(
+                                f"Source provider returned more than the declared {expected_size} bytes"
+                            )
+
+                        write_log(
+                            "INFO",
+                            source_provider,
+                            "STORELIMITLESS COPY DOWNLOAD",
+                            user.username,
+                            f"Downloaded source chunk ({downloaded}/{expected_size or 'unknown'} bytes) "
+                            f"for shared file_id={source_file_id}.",
+                        )
+
+                if expected_size and downloaded != expected_size:
+                    raise IOError(f"Downloaded {downloaded} of {expected_size} expected bytes")
+
+            try:
+                # Hold the existing ingestion FIFO slot for the duration of the
+                # upload, while allowing the producer to prefetch source chunks.
+                ticket = await enqueue_ingestion_upload(safe_name, user.username)
+                async with ingestion_upload_slot(ticket):
+                    producer_task = create_task(download_source())
+                    async for value in file_upload(
+                        target_file,
+                        stage_path,
+                        upload_task=producer_task,
+                        track_download=True,
+                        download_total=expected_size,
+                        queue_slot_held=True,
+                        total_size=expected_size,
+                        download_from_path=True,
+                    ):
+                        latest_progress = value
+                        if str(value.message or "").lower().startswith("upload complete of id="):
+                            value.download_active = False
+                            value.download_transfer = max(value.download_transfer, expected_size or value.total)
+                            value.download_total = expected_size or value.total
+                            await Redis.set(job_id, value)
+                            continue
+
+                        value.message = f"Copying shared file from {source_file.data_center} to {data_center}"
+                        value.download_active = True
+                        await Redis.set(job_id, value)
+
+                    if producer_task is not None:
+                        await producer_task
+
+            except CancelledError:
+                cancelled = Progress(
+                    safe_name,
+                    "Upload cancelled",
+                    max(0, int(latest_progress.total or expected_size)),
+                )
+                cancelled.transfer = max(0, int(latest_progress.transfer or 0))
+                cancelled.total = max(0, int(latest_progress.total or expected_size))
+                cancelled.download_transfer = max(0, int(latest_progress.download_transfer or 0))
+                cancelled.download_total = max(0, int(latest_progress.download_total or expected_size))
+                cancelled.download_active = False
+                await Redis.set(job_id, cancelled)
+
+            except Exception as error:
+                detail = " ".join(sanitize_sensitive_urls(str(error)).split())[:400]
+                failed = Progress(
+                    safe_name,
+                    f"Upload failed: {detail or type(error).__name__}",
+                    max(0, int(latest_progress.total or expected_size)),
+                )
+                failed.transfer = max(0, int(latest_progress.transfer or 0))
+                failed.total = max(0, int(latest_progress.total or expected_size))
+                failed.download_transfer = max(0, int(latest_progress.download_transfer or 0))
+                failed.download_total = max(0, int(latest_progress.download_total or expected_size))
+                failed.download_active = False
+                await Redis.set(job_id, failed)
+                write_log(
+                    "ERROR",
+                    destination_provider,
+                    "STORELIMITLESS COPY",
+                    user.username,
+                    f"Cross-provider public-share copy failed source_user={source_username!r} "
+                    f"source_file_id={source_file_id}: {detail or type(error).__name__}",
+                )
+
+            finally:
+                if ticket is not None and not ticket.claimed:
+                    await cancel_ingestion_upload(ticket)
+                if producer_task is not None:
+                    if not producer_task.done():
+                        producer_task.cancel()
+                    try:
+                        await producer_task
+                    except CancelledError:
+                        pass
+                    except Exception:
+                        # The transfer loop already records producer failures. Retrieving
+                        # the exception here also prevents an unobserved-task warning when
+                        # cancellation races with a completed failed download.
+                        pass
+                stage_path.unlink(missing_ok=True)
+                try:
+                    stage_path.parent.rmdir()
+                except OSError:
+                    pass
+
+        transfer_task: Task[None] = create_task(run_shared_file_transfer())
+        track_upload_task(transfer_task, job_id)
         write_log(
             "INFO",
             Database,
             "STORELIMITLESS COPY",
             user.username,
-            f"Copied file metadata source_user={source_username!r} source_file_id={source_file_id} "
-            f"new_file_id={copied_file.id} name={copied_file.name!r} shared_parts={len(copied_file.links)} "
-            f"directory={directory_obj.path}",
+            f"Started cross-provider public-share transfer source_user={source_username!r} "
+            f"source_file_id={source_file_id} source_data_center={source_file.data_center} "
+            f"destination_data_center={data_center} job_id={job_id} name={safe_name!r}.",
         )
         return JSONResponse({
             "job_id": job_id,
-            "import_type": "storelimitless-copy",
-            "file_id": copied_file.id,
-            "file_name": copied_file.name,
-            "file_size": copied_file.size,
+            "import_type": "storelimitless-transfer",
+            "file_name": safe_name,
+            "file_size": expected_size,
         })
 
     file: File = File(

@@ -891,7 +891,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     }
                     throw new Error("File upload was cancelled.");
                 }
-                const isStoreLimitlessCopy = jobResult.import_type === "storelimitless-copy";
+                const isStoreLimitlessCopy = ["storelimitless-copy", "storelimitless-transfer"].includes(jobResult.import_type);
+                const isStoreLimitlessTransfer = jobResult.import_type === "storelimitless-transfer";
                 batchTransfer.activeJobId = jobId;
                 const telegramProcessing = uploadMode === "link" && isTelegramMessageUrl(selectedLink);
                 await publishBatch({
@@ -901,19 +902,25 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     current_name: resolvedDisplayName,
                     item_index: itemNumber - 1,
                     item_status: "uploading",
-                    item_message: isStoreLimitlessCopy
-                        ? "Copying existing storage references"
-                        : telegramProcessing ? "Processing Telegram message" : "Uploading",
+                    item_message: isStoreLimitlessTransfer
+                        ? "Copying to selected data center"
+                        : isStoreLimitlessCopy
+                            ? "Copying existing storage references"
+                            : telegramProcessing ? "Processing Telegram message" : "Uploading",
                     items: [{
                         ...(queueItems[itemNumber - 1] || {}),
                         name: resolvedDisplayName,
                         size: Math.max(0, Number(selectedFile?.size) || Number(jobResult.file_size) || Number(queueItems[itemNumber - 1]?.size) || 0),
                         status: "uploading",
-                        message: isStoreLimitlessCopy ? "Copying existing storage references" : "Uploading",
+                        message: isStoreLimitlessTransfer
+                            ? "Copying to selected data center"
+                            : isStoreLimitlessCopy ? "Copying existing storage references" : "Uploading",
                     }],
-                    message: isStoreLimitlessCopy
-                        ? "Copying StoreLimitless file reference"
-                        : telegramProcessing ? "Processing Telegram message" : `Uploading ${itemNumber} of ${queueItems.length}`
+                    message: isStoreLimitlessTransfer
+                        ? "Copying StoreLimitless file to selected data center"
+                        : isStoreLimitlessCopy
+                            ? "Copying StoreLimitless file reference"
+                            : telegramProcessing ? "Processing Telegram message" : `Uploading ${itemNumber} of ${queueItems.length}`
                 });
                 if (uploadMode === "file") {
                     try {

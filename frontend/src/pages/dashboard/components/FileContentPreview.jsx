@@ -774,7 +774,8 @@ function ImageFilePreview({src, fileName, onError}) {
         onPointerMove={handlePointerMove}
         onPointerUp={finishPointer}
         onPointerCancel={finishPointer}
-        style={{touchAction: "none", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch"}}
+        onLostPointerCapture={finishPointer}
+        style={{touchAction: "none", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", userSelect: "none", WebkitUserSelect: "none"}}
         aria-label="Image viewer. Scroll to zoom, or pinch on a touch screen."
     >
         <div className="flex h-max min-h-full w-max min-w-full items-center justify-center p-3 sm:p-6">

@@ -34,7 +34,7 @@ export default function DownloadJobsTray({jobs, onPause, onResume, onRemove, onC
                               aria-hidden="true">{job.status === "completed" ? "check_circle" : job.status === "error" ? "error" : job.status === "paused" ? "pause_circle" : "downloading"}</span>
                         <div className="min-w-0 flex-1">
                             <p className="truncate text-xs font-medium" title={job.name}>{job.name}</p>
-                            <p className="mt-1 text-[11px] text-[#9bad9f]">{job.status === "downloading" ? `${formatBytes(job.transferred)} / ${formatBytes(job.total)} · ${percent}%` : job.status === "paused" ? `Paused · ${formatBytes(job.transferred)} of ${formatBytes(job.total)}` : job.status === "completed" ? `Completed · ${formatBytes(job.total)}` : job.message || "Download failed"}</p>
+                            <p className="mt-1 text-[11px] text-[#9bad9f]">{job.status === "downloading" ? job.streamOnly && job.total <= 0 ? `${formatBytes(job.transferred)} downloaded` : `${formatBytes(job.transferred)} / ${formatBytes(job.total)} · ${percent}%` : job.status === "paused" ? job.streamOnly ? job.message || "Paused · ZIP will restart from the beginning" : `Paused · ${formatBytes(job.transferred)} of ${formatBytes(job.total)}` : job.status === "completed" ? `Completed · ${formatBytes(job.total || job.transferred)}` : job.message || "Download failed"}</p>
                         </div>
                         {!terminal && job.status === "downloading" &&
                             <button type="button" onClick={() => onPause(job.id)} title="Pause download" aria-label={`Pause ${job.name}`}
@@ -49,7 +49,7 @@ export default function DownloadJobsTray({jobs, onPause, onResume, onRemove, onC
                             className="material-symbols-outlined text-[16px]">close</span></button>
                     </div>
                     {job.status === "downloading" && <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#29352d]">
-                        <div className="h-full rounded-full bg-[#3ecf8e] transition-[width] duration-200" style={{width: `${percent}%`}}/>
+                        <div className={`h-full rounded-full bg-[#3ecf8e] transition-[width] duration-200 ${job.streamOnly && job.total <= 0 ? "w-1/3 animate-pulse" : ""}`} style={job.streamOnly && job.total <= 0 ? undefined : {width: `${percent}%`}}/>
                     </div>}
                 </article>;
             })}

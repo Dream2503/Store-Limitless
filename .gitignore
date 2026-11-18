@@ -35,3 +35,4 @@ frontend/src-tauri/resources/backend/
 *.msi
 *.exe
 .vercel
+.env*

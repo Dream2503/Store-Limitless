@@ -198,6 +198,19 @@ async def _owned_public_file(token: str) -> File:
     return file
 
 
+@router.get("/metadata/{token}")
+async def public_file_metadata(token: str) -> JSONResponse:
+    """Return only the metadata needed to render a public file view page."""
+
+    file = await _owned_public_file(token)
+    return JSONResponse({
+        "id": file.id,
+        "name": file.name,
+        "type": file.type,
+        "size": max(0, int(file.size or 0)),
+    })
+
+
 @router.get("/stream/{token}")
 async def public_stream(token: str, request: Request) -> Response:
     """Stream a file with single-range and validator support for seeking/resuming."""

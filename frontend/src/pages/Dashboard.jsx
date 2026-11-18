@@ -161,24 +161,109 @@ export default function DashboardPage() {
         if (downloadControllersRef.current.has(job.id)) return;
         const controller = new AbortController();
         downloadControllersRef.current.set(job.id, controller);
-        updateDownloadJob(job.id, {status: "downloading", message: "Downloading"});
+        updateDownloadJob(job.id, {status: "downloading", message: job.tempName ? "Downloading to temporary storage" : "Downloading"});
 
         try {
-            const permission = await job.handle.queryPermission({mode: "readwrite"});
-            const granted = permission === "granted" || await job.handle.requestPermission({mode: "readwrite"}) === "granted";
-            if (!granted) throw new Error("Permission to write the selected download file was denied.");
+            const staged = Boolean(job.tempName);
+            const handle = staged
+                ? await (await navigator.storage.getDirectory()).getFileHandle(job.tempName, {create: true})
+                : job.handle;
+            if (!handle) throw new Error("The temporary download file is unavailable.");
+
+            if (!staged) {
+                const permission = await handle.queryPermission({mode: "readwrite"});
+                const granted = permission === "granted" || await handle.requestPermission({mode: "readwrite"}) === "granted";
+                if (!granted) throw new Error("Permission to write the selected download file was denied.");
+            }
+
+            if (job.streamOnly) {
+                const response = await fetch(job.url, {signal: controller.signal, cache: "no-store"});
+                if (!response.ok) throw new Error(`ZIP stream failed (${response.status}).`);
+
+                const contentLength = response.headers.get("content-length");
+                const latestTotal = contentLength ? Number(contentLength) : 0;
+                updateDownloadJob(job.id, {
+                    total: latestTotal,
+                    transferred: 0,
+                    message: "Downloading ZIP to temporary storage",
+                });
+
+                const writer = await handle.createWritable();
+                let transferred = 0;
+                let lastReported = 0;
+                try {
+                    const reader = response.body?.getReader();
+                    if (reader) {
+                        while (true) {
+                            if (controller.signal.aborted) {
+                                await reader.cancel().catch(() => {});
+                                throw new DOMException("Download paused", "AbortError");
+                            }
+                            const {done, value} = await reader.read();
+                            if (done) break;
+                            if (!value?.byteLength) continue;
+                            await writer.write(value);
+                            transferred += value.byteLength;
+                            if (transferred - lastReported >= 1024 * 1024 || (latestTotal > 0 && transferred >= latestTotal)) {
+                                updateDownloadJob(job.id, {
+                                    transferred,
+                                    total: latestTotal,
+                                    message: "Downloading ZIP to temporary storage",
+                                });
+                                lastReported = transferred;
+                            }
+                        }
+                    } else {
+                        const bytes = await response.arrayBuffer();
+                        await writer.write(bytes);
+                        transferred = bytes.byteLength;
+                    }
+
+                    if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
+                    if (latestTotal > 0 && transferred !== latestTotal) {
+                        throw new Error(`Incomplete ZIP stream: received ${transferred} of ${latestTotal} bytes.`);
+                    }
+                    await writer.close();
+                } catch (error) {
+                    await writer.abort().catch(() => {});
+                    throw error;
+                }
+
+                const completedFile = await handle.getFile();
+                const objectUrl = URL.createObjectURL(completedFile);
+                const anchor = document.createElement("a");
+                anchor.href = objectUrl;
+                anchor.download = job.name || completedFile.name || "StoreLimitless-files.zip";
+                anchor.rel = "noreferrer";
+                document.body.appendChild(anchor);
+                anchor.click();
+                anchor.remove();
+                window.setTimeout(() => {
+                    URL.revokeObjectURL(objectUrl);
+                    navigator.storage.getDirectory()
+                        .then((root) => root.removeEntry(job.tempName))
+                        .catch(() => {});
+                }, 5 * 60 * 1000);
+                updateDownloadJob(job.id, {
+                    status: "completed",
+                    transferred,
+                    total: latestTotal || transferred,
+                    message: "ZIP staged in StoreLimitless · browser download started",
+                });
+                return;
+            }
 
             const head = await fetch(job.url, {method: "HEAD", signal: controller.signal});
             if (!head.ok) throw new Error(`Could not verify download source (${head.status}).`);
             const latestTotal = Number(head.headers.get("content-length") || job.total || 0);
             const latestEtag = head.headers.get("etag") || job.etag || "";
-            let offset = Math.min(Number(job.transferred || 0), (await job.handle.getFile()).size, latestTotal);
+            let offset = Math.min(Number(job.transferred || 0), (await handle.getFile()).size, latestTotal);
 
             if (job.etag && latestEtag && job.etag !== latestEtag && offset > 0) offset = 0;
-            let truncateWriter = await job.handle.createWritable({keepExistingData: true});
+            let truncateWriter = await handle.createWritable({keepExistingData: true});
             await truncateWriter.truncate(offset);
             await truncateWriter.close();
-            updateDownloadJob(job.id, {total: latestTotal, etag: latestEtag, transferred: offset, message: "Downloading"});
+            updateDownloadJob(job.id, {total: latestTotal, etag: latestEtag, transferred: offset, message: staged ? "Downloading to temporary storage" : "Downloading"});
 
             while (offset < latestTotal) {
                 if (controller.signal.aborted) throw new DOMException("Download paused", "AbortError");
@@ -211,18 +296,36 @@ export default function DashboardPage() {
                 }
 
                 if (!chunk) throw lastError || new Error("Download range failed after repeated attempts.");
-                const writer = await job.handle.createWritable({keepExistingData: true});
+                const writer = await handle.createWritable({keepExistingData: true});
                 await writer.seek(offset);
                 await writer.write(chunk);
                 await writer.close();
                 offset += chunk.byteLength;
-                updateDownloadJob(job.id, {transferred: offset, total: latestTotal, etag: latestEtag, message: "Downloading"});
+                updateDownloadJob(job.id, {transferred: offset, total: latestTotal, etag: latestEtag, message: staged ? "Downloading to temporary storage" : "Downloading"});
             }
 
-            updateDownloadJob(job.id, {status: "completed", transferred: latestTotal, total: latestTotal, message: "Download complete"});
+            if (staged) {
+                // Only expose the browser download after the entire file has been staged.
+                const completedFile = await handle.getFile();
+                const objectUrl = URL.createObjectURL(completedFile);
+                const anchor = document.createElement("a");
+                anchor.href = objectUrl;
+                anchor.download = job.name || completedFile.name || "download";
+                anchor.rel = "noreferrer";
+                document.body.appendChild(anchor);
+                anchor.click();
+                anchor.remove();
+                window.setTimeout(() => URL.revokeObjectURL(objectUrl), 5 * 60 * 1000);
+            }
+
+            updateDownloadJob(job.id, {status: "completed", transferred: latestTotal, total: latestTotal, message: staged ? "Complete · browser download started" : "Download complete"});
         } catch (error) {
             if (error?.name === "AbortError" || controller.signal.aborted) {
-                updateDownloadJob(job.id, {status: "paused", message: "Paused"});
+                updateDownloadJob(job.id, {
+                    status: "paused",
+                    transferred: job.streamOnly ? 0 : (downloadJobsRef.current.find((item) => item.id === job.id)?.transferred || 0),
+                    message: job.streamOnly ? "Paused · resuming restarts the ZIP transfer" : "Paused",
+                });
             } else {
                 updateDownloadJob(job.id, {status: "error", message: error?.message || "Download failed"});
             }
@@ -230,23 +333,33 @@ export default function DashboardPage() {
             downloadControllersRef.current.delete(job.id);
         }
     };
-
     const pauseDownload = (jobId) => downloadControllersRef.current.get(jobId)?.abort();
     const resumeDownload = (jobId) => {
         const job = downloadJobsRef.current.find((item) => item.id === jobId);
         if (job) runResumableDownload(job);
     };
+    const removeStagedFile = (job) => {
+        if (!job?.tempName || typeof navigator.storage?.getDirectory !== "function") return;
+        navigator.storage.getDirectory()
+            .then((root) => root.removeEntry(job.tempName))
+            .catch((error) => console.warn("Could not remove temporary download file:", error));
+    };
     const removeDownload = (jobId) => {
         downloadControllersRef.current.get(jobId)?.abort();
         downloadControllersRef.current.delete(jobId);
-        const next = downloadJobsRef.current.filter((job) => job.id !== jobId);
+        const job = downloadJobsRef.current.find((item) => item.id === jobId);
+        removeStagedFile(job);
+        const next = downloadJobsRef.current.filter((item) => item.id !== jobId);
         downloadJobsRef.current = next;
         setDownloadJobs(next);
         removeResumableDownload(jobId).catch((error) => console.warn("Could not remove download task:", error));
     };
     const clearCompletedDownloads = () => {
-        downloadJobsRef.current.filter((job) => job.status === "completed" || job.status === "error").forEach((job) => removeResumableDownload(job.id).catch(() => {
-        }));
+        downloadJobsRef.current.filter((job) => job.status === "completed" || job.status === "error").forEach((job) => {
+            removeStagedFile(job);
+            removeResumableDownload(job.id).catch(() => {
+            });
+        });
         const next = downloadJobsRef.current.filter((job) => job.status !== "completed" && job.status !== "error");
         downloadJobsRef.current = next;
         setDownloadJobs(next);
@@ -411,8 +524,70 @@ export default function DashboardPage() {
             return;
         }
 
-        // File System Access API lets us commit verified byte ranges to disk as they
-        // arrive, so multi-gigabyte downloads do not need to fit in browser memory.
+        // Prefer MEGA-style staging: download into the browser's private origin storage,
+        // then trigger the user's actual browser download only after every byte is verified.
+        if (typeof navigator.storage?.getDirectory === "function") {
+            try {
+                const linkResponse = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(fileId))}/public-link`, {
+                    method: "POST", headers: {Authorization: `Bearer ${token}`},
+                });
+                const linkData = await linkResponse.json().catch(() => ({}));
+                if (!linkResponse.ok) {
+                    if (linkResponse.status === 401) {
+                        localStorage.removeItem("token");
+                        navigate("/");
+                        return;
+                    }
+                    throw new Error(linkData.detail || "Failed to prepare the download.");
+                }
+                if (!linkData.public_token) throw new Error("The server did not return a download token.");
+
+                const url = `${API_URL}/public/download/${encodeURIComponent(linkData.public_token)}`;
+                const head = await fetch(url, {method: "HEAD"});
+                if (!head.ok) throw new Error(`Could not prepare download (${head.status}).`);
+                const total = Number(head.headers.get("content-length") || files.find((item) => String(item.id) === String(fileId))?.size || 0);
+                const estimate = await navigator.storage.estimate().catch(() => ({}));
+                if (total > 0 && Number.isFinite(estimate.quota) && Number.isFinite(estimate.usage) && estimate.quota - estimate.usage < total) {
+                    throw new Error("There is not enough browser temporary storage to stage this file. Free up disk space and try again.");
+                }
+                await navigator.storage.persist().catch(() => false);
+
+                const tempName = `storelimitless-${crypto.randomUUID()}.download`;
+                const root = await navigator.storage.getDirectory();
+                const tempHandle = await root.getFileHandle(tempName, {create: true});
+                const writer = await tempHandle.createWritable();
+                await writer.truncate(0);
+                await writer.close();
+
+                const file = files.find((item) => String(item.id) === String(fileId));
+                const job = {
+                    id: crypto.randomUUID(),
+                    fileId: String(fileId),
+                    name: file?.name || "download",
+                    tempName,
+                    url,
+                    total,
+                    etag: head.headers.get("etag") || "",
+                    transferred: 0,
+                    status: "paused",
+                    message: "Queued",
+                    createdAt: Date.now(),
+                };
+                const next = [job, ...downloadJobsRef.current];
+                downloadJobsRef.current = next;
+                setDownloadJobs(next);
+                await saveResumableDownload(job);
+                runResumableDownload(job);
+                return;
+            } catch (error) {
+                console.error("Could not stage download in browser storage:", error);
+                alert(error.message || "Could not prepare the download.");
+                return;
+            }
+        }
+
+        // Browsers without OPFS fall back to the existing resumable save-file flow.
+        // File System Access API lets us commit verified byte ranges to the chosen file.
         if (typeof window.showSaveFilePicker === "function") {
             let handle;
             try {
@@ -533,13 +708,7 @@ export default function DashboardPage() {
             }
             if (!data.public_token) throw new Error("The server did not return a public link.");
 
-            const params = new URLSearchParams({
-                name: file.name || "Untitled",
-                public_token: data.public_token,
-            });
-            const kind = getFileKind(file.name);
-            if (kind) params.set("kind", kind);
-            const url = new URL(`/view/${encodeURIComponent(String(file.id))}?${params.toString()}`, window.location.origin).toString();
+            const url = new URL(`/view/${encodeURIComponent(data.public_token)}`, window.location.origin).toString();
 
             setShareDialog({name: file.name, url, loading: false, error: ""});
         } catch (error) {
@@ -637,13 +806,40 @@ export default function DashboardPage() {
             }
             if (!data.public_token) throw new Error("The server did not return a ZIP download token.");
 
-            const anchor = document.createElement("a");
+            if (typeof navigator.storage?.getDirectory !== "function") {
+                throw new Error("This browser does not support staged downloads. Use a recent Chromium-based browser.");
+            }
+            if (typeof navigator.storage.persist === "function") {
+                await navigator.storage.persist().catch(() => false);
+            }
+
             const filenameQuery = new URLSearchParams({filename: downloadName}).toString();
-            anchor.href = `${API_URL}/public/download-zip/${encodeURIComponent(data.public_token)}?${filenameQuery}`;
-            anchor.rel = "noreferrer";
-            document.body.appendChild(anchor);
-            anchor.click();
-            anchor.remove();
+            const url = `${API_URL}/public/download-zip/${encodeURIComponent(data.public_token)}?${filenameQuery}`;
+            const root = await navigator.storage.getDirectory();
+            const tempName = `storelimitless-zip-${crypto.randomUUID()}.download`;
+            const tempHandle = await root.getFileHandle(tempName, {create: true});
+            const writer = await tempHandle.createWritable();
+            await writer.truncate(0);
+            await writer.close();
+
+            const job = {
+                id: crypto.randomUUID(),
+                name: downloadName,
+                tempName,
+                streamOnly: true,
+                url,
+                total: 0,
+                etag: "",
+                transferred: 0,
+                status: "paused",
+                message: "Queued",
+                createdAt: Date.now(),
+            };
+            const next = [job, ...downloadJobsRef.current];
+            downloadJobsRef.current = next;
+            setDownloadJobs(next);
+            await saveResumableDownload(job);
+            runResumableDownload(job);
         } catch (error) {
             console.error("ZIP download failed:", error);
             alert(error.message || "Failed to download the selected files as a ZIP.");

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 
 const DATA_CENTERS = ["Discord", "Telegram"];
 
@@ -10,6 +11,9 @@ export default function UploadPage() {
     const [progress, setProgress] = useState(0);
     const [status, setStatus] = useState("idle");
     const [dragOver, setDragOver] = useState(false);
+    const [searchParams] = useSearchParams();
+
+    const directory = searchParams.get("directory") || "";
 
     const handleUpload = async () => {
         if (!file || !dataCenter) return;
@@ -19,6 +23,7 @@ export default function UploadPage() {
         const formData = new FormData();
         formData.append("file", file);
         formData.append("data_center", dataCenter);
+        formData.append("directory", directory);
 
         try {
             const res = await fetch("http://127.0.0.1:8000/auth/upload", {

@@ -1,3 +1,4 @@
+aiohttp
 bcrypt==4.0.1
 discord-py
 fastapi[all]
@@ -12,3 +13,4 @@ python-jose
 python-telegram-bot
 requests
 uvicorn
+

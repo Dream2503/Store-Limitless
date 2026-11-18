@@ -3,8 +3,8 @@ from base64 import b64encode
 from aiohttp import ClientSession
 
 from backend.database import github_cursor_get_repo_id, github_cursor_get_used, github_cursor_increment_repo_id, github_cursor_set_used
-from core.data_center import ConfigMeta, DataCenter
 from core.config import getenv
+from core.data_center import ConfigMeta, DataCenter
 from core.utils import write_log
 
 

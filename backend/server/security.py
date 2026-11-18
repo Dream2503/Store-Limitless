@@ -18,8 +18,8 @@ def verify_password(password: str, hashed_password: str) -> bool:
     return pwd_context.verify(password, hashed_password)
 
 
-def create_public_stream_token(fid: int, uid: int) -> str:
-    payload = {"fid": fid, "uid": uid}
+def create_public_stream_token(file_id: int, username: str) -> str:
+    payload = {"file_id": file_id, "username": username}
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     encoded_payload = base64.urlsafe_b64encode(payload_bytes).rstrip(b"=")
     signature = hmac.new(SECRET_KEY.encode(), encoded_payload, hashlib.sha256).digest()
@@ -39,7 +39,7 @@ def verify_public_stream_token(token: str) -> dict[str, int]:
         payload = base64.urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4))
         data = json.loads(payload)
 
-        if not isinstance(data["fid"], int) or not isinstance(data["uid"], int):
+        if not isinstance(data["file_id"], int) or not isinstance(data["username"], str):
             raise ValueError("Invalid payload")
 
         return data

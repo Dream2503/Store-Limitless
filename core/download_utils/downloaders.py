@@ -15,7 +15,7 @@ from core.utils import write_log
 
 async def download_google_drive(file: File, link: str) -> AsyncGenerator[float | int, None]:
     data_center: type[DataCenter] = DataCenter(file.data_center)
-    write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Starting download: {link}")
+    write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Starting download: {link}")
 
     try:
         loop = asyncio.get_running_loop()
@@ -32,7 +32,7 @@ async def download_google_drive(file: File, link: str) -> AsyncGenerator[float |
             value: float = round((downloaded / total) * 100, 2)
 
             if value >= next_log:
-                write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Google Drive download ({value:.1f}%)")
+                write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Google Drive download ({value:.1f}%)")
                 next_log += 10
 
             if value >= next_yield:
@@ -62,21 +62,21 @@ async def download_google_drive(file: File, link: str) -> AsyncGenerator[float |
         if not isinstance(downloaded, str):
             raise OSError("Google Drive download failed")
 
-        file.fname = Path(downloaded).name
-        target_path: Path = TRANSFER_PATH / file.fname
+        file.name = Path(downloaded).name
+        target_path: Path = TRANSFER_PATH / file.name
         Path(downloaded).replace(target_path)
-        write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Google Drive download complete `{file.fname}`")
+        write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Google Drive download complete `{file.name}`")
 
         async for progress in upload(file):
             yield progress
 
     except Exception as e:
-        write_log("ERROR", data_center, "DOWNLOAD", str(file.uid), f"Unhandled exception: {e}\n{format_exc()}")
+        write_log("ERROR", data_center, "DOWNLOAD", str(file.username), f"Unhandled exception: {e}\n{format_exc()}")
 
 
 async def download_torrent(file: File, link: str) -> AsyncGenerator[float | int, None]:
     data_center: type[DataCenter] = DataCenter(file.data_center)
-    write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Starting torrent download: {link}")
+    write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Starting torrent download: {link}")
 
     try:
         loop = asyncio.get_running_loop()
@@ -113,7 +113,7 @@ async def download_torrent(file: File, link: str) -> AsyncGenerator[float | int,
                     continue
 
                 if value >= next_log:
-                    write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Torrent download ({value:.1f}%)")
+                    write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Torrent download ({value:.1f}%)")
                     next_log += 10
 
                 if value >= next_yield:
@@ -143,18 +143,18 @@ async def download_torrent(file: File, link: str) -> AsyncGenerator[float | int,
         if torrent_info.num_files() != 1:
             raise OSError("Only single-file torrents are supported")
 
-        file.fname = Path(torrent_info.layout().file_path(0)).name
+        file.name = Path(torrent_info.layout().file_path(0)).name
 
-        target_path: Path = TRANSFER_PATH / file.fname
+        target_path: Path = TRANSFER_PATH / file.name
         downloaded_path: Path = TRANSFER_PATH / torrent_info.layout().file_path(0)
 
         if downloaded_path != target_path:
             downloaded_path.replace(target_path)
 
-        write_log("INFO", data_center, "DOWNLOAD", str(file.uid), f"Torrent download complete `{file.fname}`")
+        write_log("INFO", data_center, "DOWNLOAD", str(file.username), f"Torrent download complete `{file.name}`")
 
         async for progress in upload(file):
             yield progress
 
     except Exception as e:
-        write_log("ERROR", data_center, "DOWNLOAD", str(file.uid), f"Unhandled exception: {e}\n{format_exc()}")
+        write_log("ERROR", data_center, "DOWNLOAD", str(file.username), f"Unhandled exception: {e}\n{format_exc()}")

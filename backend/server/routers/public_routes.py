@@ -317,6 +317,7 @@ def _safe_zip_download_filename(value: str | None) -> str:
     return filename
 
 
+@router.head("/download-zip/{token}")
 @router.get("/download-zip/{token}")
 async def public_zip_download(
         token: str,
@@ -587,6 +588,16 @@ async def public_zip_download(
     }
     if partial:
         headers["Content-Range"] = f"bytes {range_start}-{range_end}/{archive_length}"
+
+    # The in-browser staging fallback verifies the archive size and ETag before
+    # requesting byte ranges. HEAD must return the same metadata without streaming
+    # any file bytes so browsers without OPFS can use the same resumable queue.
+    if request.method == "HEAD":
+        return Response(
+            status_code=206 if partial else 200,
+            headers=headers,
+            media_type="application/zip",
+        )
 
     async def stream_zip_range():
         """Replay the deterministic archive and emit only the requested byte range."""

@@ -96,13 +96,13 @@ export default function useDashboardData(currentFolder, navigate) {
 
         try {
             const metadata = await getJSON(`${API_URL}/auth/metadata`, token);
+            if (getToken() !== token) return;
             const total = Number(metadata?.storage_used_bytes);
             if (Number.isFinite(total) && total >= 0) setStorageUsed(total);
         } catch (error) {
             if (error.status === 401) {
                 clearDashboardTreeCache(token);
-                endAuthSession();
-                navigateRef.current("/");
+                if (getToken() === token && endAuthSession(token)) navigateRef.current("/");
                 return;
             }
             // Metadata must not prevent the cached file tree from being browsed.
@@ -144,6 +144,7 @@ export default function useDashboardData(currentFolder, navigate) {
                 // The backend returns active and trashed files/folders together,
                 // along with storage usage. This replaces a request per directory.
                 const treeData = await getJSON(`${API_URL}/auth/tree`, token);
+                if (getToken() !== token) return;
                 const directoryData = treeData?.directories ?? treeData?.folders;
                 const fileData = treeData?.files;
 
@@ -189,8 +190,7 @@ export default function useDashboardData(currentFolder, navigate) {
                 if (requestVersion === treeVersionRef.current) {
                     if (error.status === 401) {
                         clearDashboardTreeCache(token);
-                        endAuthSession();
-                        navigateRef.current("/");
+                        if (getToken() === token && endAuthSession(token)) navigateRef.current("/");
                         return;
                     }
                     console.error("Failed to fetch the complete file tree:", error);

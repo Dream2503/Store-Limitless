@@ -821,8 +821,7 @@ export default function DashboardPage({active = true} = {}) {
                 if (getToken() !== token) return;
                 if (!linkResponse.ok) {
                     if (linkResponse.status === 401) {
-                        endAuthSession();
-                        navigate("/");
+                        if (getToken() === token && endAuthSession(token)) navigate("/");
                         return;
                     }
                     throw new Error(linkData.detail || "Failed to prepare the download.");
@@ -895,84 +894,8 @@ export default function DashboardPage({active = true} = {}) {
             }
         }
 
-        // Browsers without OPFS fall back to the existing resumable save-file flow.
-        // File System Access API lets us commit verified byte ranges to the chosen file.
-        if (typeof window.showSaveFilePicker === "function") {
-            let handle;
-            try {
-                const file = files.find((item) => String(item.id) === String(fileId));
-                handle = await window.showSaveFilePicker({suggestedName: file?.name || "download"});
-                if (getToken() !== token) return;
-            } catch (error) {
-                if (error?.name === "AbortError") return;
-                console.warn("Save picker unavailable; falling back to browser download:", error);
-            }
-
-            if (handle) {
-                try {
-                    const response = await fetch(`${API_URL}/auth/file/${fileId}/download-link`, {
-                        method: "POST", headers: {Authorization: `Bearer ${token}`},
-                    });
-                    if (getToken() !== token) return;
-                    const data = await response.json().catch(() => ({}));
-                    if (getToken() !== token) return;
-                    if (!response.ok) {
-                        if (response.status === 401) {
-                            endAuthSession();
-                            navigate("/");
-                            return;
-                        }
-                        throw new Error(data.detail || "Failed to prepare the download.");
-                    }
-                    if (!data.public_token) throw new Error("The server did not return a download token.");
-                    const url = `${API_URL}/public/download/${data.public_token}`;
-                    const head = await fetch(url, {method: "HEAD"});
-                    if (getToken() !== token) return;
-                    if (!head.ok) throw new Error(`Could not prepare download (${head.status}).`);
-                    const total = Number(head.headers.get("content-length") || file?.size || 0);
-                    const writable = await handle.createWritable();
-                    await writable.truncate(0);
-                    await writable.close();
-                    if (getToken() !== token) return;
-                    const job = {
-                        id: createUniqueId(),
-                        fileId: String(fileId),
-                        name: file?.name || handle.name || "download",
-                        handle,
-                        url,
-                        total,
-                        etag: head.headers.get("etag") || "",
-                        transferred: 0,
-                        status: "paused",
-                        message: "Queued",
-                        createdAt: Date.now(),
-                    };
-                    if (getToken() !== token) {
-                        removeStagedFile(job);
-                        return;
-                    }
-                    const next = [job, ...downloadJobsRef.current];
-                    downloadJobsRef.current = next;
-                    setDownloadJobs(next);
-                    await saveResumableDownload(job);
-                    if (getToken() !== token) {
-                        removeStagedFile(job);
-                        removeResumableDownload(job.id).catch(() => {});
-                        removeResumableDownloadChunks(job.id).catch(() => {});
-                        return;
-                    }
-                    runResumableDownload(job, token);
-                    return;
-                } catch (error) {
-                    console.error("Could not start resumable download:", error);
-                    alert(error.message || "Could not start the download.");
-                    return;
-                }
-            }
-        }
-
-        // Last-resort fallback for browsers without OPFS or a save-file picker.
-        // Keep the transfer in the Downloads tray and delay the browser save until it is complete.
+        // Without OPFS, stage verified byte ranges in IndexedDB, keep progress in the Downloads tray,
+        // and start the browser save only after the complete file has been verified.
         try {
             const response = await fetch(`${API_URL}/auth/file/${encodeURIComponent(String(fileId))}/download-link`, {
                 method: "POST", headers: {Authorization: `Bearer ${token}`},
@@ -982,8 +905,7 @@ export default function DashboardPage({active = true} = {}) {
             if (getToken() !== token) return;
             if (!response.ok) {
                 if (response.status === 401) {
-                    endAuthSession();
-                    navigate("/");
+                    if (getToken() === token && endAuthSession(token)) navigate("/");
                     return;
                 }
                 throw new Error(data.detail || "Failed to prepare the download.");
@@ -1000,7 +922,7 @@ export default function DashboardPage({active = true} = {}) {
                 transferred: 0,
                 status: "paused",
                 blobFallback: true,
-                message: "Queued · browser storage staging is unavailable",
+                message: "Queued · staging in browser storage",
                 createdAt: Date.now(),
             };
             if (getToken() !== token) {
@@ -1049,9 +971,10 @@ export default function DashboardPage({active = true} = {}) {
 
             if (!response.ok) {
                 if (response.status === 401) {
-                    endAuthSession();
-                    setShareDialog(null);
-                    navigate("/");
+                    if (getToken() === token && endAuthSession(token)) {
+                        setShareDialog(null);
+                        navigate("/");
+                    }
                     return;
                 }
                 throw new Error(data.detail || "Could not create a share link.");
@@ -1153,24 +1076,50 @@ export default function DashboardPage({active = true} = {}) {
             if (getToken() !== token) return;
             if (!response.ok) {
                 if (response.status === 401) {
-                    endAuthSession();
-                    navigate("/");
+                    if (getToken() === token && endAuthSession(token)) navigate("/");
                     return;
                 }
                 throw new Error(data.detail || "Could not prepare the ZIP download.");
             }
             if (!data.public_token) throw new Error("The server did not return a ZIP download token.");
 
+            const archiveName = downloadName.toLowerCase().endsWith(".zip") ? downloadName : `${downloadName}.zip`;
+            const filenameQuery = new URLSearchParams({filename: archiveName}).toString();
+            const url = `${API_URL}/public/download-zip/${encodeURIComponent(data.public_token)}?${filenameQuery}`;
+
             if (typeof navigator.storage?.getDirectory !== "function") {
-                throw new Error("This browser does not support staged downloads. Use a recent Chromium-based browser.");
+                // Use the same in-app resumable staging queue as ordinary files.
+                // Only start the browser download once every ZIP byte is stored.
+                const job = {
+                    id: createUniqueId(),
+                    name: archiveName,
+                    url,
+                    total: 0,
+                    etag: "",
+                    transferred: 0,
+                    status: "paused",
+                    blobFallback: true,
+                    message: "Queued · staging in browser storage",
+                    createdAt: Date.now(),
+                };
+                if (getToken() !== token) return;
+                const next = [job, ...downloadJobsRef.current];
+                downloadJobsRef.current = next;
+                setDownloadJobs(next);
+                await saveResumableDownload(job);
+                if (getToken() !== token) {
+                    removeResumableDownload(job.id).catch(() => {});
+                    removeResumableDownloadChunks(job.id).catch(() => {});
+                    return;
+                }
+                runResumableDownload(job, token);
+                return;
             }
             if (typeof navigator.storage.persist === "function") {
                 await navigator.storage.persist().catch(() => false);
                 if (getToken() !== token) return;
             }
 
-            const filenameQuery = new URLSearchParams({filename: downloadName}).toString();
-            const url = `${API_URL}/public/download-zip/${encodeURIComponent(data.public_token)}?${filenameQuery}`;
             const root = await navigator.storage.getDirectory();
             if (getToken() !== token) return;
             const tempName = `storelimitless-zip-${createUniqueId()}.download`;
@@ -1189,7 +1138,7 @@ export default function DashboardPage({active = true} = {}) {
 
             const job = {
                 id: createUniqueId(),
-                name: downloadName,
+                name: archiveName,
                 tempName,
                 streamOnly: true,
                 url,

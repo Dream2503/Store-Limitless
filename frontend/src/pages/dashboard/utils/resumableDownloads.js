@@ -107,3 +107,59 @@ export const removeResumableDownloadChunksFrom = (downloadId, offset) => withSto
         return request;
     },
 );
+
+
+/*
+ * Serialize every download started by StoreLimitless. Dashboard and file-view
+ * downloads share this queue so only one transfer can write staged data at once.
+ */
+let activeDownloadTaskId = null;
+const queuedDownloadTasks = [];
+
+/** Start one queued transfer and advance the FIFO queue after it settles. */
+function startQueuedDownloadTask(task) {
+    activeDownloadTaskId = task.id;
+    void (async () => {
+        try {
+            await task.run();
+        } catch (error) {
+            console.error("Download task failed unexpectedly:", error);
+        } finally {
+            if (activeDownloadTaskId === task.id) activeDownloadTaskId = null;
+            const nextTask = queuedDownloadTasks.shift();
+            if (nextTask) startQueuedDownloadTask(nextTask);
+        }
+    })();
+}
+
+/**
+ * Add a download to the shared FIFO queue.
+ * @param {string} id
+ * @param {() => Promise<void>} run
+ * @returns {"started" | "queued" | "existing"}
+ */
+export function enqueueDownloadTask(id, run) {
+    const taskId = String(id);
+    if (activeDownloadTaskId === taskId || queuedDownloadTasks.some((task) => task.id === taskId)) {
+        return "existing";
+    }
+
+    const task = {id: taskId, run};
+    if (activeDownloadTaskId === null) {
+        startQueuedDownloadTask(task);
+        return "started";
+    }
+
+    queuedDownloadTasks.push(task);
+    return "queued";
+}
+
+/** Remove a task that has not started; active work must abort and settle normally. */
+export function cancelQueuedDownloadTask(id) {
+    const taskId = String(id);
+    const previousLength = queuedDownloadTasks.length;
+    for (let index = queuedDownloadTasks.length - 1; index >= 0; index -= 1) {
+        if (queuedDownloadTasks[index].id === taskId) queuedDownloadTasks.splice(index, 1);
+    }
+    return queuedDownloadTasks.length !== previousLength;
+}

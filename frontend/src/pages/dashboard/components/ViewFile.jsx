@@ -731,8 +731,7 @@ export default function ViewFile({active = true} = {}) {
                 );
                 const data = await response.json().catch(() => ({}));
                 if (response.status === 401) {
-                    endAuthSession();
-                    navigate("/");
+                    if (getToken() === sessionToken && endAuthSession(sessionToken)) navigate("/");
                     return;
                 }
                 if (!response.ok) throw new Error(data.detail || "Could not load this file's metadata.");
@@ -831,8 +830,11 @@ export default function ViewFile({active = true} = {}) {
                 });
                 const data = await response.json().catch(() => ({}));
                 if (response.status === 401) {
-                    endAuthSession();
-                    throw new Error("Your session has expired. Sign in again to download this file.");
+                    if (getToken() === sessionToken) {
+                        endAuthSession(sessionToken);
+                        throw new Error("Your session has expired. Sign in again to download this file.");
+                    }
+                    return;
                 }
                 if (!response.ok) throw new Error(data.detail || "Could not prepare the download.");
                 if (!data.public_token) throw new Error("The server did not return a download token.");
@@ -1355,8 +1357,7 @@ export default function ViewFile({active = true} = {}) {
                     method: "POST", headers: {Authorization: `Bearer ${token}`},
                 });
                 if (response.status === 401) {
-                    endAuthSession();
-                    navigate("/");
+                    if (getToken() === token && endAuthSession(token)) navigate("/");
                     return;
                 }
                 const data = await response.json();

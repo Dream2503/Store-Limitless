@@ -60,19 +60,24 @@ export function formatFileSize(bytes) {
     return `${(value / (1000 ** index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
-/** Browser event emitted whenever the authenticated session ends. */
+/** Browser events emitted when an authenticated session starts or ends. */
 export const AUTH_SESSION_START_EVENT = "storelimitless:session-started";
 export const AUTH_SESSION_END_EVENT = "storelimitless:session-ended";
 
 /** Revoke server-issued private links, clear the browser session, and cancel private work. */
-export function endAuthSession() {
-    const token = localStorage.getItem("token");
-    if (token && typeof fetch === "function") {
+export function endAuthSession(expectedToken) {
+    const currentToken = localStorage.getItem("token");
+
+    // An old request can finish after a new login. It must never revoke or clear
+    // the newer session just because the previous token received a 401 response.
+    if (expectedToken && currentToken !== expectedToken) return false;
+
+    if (currentToken && typeof fetch === "function") {
         // Start revocation before clearing the bearer token. keepalive lets the small
         // request finish even if the browser navigates immediately after sign-out.
         void fetch(`${API_URL}/auth/logout`, {
             method: "POST",
-            headers: {Authorization: `Bearer ${token}`},
+            headers: {Authorization: `Bearer ${currentToken}`},
             cache: "no-store",
             keepalive: true,
         }).then((response) => {
@@ -86,6 +91,7 @@ export function endAuthSession() {
     if (typeof window !== "undefined") {
         window.dispatchEvent(new Event(AUTH_SESSION_END_EVENT));
     }
+    return true;
 }
 
 /** Read the current bearer token from browser storage. */

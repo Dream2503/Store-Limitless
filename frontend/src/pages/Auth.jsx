@@ -1,6 +1,7 @@
 import {useEffect, useState} from "react";
 import {Link, useNavigate} from "react-router-dom";
 import {API_URL} from "../api.js";
+import {AUTH_SESSION_START_EVENT} from "./dashboard/utils.js";
 
 /**
  * @typedef {Object} AuthFormData
@@ -67,6 +68,7 @@ export default function Auth({initialMode = "login"}) {
             if (isLogin) {
                 const [loginData] = data;
                 localStorage.setItem("token", loginData.access_token);
+                window.dispatchEvent(new Event(AUTH_SESSION_START_EVENT));
                 navigate("/home");
             } else {
                 setIsLogin(true);

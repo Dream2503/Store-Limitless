@@ -15,9 +15,11 @@ export default function DashboardContextMenu({menu, onClose, onAction, multipleS
 
     let items;
     if (menu.kind === "background") {
-        items = [{id: "create-folder", label: "Create folder", icon: "create_new_folder"}, {
-            id: "upload", label: "Upload files", icon: "cloud_upload"
-        },];
+        items = [
+            ...(menu.canPaste ? [{id: "paste", label: "Paste", icon: "content_paste"}] : []),
+            {id: "create-folder", label: "Create folder", icon: "create_new_folder"},
+            {id: "upload", label: "Upload files", icon: "cloud_upload"},
+        ];
     } else if (menu.item?.is_deleted) {
         items = [
             {id: "restore", label: "Restore", icon: "restore"},

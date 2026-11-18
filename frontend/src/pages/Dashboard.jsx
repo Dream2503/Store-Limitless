@@ -843,7 +843,11 @@ export default function DashboardPage({active = true} = {}) {
             && actionItems.length > 0
             && actionItems.every((item) => item && ["file", "folder"].includes(item.type) && !item.is_deleted)
             && (multiSelection || actionItems.some((item) => item.type === "folder"));
-        const menuItemCount = payload.kind === "background" ? 2
+        const canPaste = payload.kind === "background"
+            && Boolean(clipboard)
+            && activeTab !== "trash"
+            && !searchQuery.trim();
+        const menuItemCount = payload.kind === "background" ? 2 + (canPaste ? 1 : 0)
             : payload.item?.is_deleted ? 3
                 : multiSelection ? 3 + (canDownloadZip ? 1 : 0)
                     : payload.item?.type === "folder" ? 4 + (canDownloadZip ? 1 : 0) : 6;
@@ -851,6 +855,7 @@ export default function DashboardPage({active = true} = {}) {
         setContextMenu({
             ...payload,
             canDownloadZip,
+            canPaste,
             x: Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8)),
             y: Math.max(8, Math.min(y, window.innerHeight - menuHeight - 8)),
         });
@@ -1007,6 +1012,18 @@ export default function DashboardPage({active = true} = {}) {
         }
         if (action === "create-folder") {
             setShowFolderModal(true);
+            return;
+        }
+        if (action === "paste") {
+            if (
+                menu.kind !== "background"
+                || !clipboard
+                || activeTab === "trash"
+                || searchQuery.trim()
+            ) return;
+            setPasteDataCenter(clipboard.dataCenter || "Discord");
+            setPasteError("");
+            setPasteDialogOpen(true);
             return;
         }
 

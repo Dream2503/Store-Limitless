@@ -14,7 +14,7 @@ export default function UploadTrayPage() {
     const returnTo = typeof location.state?.returnTo === "string" && location.state.returnTo.startsWith("/home") ? location.state.returnTo : "/home";
 
     return <UploadJobsTray
-        fullScreen
+        fullscreen
         uploadJobs={uploadJobs}
         cancelUploadJob={cancelUploadJob}
         dismissUploadJob={dismissUploadJob}

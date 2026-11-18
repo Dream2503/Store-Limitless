@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import {useNavigate, useParams, useSearchParams} from "react-router-dom";
 import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
-import DownloadJobsTray from "./DownloadJobsTray.jsx";
+import UploadJobsTray from "./UploadJobsTray.jsx";
 import {createUniqueId, getFileKind} from "../utils.js";
 
 /**
@@ -933,6 +933,6 @@ export default function ViewFile() {
                         </div>
                     </div>)}
         </main>
-        <DownloadJobsTray jobs={downloadTrayJobs} readOnly/>
+        <UploadJobsTray uploadJobs={[]} downloadJobs={downloadTrayJobs} readOnlyDownloads/>
     </div>);
 }

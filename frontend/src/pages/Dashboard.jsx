@@ -10,7 +10,6 @@ import ItemDetailsModal from "./dashboard/components/ItemDetailsModal.jsx";
 import DashboardContextMenu from "./dashboard/components/DashboardContextMenu.jsx";
 import DashboardWorkspace from "./dashboard/components/DashboardWorkspace.jsx";
 import UploadJobsTray from "./dashboard/components/UploadJobsTray.jsx";
-import DownloadJobsTray from "./dashboard/components/DownloadJobsTray.jsx";
 import {listResumableDownloads, removeResumableDownload, saveResumableDownload} from "./dashboard/utils/resumableDownloads.js";
 import BulkActionConfirmModal from "./dashboard/components/BulkActionConfirmModal.jsx";
 import useDashboardData, {clearDashboardTreeCache} from "./dashboard/hooks/useDashboardData.js";
@@ -2809,14 +2808,11 @@ export default function DashboardPage() {
             cancelUploadJob={cancelUploadJob}
             dismissUploadJob={dismissUploadJob}
             clearAllUploadJobs={clearAllUploadJobs}
-        />
-
-        <DownloadJobsTray
-            jobs={downloadJobs}
-            onPause={pauseDownload}
-            onResume={resumeDownload}
-            onRemove={removeDownload}
-            onClearCompleted={clearCompletedDownloads}
+            downloadJobs={downloadJobs}
+            pauseDownload={pauseDownload}
+            resumeDownload={resumeDownload}
+            removeDownload={removeDownload}
+            clearCompletedDownloads={clearCompletedDownloads}
         />
 
         {zipDownloadPrompt && (<div

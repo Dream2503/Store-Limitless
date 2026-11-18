@@ -240,6 +240,7 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, Any] = Body(...),
                 **({"file_index": int(item["file_index"])} if "file_index" in item else {}),
                 **({"transfer": max(0, int(item.get("transfer") or 0))} if "transfer" in item else {}),
                 **({"total": max(0, int(item.get("total") or 0))} if "total" in item else {}),
+                **({"progress": max(0.0, min(100.0, float(item.get("progress") or 0)))} if "progress" in item else {}),
             }
             for item in items_payload if isinstance(item, dict)
         ]
@@ -284,6 +285,37 @@ async def patch_upload_batch(batch_id: str, payload: dict[str, Any] = Body(...),
         if 0 <= item_index < len(items):
             items[item_index]["status"] = item_status
             items[item_index]["message"] = str(payload.get("item_message") or item_status.title())[:300]
+
+            if "item_transfer" in payload:
+                try:
+                    items[item_index]["transfer"] = max(0, int(payload.get("item_transfer") or 0))
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=422, detail="Invalid upload item transfer")
+
+            if "item_total" in payload:
+                try:
+                    items[item_index]["total"] = max(0, int(payload.get("item_total") or 0))
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=422, detail="Invalid upload item total")
+
+            if "item_progress" in payload:
+                try:
+                    item_progress = float(payload.get("item_progress") or 0)
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=422, detail="Invalid upload item progress")
+                updates_item_progress = max(0.0, min(100.0, item_progress))
+                items[item_index]["progress"] = updates_item_progress
+
+            if item_status == "completed":
+                completed_size = max(
+                    0,
+                    int(items[item_index].get("size") or 0),
+                    int(items[item_index].get("total") or 0),
+                )
+                items[item_index]["total"] = completed_size
+                items[item_index]["transfer"] = completed_size
+                items[item_index]["progress"] = 100.0
+
             updates["items"] = items
 
     if status == "error":
@@ -509,6 +541,8 @@ async def get_upload_job_status(job_id: str, user: User = Depends(get_current_us
             "name": str(metadata.get("name") or progress.name or "Upload"),
             "status": resolve_upload_job_status(message, metadata),
             "message": message,
+            "transfer": max(0, int(progress.transfer or 0)),
+            "total": max(0, int(progress.total or metadata.get("total") or 0)),
         })
 
     terminal: Any = await Redis.get_json(terminal_upload_job_key(job_id))

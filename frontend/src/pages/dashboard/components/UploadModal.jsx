@@ -112,7 +112,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      * @param {string} token
      * @returns {Promise<void>}
      */
-    const waitForJobCompletion = async (jobId, token, cancelToken = null) => {
+    const waitForJobCompletion = async (jobId, token, cancelToken = null, onProgress = null) => {
         let delay = 500;
 
         while (true) {
@@ -159,6 +159,8 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                 throw statusError;
             }
 
+            if (typeof onProgress === "function") onProgress(job);
+
             if (job.status === "completed") return;
             if (job.status === "cancelled") throw new Error(`${job.name || "Upload"} was cancelled.`);
             if (job.status === "error") throw new Error(job.message || `${job.name || "Upload"} failed.`);
@@ -180,7 +182,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      * @param {Set<XMLHttpRequest>} jobXhrs
      * @returns {Promise<void>}
      */
-    const sendChunk = (jobId, blob, offset, totalSize, jobXhrs) => new Promise((resolve, reject) => {
+    const sendChunk = (jobId, blob, offset, totalSize, jobXhrs, onProgress = null) => new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         jobXhrs.add(xhr);
 
@@ -189,6 +191,12 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         xhr.open("PUT", `${API_URL}/public/upload/${jobId}/chunk?offset=${offset}&total=${totalSize}`);
         xhr.setRequestHeader("Authorization", `Bearer ${localStorage.getItem("token")}`);
         xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+        if (typeof onProgress === "function") {
+            xhr.upload.onprogress = (event) => {
+                if (event.lengthComputable) onProgress(Math.min(blob.size, Math.max(0, event.loaded)));
+            };
+        }
 
         xhr.onload = () => {
             done();
@@ -234,13 +242,32 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
      * @param {File} selectedFile
      * @param {UploadCancelToken} cancelToken
      * @param {Set<XMLHttpRequest>} jobXhrs
+     * @param {(progress: {transfer: number, total: number, progress: number, message: string}, immediate?: boolean) => void} onProgress
      * @returns {Promise<void>}
      */
-    const uploadFileInChunks = async (jobId, selectedFile, cancelToken, jobXhrs) => {
+    const uploadFileInChunks = async (jobId, selectedFile, cancelToken, jobXhrs, onProgress = null) => {
         const totalSize = selectedFile.size;
         // An empty file still sends one (empty) chunk so the server can finish.
         const chunkCount = Math.max(1, Math.ceil(totalSize / CHUNK_SIZE));
+        const completedChunks = new Set();
+        const activeChunkProgress = new Map();
         let nextIndex = 0;
+
+        const reportProgress = (immediate = false) => {
+            const confirmedBytes = Array.from(completedChunks).reduce(
+                (sum, index) => sum + Math.min(CHUNK_SIZE, Math.max(0, totalSize - index * CHUNK_SIZE)), 0
+            );
+            const inFlightBytes = Array.from(activeChunkProgress.values()).reduce((sum, loaded) => sum + loaded, 0);
+            const transfer = Math.min(totalSize, confirmedBytes + inFlightBytes);
+            const ratio = totalSize > 0 ? transfer / totalSize : 0;
+
+            onProgress?.({
+                transfer,
+                total: totalSize,
+                progress: ratio * 50,
+                message: "Sending file to server",
+            }, immediate);
+        };
 
         // Each lane keeps taking the next unsent chunk, so chunks start in order.
         /**
@@ -263,9 +290,18 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     }
 
                     try {
-                        await sendChunk(jobId, blob, start, totalSize, jobXhrs);
+                        await sendChunk(jobId, blob, start, totalSize, jobXhrs, (loaded) => {
+                            activeChunkProgress.set(index, loaded);
+                            reportProgress();
+                        });
+                        completedChunks.add(index);
+                        activeChunkProgress.delete(index);
+                        reportProgress();
                         break;
                     } catch (error) {
+                        activeChunkProgress.delete(index);
+                        reportProgress();
+
                         if (error.fatal || cancelToken.cancelled || attempt >= MAX_CHUNK_ATTEMPTS) {
                             throw error;
                         }
@@ -277,6 +313,14 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
         };
 
         await Promise.all(Array.from({length: Math.min(PARALLEL_CHUNKS, chunkCount)}, lane));
+        // The second half of the meter represents storage-provider upload, after
+        // the browser has successfully sent every chunk to the server.
+        onProgress?.({
+            transfer: totalSize,
+            total: totalSize,
+            progress: 50,
+            message: "Sending complete · uploading to storage",
+        }, true);
     };
 
     /**
@@ -386,6 +430,63 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     throw new Error("Upload task was cancelled.");
                 }
                 return result;
+            };
+
+            // Coalesce frequent XMLHttpRequest progress events into small Redis patches.
+            // Keep writes ordered so an older progress snapshot cannot overwrite a newer one.
+            let pendingProgressUpdate = null;
+            let progressUpdateTimer = null;
+            let lastProgressUpdateAt = 0;
+            let progressUpdateChain = Promise.resolve();
+
+            const flushProgressUpdate = async () => {
+                if (!pendingProgressUpdate) return;
+                const updates = pendingProgressUpdate;
+                pendingProgressUpdate = null;
+                lastProgressUpdateAt = Date.now();
+                progressUpdateChain = progressUpdateChain.catch(() => {}).then(() => publishBatch(updates));
+                try {
+                    await progressUpdateChain;
+                } catch (error) {
+                    console.error("Could not publish upload progress:", error);
+                }
+            };
+
+            const flushPendingProgressUpdate = async () => {
+                if (progressUpdateTimer !== null) {
+                    window.clearTimeout(progressUpdateTimer);
+                    progressUpdateTimer = null;
+                }
+                await flushProgressUpdate();
+                await progressUpdateChain.catch(() => {});
+            };
+
+            const publishTransferProgress = (itemIndex, progress, immediate = false) => {
+                const total = Math.max(0, Number(progress.total) || 0);
+                const transfer = Math.max(0, Math.min(total > 0 ? total : Number.MAX_SAFE_INTEGER, Number(progress.transfer) || 0));
+                pendingProgressUpdate = {
+                    item_index: itemIndex,
+                    item_status: "uploading",
+                    item_transfer: Math.floor(transfer),
+                    item_total: Math.floor(total),
+                    item_progress: Math.max(0, Math.min(99.5, Number(progress.progress) || 0)),
+                    item_message: String(progress.message || "Uploading").slice(0, 300),
+                };
+
+                if (progressUpdateTimer !== null) {
+                    window.clearTimeout(progressUpdateTimer);
+                    progressUpdateTimer = null;
+                }
+
+                const delay = 250 - (Date.now() - lastProgressUpdateAt);
+                if (immediate || delay <= 0) {
+                    void flushProgressUpdate();
+                } else {
+                    progressUpdateTimer = window.setTimeout(() => {
+                        progressUpdateTimer = null;
+                        void flushProgressUpdate();
+                    }, delay);
+                }
             };
 
             // The tray record is persisted before any transfer begins, so it immediately
@@ -515,13 +616,29 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                     message: telegramProcessing ? "Processing Telegram message" : `Uploading ${itemNumber} of ${queueTotal}`
                 });
 
+                const publishCurrentFileProgress = (progress, immediate = false) => {
+                    if (uploadMode !== "file") return;
+                    publishTransferProgress(itemNumber - 1, progress, immediate);
+                };
+
                 if (uploadMode === "file") {
                     try {
-                        await uploadFileInChunks(jobId, selectedFile, cancelToken, batchTransfer.xhrs);
+                        await uploadFileInChunks(jobId, selectedFile, cancelToken, batchTransfer.xhrs, publishCurrentFileProgress);
+                        await flushPendingProgressUpdate();
                         if (cancelToken.cancelled) throw new Error("Upload task was cancelled.");
                         // Sending browser chunks is not enough: wait until the storage provider
                         // confirms completion before the next queued file starts.
-                        await waitForJobCompletion(jobId, token, cancelToken);
+                        await waitForJobCompletion(jobId, token, cancelToken, (child) => {
+                            const total = Math.max(0, Number(child.total) || Number(selectedFile?.size) || 0);
+                            const transfer = Math.max(0, Math.min(total, Number(child.transfer) || 0));
+                            const fraction = total > 0 ? transfer / total : 0;
+                            publishCurrentFileProgress({
+                                transfer,
+                                total,
+                                progress: 50 + fraction * 49.5,
+                                message: child.message || "Uploading to storage",
+                            });
+                        });
                     } catch (error) {
                         const wasCancelled = cancelToken.cancelled || /cancelled/i.test(error instanceof Error ? error.message : "");
                         if (!wasCancelled) {
@@ -541,6 +658,7 @@ export default function UploadPage({modal = false, targetDirectory = "", onClose
                         throw error;
                     } finally {
                         batchTransfer.activeJobId = "";
+                        await flushPendingProgressUpdate();
                     }
                 } else {
                     try {

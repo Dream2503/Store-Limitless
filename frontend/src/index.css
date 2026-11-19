@@ -463,3 +463,170 @@ html[data-theme="light"] [class*="bg-[#168452]"][class*="text-[#fafafa]"],
 html[data-theme="light"] [class*="bg-[#168452]"][class*="text-white"] {
     color: #ffffff !important;
 }
+
+
+/* --------------------------------------------------------------------------
+   Refined light-mode surfaces
+   These named surfaces cover intentional dark sections that should become
+   light, without changing video pixels or media content.
+-------------------------------------------------------------------------- */
+
+.theme-toggle {
+    border-color: #363636;
+    background: #171717;
+    color: #e7eee9;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+}
+
+html[data-theme="light"] .theme-toggle {
+    border-color: #dbe3eb;
+    background: #ffffff;
+    color: #334155;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+html[data-theme="light"] .light-theme-card {
+    border-color: #e2e8f0 !important;
+    background-color: #ffffff !important;
+    background-image: none !important;
+    color: #1f2937 !important;
+}
+
+html[data-theme="light"] .light-theme-section {
+    border-color: #e2e8f0 !important;
+    background-color: #f8fafc !important;
+    background-image: none !important;
+}
+
+html[data-theme="light"] .dashboard-location-banner {
+    border-color: #e2e8f0 !important;
+    background-color: #ffffff !important;
+    background-image: linear-gradient(110deg, #ffffff 0%, #f8fafc 58%, #ffffff 100%) !important;
+}
+
+html[data-theme="light"] [class*="bg-[#101512]"],
+html[data-theme="light"] [class*="bg-[#131a16]"],
+html[data-theme="light"] [class*="bg-[#0f1310]"],
+html[data-theme="light"] [class*="bg-[#101813]"],
+html[data-theme="light"] [class*="bg-[#090c0a]"] {
+    background-color: #f8fafc !important;
+    background-image: none !important;
+}
+
+html[data-theme="light"] [class*="bg-[#1a7751]"],
+html[data-theme="light"] [class*="bg-[#173c29]"],
+html[data-theme="light"] [class*="bg-[#1c2c22]"] {
+    background-color: #edf7f1 !important;
+}
+
+html[data-theme="light"] [class*="bg-black/"] {
+    background-color: rgba(15, 23, 42, 0.025) !important;
+}
+
+html[data-theme="light"] [class*="text-[#edf3ef]"],
+html[data-theme="light"] [class*="text-[#e4eae6]"],
+html[data-theme="light"] [class*="text-[#e7ebe8]"],
+html[data-theme="light"] [class*="text-[#d5e0d9]"],
+html[data-theme="light"] [class*="text-[#e2e8e4]"],
+html[data-theme="light"] [class*="text-[#c7d0ca]"],
+html[data-theme="light"] [class*="text-[#c4ccc7]"],
+html[data-theme="light"] [class*="text-[#b9c7be]"],
+html[data-theme="light"] [class*="text-[#b0c8b9]"],
+html[data-theme="light"] [class*="text-[#c5d8cc]"] {
+    color: #334155 !important;
+}
+
+html[data-theme="light"] [class*="text-[#8f9b93]"],
+html[data-theme="light"] [class*="text-[#96a29a]"],
+html[data-theme="light"] [class*="text-[#98a39b]"],
+html[data-theme="light"] [class*="text-[#99aaa0]"],
+html[data-theme="light"] [class*="text-[#9ba9a0]"],
+html[data-theme="light"] [class*="text-[#a3afa7]"],
+html[data-theme="light"] [class*="text-[#849088]"],
+html[data-theme="light"] [class*="text-[#87938b]"],
+html[data-theme="light"] [class*="text-[#819088]"],
+html[data-theme="light"] [class*="text-[#77837a]"],
+html[data-theme="light"] [class*="text-[#718078]"],
+html[data-theme="light"] [class*="text-[#768279]"],
+html[data-theme="light"] [class*="text-[#647169]"],
+html[data-theme="light"] [class*="text-[#7d8983]"],
+html[data-theme="light"] [class*="text-[#7f9586]"],
+html[data-theme="light"] [class*="text-[#89958f]"] {
+    color: #64748b !important;
+}
+
+html[data-theme="light"] [class*="text-[#405047]"],
+html[data-theme="light"] [class*="text-[#0f0f0f]"] {
+    color: #334155 !important;
+}
+
+/* The illustrative workspace inside the landing-page hero uses a deliberately
+   dark sidebar in dark mode. In light mode it becomes a neutral sidebar. */
+html[data-theme="light"] .light-theme-card aside {
+    border-color: #e2e8f0 !important;
+    background: #f1f5f9 !important;
+}
+
+html[data-theme="light"] .light-theme-card [class*="bg-white/"] {
+    background-color: rgba(15, 23, 42, 0.035) !important;
+}
+
+/* The video itself remains untouched. Only the player chrome follows the theme. */
+html[data-theme="light"] .ytp-player {
+    --accent: #15845b;
+    color: #1f2937;
+}
+
+html[data-theme="light"] .ytp-controls {
+    background: linear-gradient(0deg, rgba(248, 250, 252, 0.98), rgba(248, 250, 252, 0.84) 42%, transparent);
+}
+
+html[data-theme="light"] .ytp-button {
+    color: #334155;
+}
+
+html[data-theme="light"] .ytp-button:hover {
+    background: rgba(21, 132, 91, 0.09);
+}
+
+html[data-theme="light"] .ytp-time,
+html[data-theme="light"] .ytp-shortcut {
+    color: #334155;
+}
+
+html[data-theme="light"] .ytp-track {
+    background: #cbd5e1;
+}
+
+html[data-theme="light"] .ytp-buffered {
+    background: #94a3b8;
+}
+
+html[data-theme="light"] .ytp-modal-backdrop {
+    background: rgba(15, 23, 42, 0.35);
+}
+
+html[data-theme="light"] .ytp-modal {
+    border-color: #e2e8f0;
+    background: #ffffff;
+    color: #1f2937;
+    box-shadow: 0 16px 50px rgba(15, 23, 42, 0.18);
+}
+
+html[data-theme="light"] .ytp-modal-title,
+html[data-theme="light"] .ytp-shortcut {
+    color: #1f2937;
+}
+
+html[data-theme="light"] .ytp-keys kbd {
+    border-color: #cbd5e1;
+    background: #f1f5f9;
+    color: #334155;
+}
+
+html[data-theme="light"] .ytp-tooltip {
+    border: 1px solid #e2e8f0;
+    background: #ffffff;
+    color: #334155;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+}

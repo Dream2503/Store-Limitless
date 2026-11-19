@@ -2,6 +2,7 @@ import {useEffect, useState} from "react";
 import {Link, useNavigate} from "react-router-dom";
 import {API_URL} from "../api.js";
 import {AUTH_SESSION_START_EVENT} from "./dashboard/utils.js";
+import {ThemeToggle} from "../ThemeContext.jsx";
 
 /**
  * @typedef {Object} AuthFormData
@@ -92,7 +93,7 @@ export default function Auth({initialMode = "login"}) {
         style={{fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"}}
     >
         {/* Header */}
-        <header className="h-16 flex items-center px-6">
+        <header className="h-16 flex items-center justify-between px-6">
             <Link to="/"
                   className="flex items-center gap-2.5 rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#3ecf8e]"
                   aria-label="StoreLimitless home">
@@ -101,6 +102,7 @@ export default function Auth({initialMode = "login"}) {
                 </div>
                 <span className="text-[15px] font-semibold tracking-tight">Store<span className="text-[#3ecf8e]">Limitless</span></span>
             </Link>
+            <ThemeToggle/>
         </header>
 
         {/* Form */}

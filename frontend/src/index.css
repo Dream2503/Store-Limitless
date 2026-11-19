@@ -125,3 +125,179 @@ body {
         transition-duration: 0.01ms !important;
     }
 }
+
+
+/* --------------------------------------------------------------------------
+   StoreLimitless appearance modes
+   Dark is the default. The light palette follows Supabase Studio's clean,
+   neutral surfaces, subtle borders, slate text, and restrained green accent.
+-------------------------------------------------------------------------- */
+
+:root {
+    color-scheme: dark;
+    --sl-page: #0b0e0c;
+    --sl-surface: #171717;
+    --sl-surface-raised: #1d1d1d;
+    --sl-surface-muted: #242424;
+    --sl-border: #2e2e2e;
+    --sl-text: #fafafa;
+    --sl-text-muted: #898989;
+    --sl-accent: #3ecf8e;
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
+    --sl-page: #f8fafc;
+    --sl-surface: #ffffff;
+    --sl-surface-raised: #f8fafc;
+    --sl-surface-muted: #f1f5f9;
+    --sl-border: #e2e8f0;
+    --sl-text: #111827;
+    --sl-text-muted: #64748b;
+    --sl-accent: #15845b;
+}
+
+html[data-theme="light"],
+html[data-theme="light"] body {
+    background: var(--sl-page);
+    color: var(--sl-text);
+}
+
+html[data-theme="light"] body {
+    transition: background-color 160ms ease, color 160ms ease;
+}
+
+/* Main page, workspace, sidebar, viewer, and application surfaces. */
+html[data-theme="light"] [class*="bg-[#0b0e0c]"],
+html[data-theme="light"] [class*="bg-[#0b0f0c]"],
+html[data-theme="light"] [class*="bg-[#0b100d]"] {
+    background-color: #f8fafc !important;
+}
+
+html[data-theme="light"] [class*="bg-[#0d100e]"],
+html[data-theme="light"] [class*="bg-[#101411]"],
+html[data-theme="light"] [class*="bg-[#101410]"] {
+    background-color: #f1f5f9 !important;
+}
+
+html[data-theme="light"] [class*="bg-[#101413]"],
+html[data-theme="light"] [class*="bg-[#111111]"],
+html[data-theme="light"] [class*="bg-[#111713]"],
+html[data-theme="light"] [class*="bg-[#151d18]"],
+html[data-theme="light"] [class*="bg-[#171717]"],
+html[data-theme="light"] [class*="bg-[#171d19]"] {
+    background-color: #ffffff !important;
+}
+
+html[data-theme="light"] [class*="bg-[#1c1c1c]"],
+html[data-theme="light"] [class*="bg-[#1d1d1d]"],
+html[data-theme="light"] [class*="bg-[#1f1f1f]"],
+html[data-theme="light"] [class*="bg-[#202020]"] {
+    background-color: #f8fafc !important;
+}
+
+html[data-theme="light"] [class*="bg-[#232323]"],
+html[data-theme="light"] [class*="bg-[#242424]"],
+html[data-theme="light"] [class*="bg-[#252525]"],
+html[data-theme="light"] [class*="bg-[#2a2a2a]"],
+html[data-theme="light"] [class*="bg-[#303030]"] {
+    background-color: #f1f5f9 !important;
+}
+
+/* Neutral overlays and translucent white surfaces should become subtle gray. */
+html[data-theme="light"] [class*="bg-white/"] {
+    background-color: rgba(15, 23, 42, 0.025) !important;
+}
+
+html[data-theme="light"] [class*="border-white/"] {
+    border-color: rgba(15, 23, 42, 0.09) !important;
+}
+
+/* Borders throughout panels, menus, inputs, and cards. */
+html[data-theme="light"] [class*="border-[#2e2e2e]"],
+html[data-theme="light"] [class*="border-[#363636]"],
+html[data-theme="light"] [class*="border-[#3a3a3a]"],
+html[data-theme="light"] [class*="border-[#343434]"],
+html[data-theme="light"] [class*="border-[#35443a]"],
+html[data-theme="light"] [class*="border-[#29362e]"],
+html[data-theme="light"] [class*="border-[#243229]"],
+html[data-theme="light"] [class*="border-[#3a493f]"] {
+    border-color: var(--sl-border) !important;
+}
+
+/* Dark-mode foregrounds become legible slate tones on light surfaces. */
+html[data-theme="light"] [class*="text-[#fafafa]"],
+html[data-theme="light"] [class*="text-[#f3f7f4]"],
+html[data-theme="light"] [class*="text-[#f5f7f6]"],
+html[data-theme="light"] [class*="text-[#e7eee9]"],
+html[data-theme="light"] [class*="text-[#e2e8e4]"],
+html[data-theme="light"] [class*="text-[#d4d4d4]"],
+html[data-theme="light"] [class*="text-[#c6d2ca]"],
+html[data-theme="light"] [class*="text-[#b4b4b4]"],
+html[data-theme="light"] [class*="text-[#b5c1b9]"],
+html[data-theme="light"] [class*="text-[#c3ccc6]"],
+html[data-theme="light"] [class*="text-[#bac4be]"] {
+    color: #1f2937 !important;
+}
+
+html[data-theme="light"] [class*="text-[#a6b0aa]"],
+html[data-theme="light"] [class*="text-[#a0a0a0]"],
+html[data-theme="light"] [class*="text-[#9aa79e]"],
+html[data-theme="light"] [class*="text-[#898989]"],
+html[data-theme="light"] [class*="text-[#8e9994]"],
+html[data-theme="light"] [class*="text-[#849188]"],
+html[data-theme="light"] [class*="text-[#819087]"],
+html[data-theme="light"] [class*="text-[#78847e]"],
+html[data-theme="light"] [class*="text-[#77817c]"],
+html[data-theme="light"] [class*="text-[#707070]"],
+html[data-theme="light"] [class*="text-[#68746e]"] {
+    color: #64748b !important;
+}
+
+/* Green labels need a darker treatment on white backgrounds, while filled
+   primary buttons retain their high-contrast white foreground. */
+html[data-theme="light"] [class*="text-[#3ecf8e]"] {
+    color: #15845b !important;
+}
+
+html[data-theme="light"] [class*="text-[#fafafa]"]:not([class*="bg-[#006239]"]):not([class*="bg-[#17643d]"]):not([class*="bg-[#3ecf8e]"]),
+html[data-theme="light"] [class*="text-white"]:not([class*="bg-[#006239]"]):not([class*="bg-[#17643d]"]):not([class*="bg-[#3ecf8e]"]) {
+    color: #1f2937 !important;
+}
+
+/* Keep interactive surfaces consistent with the light Studio palette. */
+html[data-theme="light"] input:not([type="checkbox"]):not([type="radio"]),
+html[data-theme="light"] textarea,
+html[data-theme="light"] select {
+    color: #1f2937;
+}
+
+html[data-theme="light"] input::placeholder,
+html[data-theme="light"] textarea::placeholder {
+    color: #94a3b8;
+}
+
+html[data-theme="light"] * {
+    scrollbar-color: #cbd5e1 transparent;
+}
+
+html[data-theme="light"] *::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    background-clip: padding-box;
+}
+
+html[data-theme="light"] *::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+    background-clip: padding-box;
+}
+
+/* Tone down the dark card shadow used across the dashboard. */
+html[data-theme="light"] .card-shadow {
+    box-shadow: 0 4px 28px rgba(15, 23, 42, 0.07);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html[data-theme="light"] body {
+        transition: none;
+    }
+}

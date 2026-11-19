@@ -715,9 +715,11 @@ function clampPreviewZoom(value) {
  */
 function ImageFilePreview({src, fileName, onError}) {
     const viewportRef = useRef(null);
+    const imageRef = useRef(null);
     const pointersRef = useRef(new Map());
     const pinchRef = useRef(null);
     const dragRef = useRef(null);
+    const zoomAnchorRef = useRef(null);
     const [loaded, setLoaded] = useState(false);
     const [zoom, setZoom] = useState(1);
     const [isPanning, setIsPanning] = useState(false);
@@ -731,12 +733,17 @@ function ImageFilePreview({src, fileName, onError}) {
         pointersRef.current.clear();
         pinchRef.current = null;
         dragRef.current = null;
+        zoomAnchorRef.current = null;
         setIsPanning(false);
+        if (viewportRef.current) {
+            viewportRef.current.scrollTo({left: 0, top: 0, behavior: "auto"});
+        }
     }, [src]);
 
     useEffect(() => {
         const element = viewportRef.current;
         if (!element) return undefined;
+
         const updateSize = () => setViewportSize({
             width: element.clientWidth,
             height: element.clientHeight,
@@ -752,51 +759,102 @@ function ImageFilePreview({src, fileName, onError}) {
         return () => window.removeEventListener("resize", updateSize);
     }, []);
 
-    const handleWheel = useCallback((event) => {
-        event.preventDefault();
-        const factor = Math.exp(-event.deltaY * 0.0015);
-        setZoom((current) => clampPreviewZoom(current * factor));
+    /**
+     * Save the image point under a screen coordinate before changing its size.
+     * After React lays out the new dimensions, that same point is kept under the
+     * cursor or pinch midpoint rather than jumping toward the image centre.
+     */
+    const zoomToPoint = useCallback((nextZoom, clientX, clientY) => {
+        const viewport = viewportRef.current;
+        const image = imageRef.current;
+        if (!viewport || !image) return;
+
+        const viewportRect = viewport.getBoundingClientRect();
+        const imageRect = image.getBoundingClientRect();
+        const pointX = Number.isFinite(clientX) ? clientX : viewportRect.left + viewport.clientWidth / 2;
+        const pointY = Number.isFinite(clientY) ? clientY : viewportRect.top + viewport.clientHeight / 2;
+
+        zoomAnchorRef.current = {
+            ratioX: imageRect.width > 0 ? Math.max(0, Math.min(1, (pointX - imageRect.left) / imageRect.width)) : 0.5,
+            ratioY: imageRect.height > 0 ? Math.max(0, Math.min(1, (pointY - imageRect.top) / imageRect.height)) : 0.5,
+            localX: pointX - viewportRect.left,
+            localY: pointY - viewportRect.top,
+        };
+        setZoom(clampPreviewZoom(nextZoom));
     }, []);
 
+    useEffect(() => {
+        const anchor = zoomAnchorRef.current;
+        if (!anchor || !imageRef.current || !viewportRef.current) return undefined;
+
+        const frame = window.requestAnimationFrame(() => {
+            const viewport = viewportRef.current;
+            const image = imageRef.current;
+            if (!viewport || !image) return;
+
+            const viewportRect = viewport.getBoundingClientRect();
+            const imageRect = image.getBoundingClientRect();
+            const targetX = viewportRect.left + anchor.localX;
+            const targetY = viewportRect.top + anchor.localY;
+
+            // The browser clamps these values to the actual scrollable image bounds.
+            viewport.scrollLeft += imageRect.left + anchor.ratioX * imageRect.width - targetX;
+            viewport.scrollTop += imageRect.top + anchor.ratioY * imageRect.height - targetY;
+            zoomAnchorRef.current = null;
+        });
+
+        return () => window.cancelAnimationFrame(frame);
+    }, [zoom, viewportSize.width, viewportSize.height]);
+
+    const handleWheel = useCallback((event) => {
+        if (event.target instanceof Element && event.target.closest("[data-image-viewer-controls]")) return;
+        if (event.cancelable) event.preventDefault();
+
+        const factor = Math.exp(-event.deltaY * 0.0015);
+        zoomToPoint(zoom * factor, event.clientX, event.clientY);
+    }, [zoom, zoomToPoint]);
+
     const beginPan = useCallback((event) => {
-        const viewport = viewportRef.current;
-        if (!viewport) return;
         dragRef.current = {
             pointerId: event.pointerId,
+            pointerType: event.pointerType,
             x: event.clientX,
             y: event.clientY,
-            scrollLeft: viewport.scrollLeft,
-            scrollTop: viewport.scrollTop,
         };
         setIsPanning(true);
     }, []);
 
     const handlePointerDown = useCallback((event) => {
-        if (event.target instanceof Element && event.target.closest("button")) return;
-        if (event.pointerType === "mouse") {
+        if (event.target instanceof Element && event.target.closest("button, input, select")) return;
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+
+        if (event.pointerType === "mouse" || event.pointerType === "pen") {
             if (event.button !== 0 || zoom <= 1) return;
-            event.preventDefault();
+            if (event.cancelable) event.preventDefault();
             beginPan(event);
             try {
-                event.currentTarget.setPointerCapture(event.pointerId);
+                viewport.setPointerCapture(event.pointerId);
             } catch {
-                // Pointer capture is not available in every embedded browser.
+                // The window-level pointer listener below is the fallback.
             }
             return;
         }
+
         if (event.pointerType !== "touch") return;
 
         const pointers = pointersRef.current;
         pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
         try {
-            event.currentTarget.setPointerCapture(event.pointerId);
+            viewport.setPointerCapture(event.pointerId);
         } catch {
-            // Pointer capture is not available in every embedded browser.
+            // The window-level pointer listener below is the fallback.
         }
 
         if (pointers.size === 1) {
-            // A one-finger touch drags the image viewport; two fingers switch to pinch zoom.
-            beginPan(event);
+            // One finger pans an already-zoomed image. Two fingers can pinch at any zoom.
+            dragRef.current = null;
+            if (zoom > 1) beginPan(event);
         } else if (pointers.size === 2) {
             dragRef.current = null;
             setIsPanning(false);
@@ -820,21 +878,37 @@ function ImageFilePreview({src, fileName, onError}) {
             if (pointers.size >= 2 && pinchRef.current) {
                 const [{x: x1, y: y1}, {x: x2, y: y2}] = Array.from(pointers.values());
                 const distance = Math.max(1, Math.hypot(x2 - x1, y2 - y1));
+                const midpointX = (x1 + x2) / 2;
+                const midpointY = (y1 + y2) / 2;
                 const nextZoom = pinchRef.current.zoom * (distance / pinchRef.current.distance);
-                setZoom(clampPreviewZoom(nextZoom));
+                zoomToPoint(nextZoom, midpointX, midpointY);
                 return;
             }
         }
 
         const drag = dragRef.current;
         if (!drag || drag.pointerId !== event.pointerId) return;
-        if (event.pointerType === "mouse") event.preventDefault();
-        viewport.scrollLeft = drag.scrollLeft - (event.clientX - drag.x);
-        viewport.scrollTop = drag.scrollTop - (event.clientY - drag.y);
-    }, []);
+        if (drag.pointerType !== event.pointerType) return;
+        if ((event.pointerType === "mouse" || event.pointerType === "pen") && event.buttons === 0) {
+            dragRef.current = null;
+            setIsPanning(false);
+            return;
+        }
+
+        if (event.cancelable) event.preventDefault();
+
+        // Apply each movement from the last pointer position. This keeps panning
+        // responsive when the image reaches a scroll boundary and the user reverses.
+        const deltaX = event.clientX - drag.x;
+        const deltaY = event.clientY - drag.y;
+        viewport.scrollLeft -= deltaX;
+        viewport.scrollTop -= deltaY;
+        drag.x = event.clientX;
+        drag.y = event.clientY;
+    }, [zoomToPoint]);
 
     const finishPointer = useCallback((event) => {
-        if (event.pointerType === "mouse") {
+        if (event.pointerType === "mouse" || event.pointerType === "pen") {
             if (dragRef.current?.pointerId === event.pointerId) {
                 dragRef.current = null;
                 setIsPanning(false);
@@ -847,22 +921,35 @@ function ImageFilePreview({src, fileName, onError}) {
         pointers.delete(event.pointerId);
         pinchRef.current = null;
 
-        if (pointers.size === 1) {
+        if (pointers.size === 1 && zoom > 1) {
             const [pointerId, point] = Array.from(pointers.entries())[0];
-            const viewport = viewportRef.current;
-            dragRef.current = viewport ? {
+            dragRef.current = {
                 pointerId,
+                pointerType: "touch",
                 x: point.x,
                 y: point.y,
-                scrollLeft: viewport.scrollLeft,
-                scrollTop: viewport.scrollTop,
-            } : null;
-            setIsPanning(Boolean(dragRef.current));
+            };
+            setIsPanning(true);
         } else {
             dragRef.current = null;
             setIsPanning(false);
         }
-    }, []);
+    }, [zoom]);
+
+    // Listen at window level so dragging keeps working if the pointer leaves the
+    // viewport or pointer capture is unavailable in an embedded browser.
+    useEffect(() => {
+        const onMove = (event) => handlePointerMove(event);
+        const onEnd = (event) => finishPointer(event);
+        window.addEventListener("pointermove", onMove, {passive: false});
+        window.addEventListener("pointerup", onEnd);
+        window.addEventListener("pointercancel", onEnd);
+        return () => {
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", onEnd);
+            window.removeEventListener("pointercancel", onEnd);
+        };
+    }, [finishPointer, handlePointerMove]);
 
     const fitScale = naturalSize && viewportSize.width > 0 && viewportSize.height > 0
         ? Math.min(
@@ -874,23 +961,28 @@ function ImageFilePreview({src, fileName, onError}) {
     const imageWidth = naturalSize ? Math.max(1, naturalSize.width * fitScale * zoom) : undefined;
     const imageHeight = naturalSize ? Math.max(1, naturalSize.height * fitScale * zoom) : undefined;
 
+    const zoomFromControls = useCallback((nextZoom) => {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        const rect = viewport.getBoundingClientRect();
+        zoomToPoint(nextZoom, rect.left + viewport.clientWidth / 2, rect.top + viewport.clientHeight / 2);
+    }, [zoomToPoint]);
+
     return <div
         ref={viewportRef}
         className={`relative flex h-full min-h-0 w-full overflow-auto bg-[#0d100e] ${isPanning ? "cursor-grabbing" : zoom > 1 ? "cursor-grab" : "cursor-default"}`}
         onWheel={handleWheel}
         onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={finishPointer}
-        onPointerCancel={finishPointer}
         onLostPointerCapture={finishPointer}
         style={{touchAction: "none", overscrollBehavior: "contain", WebkitOverflowScrolling: "touch", userSelect: "none", WebkitUserSelect: "none"}}
-        aria-label="Image viewer. Scroll to zoom, or pinch on a touch screen."
+        aria-label="Image viewer. Scroll to zoom, drag to pan, or pinch on a touch screen."
     >
         <div className="flex h-max min-h-full w-max min-w-full items-center justify-center p-3 sm:p-6">
             {!loaded && <div className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center">
                 <PreviewMessage message="Loading image…"/>
             </div>}
             <img
+                ref={imageRef}
                 src={src}
                 alt={fileName || "Image preview"}
                 draggable={false}
@@ -910,17 +1002,17 @@ function ImageFilePreview({src, fileName, onError}) {
             />
         </div>
 
-        {loaded && <div className="absolute right-3 top-3 z-20 flex items-center gap-1 rounded-lg border border-[#304236] bg-[#121a15]/95 p-1 text-[#e7eee9] shadow-lg backdrop-blur">
-            <button type="button" onClick={() => setZoom((current) => clampPreviewZoom(current / 1.2))}
+        {loaded && <div data-image-viewer-controls className="absolute right-3 top-3 z-20 flex items-center gap-1 rounded-lg border border-[#304236] bg-[#121a15]/95 p-1 text-[#e7eee9] shadow-lg backdrop-blur">
+            <button type="button" onClick={() => zoomFromControls(zoom / 1.2)}
                     disabled={zoom <= 0.25} aria-label="Zoom out" title="Zoom out"
                     className="flex h-8 w-8 items-center justify-center rounded-md text-[#c5d0c8] transition-colors hover:bg-white/10 hover:text-white disabled:opacity-35">
                 <span className="material-symbols-outlined text-[19px]" aria-hidden="true">remove</span>
             </button>
-            <button type="button" onClick={() => setZoom(1)} aria-label="Reset image zoom" title="Reset zoom"
+            <button type="button" onClick={() => zoomFromControls(1)} aria-label="Reset image zoom" title="Reset zoom"
                     className="min-w-12 rounded-md px-1 text-xs tabular-nums hover:bg-white/10">
                 {Math.round(zoom * 100)}%
             </button>
-            <button type="button" onClick={() => setZoom((current) => clampPreviewZoom(current * 1.2))}
+            <button type="button" onClick={() => zoomFromControls(zoom * 1.2)}
                     disabled={zoom >= 5} aria-label="Zoom in" title="Zoom in"
                     className="flex h-8 w-8 items-center justify-center rounded-md text-[#c5d0c8] transition-colors hover:bg-white/10 hover:text-white disabled:opacity-35">
                 <span className="material-symbols-outlined text-[19px]" aria-hidden="true">add</span>

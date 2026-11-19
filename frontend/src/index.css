@@ -948,7 +948,7 @@ html[data-theme="light"] .storage-explorer {
     align-items: center;
     gap: 7px;
     border-radius: 7px;
-    padding: 4px 8px 4px calc(8px + var(--row-depth, 0) * 17px);
+    padding: 4px 8px 4px calc(8px + var(--row-indent, 0px));
     transition: background-color 120ms ease;
 }
 
@@ -1040,7 +1040,7 @@ html[data-theme="light"] .storage-explorer {
 
 .storage-tree-meter-track {
     height: 3px;
-    margin: 0 9px 2px calc(32px + var(--row-depth, 0) * 17px);
+    margin: 0 9px 2px calc(32px + var(--row-indent, 0px));
     overflow: hidden;
     border-radius: 99px;
     background: var(--storage-track);
@@ -1057,7 +1057,7 @@ html[data-theme="light"] .storage-explorer {
     display: flex;
     justify-content: space-between;
     gap: 8px;
-    padding: 0 9px 3px calc(32px + var(--row-depth, 0) * 17px);
+    padding: 0 9px 3px calc(32px + var(--row-indent, 0px));
     color: var(--storage-subtle);
     font-size: 9px;
     font-variant-numeric: tabular-nums;
@@ -1065,7 +1065,7 @@ html[data-theme="light"] .storage-explorer {
 
 .storage-tree-children {
     border-left: 1px solid var(--storage-border);
-    margin-left: calc(21px + var(--row-depth, 0) * 17px);
+    margin-left: calc(21px + var(--row-indent, 0px));
 }
 
 .storage-tree-file {
@@ -1076,7 +1076,7 @@ html[data-theme="light"] .storage-explorer {
     gap: 8px;
     border-radius: 6px;
     margin-bottom: 2px;
-    padding: 4px 8px 4px calc(37px + var(--row-depth, 0) * 17px);
+    padding: 4px 8px 4px calc(37px + var(--row-indent, 0px));
 }
 
 .storage-tree-file:hover {

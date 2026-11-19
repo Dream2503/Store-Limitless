@@ -1,7 +1,7 @@
 import {NAV_ITEMS} from "../constants.js";
 import {formatFileSize} from "../utils.js";
 
-export default function Sidebar({activeTab, onTabSelect, onLogout, onUploadClick, onCreateFolderClick, storageUsed}) {
+export default function Sidebar({activeTab, onTabSelect, onLogout, onUploadClick, onCreateFolderClick, onStorageClick, storageUsed}) {
     return (<nav className="flex h-screen w-60 flex-col border-r border-[#2e2e2e] bg-[#171717]">
         {/* Brand */}
         <div className="flex h-14 items-center gap-2.5 border-b border-[#2e2e2e] px-4">

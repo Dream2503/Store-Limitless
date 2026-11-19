@@ -5,12 +5,14 @@ const HOME_PATH = "/home";
 const TWO_PI = Math.PI * 2;
 
 function normalizePath(value) {
-    let path = String(value ?? "").trim().replace(/\\\\/g, "/").replace(/\\/{2,}/g, "/");
-    path = path.replace(/\\/$/, "");
+    let path = String(value ?? "").trim().split(String.fromCharCode(92)).join("/");
+    while (path.includes("//")) path = path.replace("//", "/");
+    if (path.endsWith("/")) path = path.slice(0, -1);
     if (!path || path === "/" || path === "home" || path === HOME_PATH) return HOME_PATH;
     if (path.startsWith("home/")) return "/" + path;
     if (path.startsWith(HOME_PATH + "/")) return path;
-    return HOME_PATH + "/" + path.replace(/^\\/+/, "");
+    while (path.startsWith("/")) path = path.slice(1);
+    return HOME_PATH + "/" + path;
 }
 
 function readFileSize(file) {
@@ -442,20 +444,22 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
         if (filter !== "all" && size === 0 && !hasChildren) return null;
 
         return <Fragment key={node.path}>
-            <div className="storage-tree-row" style={{"--row-depth": depth}}>
-                <button type="button" className="storage-tree-main" onClick={() => focusFolder(node)} title={"Open " + node.path + " in chart"}>
+            <div className="storage-tree-row" style={{"--row-depth": String(depth)}}>
+                <div className="storage-tree-main">
                     <span className={"storage-tree-chevron" + (hasChildren ? "" : " is-empty")}>
                         <button type="button" aria-label={(isExpanded ? "Collapse " : "Expand ") + node.name}
-                                onClick={(event) => {event.stopPropagation(); toggleExpanded(node.path);}}
+                                onClick={() => toggleExpanded(node.path)}
                                 disabled={!hasChildren}>
                             <span className={"material-symbols-outlined" + (isExpanded ? " is-expanded" : "")}>chevron_right</span>
                         </button>
                     </span>
-                    <span className="material-symbols-outlined storage-tree-icon" aria-hidden="true">folder</span>
-                    <span className="storage-tree-name">{node.name}</span>
+                    <button type="button" className="storage-folder-label" onClick={() => focusFolder(node)} title={"Open " + node.path + " in chart"}>
+                        <span className="material-symbols-outlined storage-tree-icon" aria-hidden="true">folder</span>
+                        <span className="storage-tree-name">{node.name}</span>
+                    </button>
                     {node.isDeleted && <span className="storage-trash-badge">Trash</span>}
                     <span className="storage-tree-size">{formatFileSize(size)}</span>
-                </button>
+                </div>
                 <div className="storage-tree-meter-track">
                     <div className="storage-tree-meter" style={{width: percentage + "%", background: folderColor(node.path, depth)}}/>
                 </div>

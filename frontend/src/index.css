@@ -301,3 +301,106 @@ html[data-theme="light"] .card-shadow {
         transition: none;
     }
 }
+
+
+/* Additional workspace, modal, and validation colors used by the existing UI. */
+html[data-theme="light"] [class*="bg-[#0c110e]"],
+html[data-theme="light"] [class*="bg-[#151515]"],
+html[data-theme="light"] [class*="bg-[#1a1a1a]"] {
+    background-color: #ffffff !important;
+}
+
+html[data-theme="light"] [class*="bg-[#173c29]"],
+html[data-theme="light"] [class*="bg-[#1c2c22]"] {
+    background-color: #edf7f1 !important;
+}
+
+html[data-theme="light"] [class*="bg-[#29372e]"] {
+    background-color: #eef2f6 !important;
+}
+
+html[data-theme="light"] [class*="bg-[#3a171b]"],
+html[data-theme="light"] [class*="bg-[#3a1c20]"],
+html[data-theme="light"] [class*="bg-[#5b1e24]"] {
+    background-color: #fef2f2 !important;
+}
+
+html[data-theme="light"] [class*="border-[#202d24]"],
+html[data-theme="light"] [class*="border-[#212c25]"],
+html[data-theme="light"] [class*="border-[#2a2a2a]"],
+html[data-theme="light"] [class*="border-[#2b4938]"],
+html[data-theme="light"] [class*="border-[#303030]"],
+html[data-theme="light"] [class*="border-[#303b34]"],
+html[data-theme="light"] [class*="border-[#35483b]"] {
+    border-color: var(--sl-border) !important;
+}
+
+html[data-theme="light"] [class*="border-[#713b3d]"],
+html[data-theme="light"] [class*="border-[#7a3038]"],
+html[data-theme="light"] [class*="border-[#7f3439]"],
+html[data-theme="light"] [class*="border-[#e5484d]/"] {
+    border-color: #fecaca !important;
+}
+
+html[data-theme="light"] [class*="border-[#3ecf8e]"] {
+    border-color: #b9e7d1 !important;
+}
+
+html[data-theme="light"] [class*="text-[#3b5144]"],
+html[data-theme="light"] [class*="text-[#4d4d4d]"],
+html[data-theme="light"] [class*="text-[#555555]"],
+html[data-theme="light"] [class*="text-[#5d5d5d]"],
+html[data-theme="light"] [class*="text-[#5f7567]"],
+html[data-theme="light"] [class*="text-[#606060]"],
+html[data-theme="light"] [class*="text-[#6e8b79]"],
+html[data-theme="light"] [class*="text-[#718477]"],
+html[data-theme="light"] [class*="text-[#779184]"],
+html[data-theme="light"] [class*="text-[#789083]"],
+html[data-theme="light"] [class*="text-[#7f9586]"],
+html[data-theme="light"] [class*="text-[#8ca296]"],
+html[data-theme="light"] [class*="text-[#9ab5a5]"],
+html[data-theme="light"] [class*="text-[#9bbba7]"],
+html[data-theme="light"] [class*="text-[#a1a1a1]"],
+html[data-theme="light"] [class*="text-[#b0c8b9]"],
+html[data-theme="light"] [class*="text-[#b9c7be]"],
+html[data-theme="light"] [class*="text-[#c5d8cc]"],
+html[data-theme="light"] [class*="text-[#d5e0d9]"],
+html[data-theme="light"] [class*="text-[#dce9e0]"],
+html[data-theme="light"] [class*="text-[#e5e5e5]"],
+html[data-theme="light"] [class*="text-[#e8f0eb]"] {
+    color: #334155 !important;
+}
+
+html[data-theme="light"] [class*="text-[#83cfa0]"],
+html[data-theme="light"] [class*="text-[#9be8bd]"],
+html[data-theme="light"] [class*="text-[#a9d8bb]"],
+html[data-theme="light"] [class*="text-[#b0f0ca]"] {
+    color: #15845b !important;
+}
+
+html[data-theme="light"] [class*="text-[#91c9ef]"] {
+    color: #2563eb !important;
+}
+
+html[data-theme="light"] [class*="text-[#ff6369]"],
+html[data-theme="light"] [class*="text-[#ff7278]"],
+html[data-theme="light"] [class*="text-[#ff8589]"],
+html[data-theme="light"] [class*="text-[#ff8b91]"],
+html[data-theme="light"] [class*="text-[#ff9298]"],
+html[data-theme="light"] [class*="text-[#ff9a9f]"],
+html[data-theme="light"] [class*="text-[#ffecef]"] {
+    color: #b42318 !important;
+}
+
+/* Keep text on deliberately dark confirmation backdrops readable. */
+html[data-theme="light"] [class*="bg-black/"] [class*="text-white"],
+html[data-theme="light"] [class*="bg-black/"] [class*="text-[#fafafa]"] {
+    color: #ffffff !important;
+}
+
+/* Filled primary actions keep white text after the neutral foreground remapping. */
+html[data-theme="light"] [class*="bg-[#006239]"][class*="text-[#fafafa]"],
+html[data-theme="light"] [class*="bg-[#17643d]"][class*="text-[#fafafa]"],
+html[data-theme="light"] [class*="bg-[#007a46]"][class*="text-[#fafafa]"] {
+    color: #ffffff !important;
+}

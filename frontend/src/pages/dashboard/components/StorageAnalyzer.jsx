@@ -42,6 +42,8 @@ function createFolderNode(path, name, parent = null) {
         activeFileCount: 0,
         trashFileCount: 0,
         folderCount: 0,
+        activeFolderCount: 0,
+        trashFolderCount: 0,
     };
 }
 
@@ -99,6 +101,8 @@ function calculateNodeTotals(node, inheritedTrash = false) {
     node.activeFileCount = directActiveCount;
     node.trashFileCount = directTrashCount;
     node.folderCount = 0;
+    node.activeFolderCount = node !== null && node !== undefined && node.path !== HOME_PATH && !folderIsTrash ? 1 : 0;
+    node.trashFolderCount = node !== null && node !== undefined && node.path !== HOME_PATH && folderIsTrash ? 1 : 0;
 
     for (const child of node.children) {
         calculateNodeTotals(child, folderIsTrash);
@@ -109,6 +113,8 @@ function calculateNodeTotals(node, inheritedTrash = false) {
         node.activeFileCount += child.activeFileCount;
         node.trashFileCount += child.trashFileCount;
         node.folderCount += 1 + child.folderCount;
+        node.activeFolderCount += child.activeFolderCount;
+        node.trashFolderCount += child.trashFolderCount;
     }
 
     node.children.sort((a, b) => b.bytesAll - a.bytesAll || a.name.localeCompare(b.name));
@@ -161,7 +167,8 @@ function buildStorageTree(files, folders, reportedStorage) {
     calculateNodeTotals(root);
     const fileRecordBytes = root.bytesAll;
     const reported = Number(reportedStorage);
-    const hasReportedTotal = Number.isFinite(reported) && reported >= 0;
+    const hasReportedTotal = reportedStorage !== null && reportedStorage !== undefined && reportedStorage !== ""
+        && Number.isFinite(reported) && reported >= 0;
     const reportedBytes = hasReportedTotal ? reported : fileRecordBytes;
     const unassignedBytes = Math.max(0, Math.floor(reportedBytes - fileRecordBytes));
 
@@ -375,6 +382,7 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
     const focusedNode = findFolder(root, focusedPath);
     const totalBytes = bytesFor(root, filter);
     const totalFiles = fileCountFor(root, filter);
+    const totalFolders = filter === "active" ? root.activeFolderCount : filter === "trash" ? root.trashFolderCount : root.folderCount;
     const largestFolder = [...root.children]
         .filter((folder) => filter === "trash" ? folder.bytesTrash > 0 : filter === "active" ? folder.bytesActive > 0 : folder.bytesAll > 0)
         .sort((a, b) => bytesFor(b, filter) - bytesFor(a, filter))[0] || null;
@@ -433,10 +441,11 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
         const size = bytesFor(node, filter);
         const percentage = percentOf(size, totalBytes);
         const visibleFiles = node.files.filter((file) => fileMatchesFilter(file, filter));
-        const hasChildren = node.children.length > 0 || visibleFiles.length > 0;
+        const visibleChildren = node.children.filter((child) => filter === "all" || bytesFor(child, filter) > 0);
+        const hasChildren = visibleChildren.length > 0 || visibleFiles.length > 0;
         const nestedRows = (
             <>
-                {node.children.map((child) => folderRow(child, depth + 1))}
+                {visibleChildren.map((child) => folderRow(child, depth + 1))}
                 {visibleFiles.map((file) => fileRow(file, depth + 1))}
             </>
         );
@@ -444,7 +453,7 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
         if (filter !== "all" && size === 0 && !hasChildren) return null;
 
         return <Fragment key={node.path}>
-            <div className="storage-tree-row" style={{"--row-depth": String(depth)}}>
+            <div className="storage-tree-row" style={{"--row-indent": String(depth * 17) + "px"}}>
                 <div className="storage-tree-main">
                     <span className={"storage-tree-chevron" + (hasChildren ? "" : " is-empty")}>
                         <button type="button" aria-label={(isExpanded ? "Collapse " : "Expand ") + node.name}
@@ -468,13 +477,13 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
                     <span>{fileCountFor(node, filter).toLocaleString()} files</span>
                 </div>
             </div>
-            {isExpanded && <div className="storage-tree-children">{nestedRows}</div>}
+            {isExpanded && <div className="storage-tree-children" style={{"--row-indent": String(depth * 17) + "px"}}>{nestedRows}</div>}
         </Fragment>;
     };
 
     const fileRow = (file, depth) => {
         const percentage = percentOf(file.size, totalBytes);
-        return <div className="storage-tree-file" key={file.key} style={{"--row-depth": depth}}>
+        return <div className="storage-tree-file" key={file.key} style={{"--row-indent": String(depth * 17) + "px"}}>
             <span className="material-symbols-outlined storage-file-icon" aria-hidden="true">{file.isUnassigned ? "database" : "draft"}</span>
             <span className="storage-tree-name" title={file.name}>{file.name}</span>
             {file.isTrash && <span className="storage-trash-badge">Trash</span>}
@@ -490,7 +499,7 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
                 <span className="material-symbols-outlined" aria-hidden="true">home</span>
                 <span className="storage-tree-name">/</span>
                 <span className="storage-tree-size">{formatFileSize(totalBytes)}</span>
-                <span className="storage-tree-meta">{totalFiles.toLocaleString()} files · {root.folderCount.toLocaleString()} folders</span>
+                <span className="storage-tree-meta">{totalFiles.toLocaleString()} files · {totalFolders.toLocaleString()} folders</span>
             </div>
             {root.children.map((child) => folderRow(child, 0))}
             {rootFiles.map((file) => fileRow(file, 0))}
@@ -545,7 +554,7 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
                 </div>
                 <div className="storage-summary-card">
                     <span className="storage-summary-label">Folders</span>
-                    <strong>{root.folderCount.toLocaleString()}</strong>
+                    <strong>{totalFolders.toLocaleString()}</strong>
                     <small>Including nested folders</small>
                 </div>
                 <div className="storage-summary-card">

@@ -61,16 +61,16 @@ export default function Sidebar({activeTab, onTabSelect, onLogout, onUploadClick
             <button type="button" onClick={onStorageClick}
                     aria-label="Open storage analysis"
                     className="group w-full rounded-lg border border-[#343434] bg-[#1d1d1d] px-3 py-3 text-left transition-colors hover:border-[#3ecf8e]/50 hover:bg-[#202820] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3ecf8e]">
-                <div className="flex items-center gap-2 text-[#a0a0a0] group-hover:text-[#c6d2ca]">
+                <span className="flex items-center gap-2 text-[#a0a0a0] group-hover:text-[#c6d2ca]">
                     <span className="material-symbols-outlined text-[17px] text-[#3ecf8e]" aria-hidden="true">
                         database
                     </span>
                     <span className="text-xs">Storage used</span>
-                </div>
-                <p className="mt-2 text-lg font-medium tracking-tight text-[#fafafa]">
+                </span>
+                <span className="mt-2 block text-lg font-medium tracking-tight text-[#fafafa]">
                     {storageUsed === null ? "Calculating…" : formatFileSize(storageUsed)}
-                </p>
-                <p className="mt-0.5 text-[10px] text-[#707070]">Across your files and trash · Click to analyze</p>
+                </span>
+                <span className="mt-0.5 block text-[10px] text-[#707070]">Across your files and trash · Click to analyze</span>
             </button>
 
             <div className="flex flex-col gap-0.5 border-t border-[#2e2e2e] pt-3">

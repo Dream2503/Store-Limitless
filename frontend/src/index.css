@@ -714,3 +714,27 @@ html[data-theme="light"] .audio-preview-footer {
 html[data-theme="light"] .audio-preview-body input[type="range"]:first-of-type {
     --audio-progress-track: var(--sl-audio-track);
 }
+
+
+/* Keep the video-control strip visually attached to the dark video frame.
+   These final declarations intentionally win over all earlier palette rules. */
+html[data-theme="light"] .ytp-player .ytp-controls {
+    background: linear-gradient(0deg, rgba(0, 0, 0, 0.94), rgba(0, 0, 0, 0.66) 42%, transparent) !important;
+}
+
+html[data-theme="light"] .ytp-player .ytp-controls .ytp-button,
+html[data-theme="light"] .ytp-player .ytp-controls .ytp-time {
+    color: #ffffff !important;
+}
+
+html[data-theme="light"] .ytp-player .ytp-controls .ytp-track {
+    background: rgba(255, 255, 255, 0.28) !important;
+}
+
+html[data-theme="light"] .ytp-player .ytp-controls .ytp-buffered {
+    background: rgba(255, 255, 255, 0.52) !important;
+}
+
+html[data-theme="light"] .ytp-player .ytp-controls .ytp-button:hover {
+    background: rgba(62, 207, 142, 0.18) !important;
+}

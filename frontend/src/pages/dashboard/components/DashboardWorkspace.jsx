@@ -1,5 +1,6 @@
 import {iconBtn} from "../constants.js";
 import {formatDate, formatFileSize, getFileIcon} from "../utils.js";
+import {ThemeToggle} from "../../../ThemeContext.jsx";
 
 /**
  * Main dashboard workspace: search, breadcrumbs, folder cards, and file rows.
@@ -47,7 +48,7 @@ export default function DashboardWorkspace(props) {
         {/* Header */}
         <header
             className="fixed top-0 right-0 z-40 flex h-14 w-full items-center justify-between border-b border-[#2e2e2e] bg-[#171717] px-6 md:w-[calc(100%-240px)]">
-            <div className="flex w-full max-w-md items-center gap-4">
+            <div className="flex min-w-0 flex-1 items-center gap-4">
                 <button
                     type="button"
                     className="text-[#898989] transition-colors hover:text-[#fafafa] md:hidden"
@@ -77,6 +78,7 @@ export default function DashboardWorkspace(props) {
                     />
                 </div>
             </div>
+            <ThemeToggle className="ml-4"/>
         </header>
 
         {/* Main View Area */}
@@ -96,7 +98,7 @@ export default function DashboardWorkspace(props) {
                 className="dashboard-selection-surface relative min-h-full select-none"
             >
                 {!isTrash ? (<div
-                    className="mb-6 w-full rounded-xl border border-[#343434] bg-gradient-to-r from-[#202020] via-[#1d1d1d] to-[#191919] px-4 py-3.5 shadow-[0_8px_28px_rgba(0,0,0,0.12)] sm:px-5">
+                    className="dashboard-location-banner mb-6 w-full rounded-xl border border-[#343434] bg-gradient-to-r from-[#202020] via-[#1d1d1d] to-[#191919] px-4 py-3.5 shadow-[0_8px_28px_rgba(0,0,0,0.12)] sm:px-5">
                     <div className="flex min-w-0 items-center gap-3">
                         <div
                             className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-[#3ecf8e]/20 bg-[#3ecf8e]/10 text-[#3ecf8e]">

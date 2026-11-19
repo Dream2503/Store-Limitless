@@ -143,6 +143,23 @@ function LegacyDashboardRedirect() {
  */
 function PersistentRoutePages() {
     const location = useLocation();
+    const [theme, setTheme] = useState(() => {
+        try {
+            return localStorage.getItem("storelimitless-theme") === "light" ? "light" : "dark";
+        } catch {
+            return "dark";
+        }
+    });
+
+    useEffect(() => {
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        try {
+            localStorage.setItem("storelimitless-theme", theme);
+        } catch {
+            // The theme still works for this session when browser storage is unavailable.
+        }
+    }, [theme]);
     const isDashboardRoute = location.pathname === "/home" || location.pathname.startsWith("/home/");
     const viewRouteMatch = location.pathname.match(/^\/(?:view|s)\/([^/]+)\/?$/);
     const isViewRoute = Boolean(viewRouteMatch);
@@ -199,6 +216,18 @@ function PersistentRoutePages() {
     return (<>
         {shouldMountDashboard && <DashboardPage active={isDashboardRoute}/>}
         {shouldMountView && <ViewFile key={`${location.pathname}${location.search}`} active={isViewRoute}/>}
+        <button
+            type="button"
+            onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+            className="fixed right-4 top-3 z-[1000] inline-flex h-10 w-10 items-center justify-center rounded-lg border border-[#363636] bg-[#171717] text-[#e7eee9] shadow-lg shadow-black/15 transition-colors hover:bg-[#232323] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3ecf8e]"
+            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            aria-pressed={theme === "light"}
+            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        >
+            <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+                {theme === "dark" ? "light_mode" : "dark_mode"}
+            </span>
+        </button>
         <Routes>
             <Route path="/" element={<Landing/>}/>
             <Route path="/login" element={<Auth initialMode="login"/>}/>

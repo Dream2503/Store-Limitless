@@ -685,15 +685,15 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
                                                role="button"
                                                tabIndex={0}
                                                className="storage-chart-segment"
-                                               aria-label={"Double-click to open " + (rect.item.node.name === "Home" ? "root" : rect.item.node.name)}
-                                               onDoubleClick={() => focusFolder(rect.item.node)}
+                                               aria-label={"Click to open " + (rect.item.node.name === "Home" ? "root" : rect.item.node.name)}
+                                               onClick={() => focusFolder(rect.item.node)}
                                                onKeyDown={(event) => {
                                                    if (event.key === "Enter" || event.key === " ") {
                                                        event.preventDefault();
                                                        focusFolder(rect.item.node);
                                                    }
                                                }}>
-                                        <title>{"Double-click to open " + (rect.item.node.name === "Home" ? "root" : rect.item.node.name) + " · " + label}</title>
+                                        <title>{"Click to open " + (rect.item.node.name === "Home" ? "root" : rect.item.node.name) + " · " + label}</title>
                                         <rect x={rect.x} y={rect.y} width={rect.width} height={rect.height}
                                               rx="3" fill={rect.item.color || folderColor(rect.item.path, rect.depth, rect.item.kind)}
                                               fillOpacity={rect.item.kind === "folder" && rect.depth < 3 ? "0.72" : "0.94"}

@@ -4,6 +4,7 @@ import FileContentPreview, {MediaPreview} from "./FileContentPreview.jsx";
 import {endAuthSession, getFileKind, getToken} from "../utils.js";
 import {API_URL} from "../../../api.js";
 import {DASHBOARD_SELECTION_STORAGE_KEY} from "../constants.js";
+import {ThemeToggle} from "../../../ThemeContext.jsx";
 
 async function copyTextToClipboard(value) {
     try {
@@ -1050,7 +1051,7 @@ export default function ViewFile({active = true} = {}) {
                      visibility: active ? "visible" : "hidden",
                      pointerEvents: active ? "auto" : "none",
                  }}>
-        <header className="relative z-30 flex min-h-14 shrink-0 items-center gap-3 border-b border-[#243229] bg-[#0b0f0c] px-4 pr-16 py-2.5 sm:px-5 sm:pr-20">
+        <header className="relative z-30 flex min-h-14 shrink-0 items-center gap-3 border-b border-[#243229] bg-[#0b0f0c] px-4 py-2.5 sm:px-5">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#3ecf8e]/20 bg-[#3ecf8e]/10 text-[#3ecf8e]">
                 <span className="material-symbols-outlined text-[19px]"
                       aria-hidden="true">{kind === "pdf" ? "picture_as_pdf" : kind === "image" ? "image" : kind === "text" ? "code" : kind === "markdown" ? "article" : kind === "audio" ? "audio_file" : "movie"}</span>
@@ -1090,9 +1091,10 @@ export default function ViewFile({active = true} = {}) {
                     </button>
                 </> : <button type="button" onClick={previewActions.onEdit}
                              className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-xs text-[#e7eee9] hover:border-[#3ecf8e]/50 hover:bg-white/5">Edit</button>)}
+                <ThemeToggle className="ml-1"/>
             </div>
 
-            <div className="relative ml-auto shrink-0 lg:hidden" ref={mobileActionsRef}>
+            <div className="relative shrink-0 lg:hidden" ref={mobileActionsRef}>
                 <button type="button" aria-label="More file actions" aria-haspopup="menu" aria-expanded={mobileActionsOpen}
                         onClick={() => setMobileActionsOpen((open) => !open)}
                         className="flex h-9 w-9 items-center justify-center rounded-md border border-[#344239] text-[#e7eee9] transition-colors hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]">
@@ -1141,6 +1143,7 @@ export default function ViewFile({active = true} = {}) {
                     {previewActions?.saveError && <div role="alert" className="border-t border-[#344239] px-3 py-2 text-xs text-[#ff7278]">{previewActions.saveError}</div>}
                 </div>}
             </div>
+            <ThemeToggle className="ml-auto lg:hidden"/>
         </header>
 
         <main className="min-h-0 flex-1 overflow-hidden p-0">

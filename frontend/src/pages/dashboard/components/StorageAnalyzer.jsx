@@ -672,29 +672,36 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
                             <svg viewBox="0 0 1000 600" role="img" aria-label="Nested storage treemap chart"
                                  className="storage-chart-svg h-full w-full">
                                 {treemapRects.map((rect, index) => {
-                                    const label = rect.item.name + ": " + formatFileSize(rect.item.size)
+                                    // Direct files are grouped into a leaf tile for their
+                                    // containing folder. Display the folder name, not
+                                    // the internal "Files in ..." grouping label.
+                                    const tileName = rect.item.kind === "files"
+                                        ? (rect.item.node.name === "Home" ? "/" : rect.item.node.name)
+                                        : rect.item.name;
+                                    const label = tileName + ": " + formatFileSize(rect.item.size)
                                         + " (" + percentOf(rect.item.size, chartRootBytes).toFixed(1) + "%)";
                                     const canShowLabel = rect.width > 78 && rect.height > 36;
                                     return <g key={rect.item.path + "-" + rect.depth + "-" + index}
-                                               role={rect.item.kind === "folder" ? "button" : undefined}
-                                               tabIndex={rect.item.kind === "folder" ? 0 : undefined}
+                                               role="button"
+                                               tabIndex={0}
                                                className="storage-chart-segment"
-                                               onClick={() => chartClick(rect.item)}
+                                               aria-label={"Double-click to open " + (rect.item.node.name === "Home" ? "root" : rect.item.node.name)}
+                                               onDoubleClick={() => focusFolder(rect.item.node)}
                                                onKeyDown={(event) => {
-                                                   if (rect.item.kind === "folder" && (event.key === "Enter" || event.key === " ")) {
+                                                   if (event.key === "Enter" || event.key === " ") {
                                                        event.preventDefault();
-                                                       chartClick(rect.item);
+                                                       focusFolder(rect.item.node);
                                                    }
                                                }}>
-                                        <title>{label}</title>
+                                        <title>{"Double-click to open " + (rect.item.node.name === "Home" ? "root" : rect.item.node.name) + " · " + label}</title>
                                         <rect x={rect.x} y={rect.y} width={rect.width} height={rect.height}
                                               rx="3" fill={rect.item.color || folderColor(rect.item.path, rect.depth, rect.item.kind)}
                                               fillOpacity={rect.item.kind === "folder" && rect.depth < 3 ? "0.72" : "0.94"}
                                               stroke="var(--storage-chart-hole)" strokeWidth="2"/>
                                         {canShowLabel && <text x={rect.x + 10} y={rect.y + 21} className="storage-treemap-label">
-                                            {rect.item.name.length > Math.max(8, Math.floor(rect.width / 9))
-                                                ? rect.item.name.slice(0, Math.max(7, Math.floor(rect.width / 9) - 1)) + "…"
-                                                : rect.item.name}
+                                            {tileName.length > Math.max(8, Math.floor(rect.width / 9))
+                                                ? tileName.slice(0, Math.max(7, Math.floor(rect.width / 9) - 1)) + "…"
+                                                : tileName}
                                         </text>}
                                         {canShowLabel && rect.height > 54 && <text x={rect.x + 10} y={rect.y + 40} className="storage-treemap-size">
                                             {formatFileSize(rect.item.size)}

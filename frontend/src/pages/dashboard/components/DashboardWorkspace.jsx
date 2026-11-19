@@ -60,7 +60,7 @@ export default function DashboardWorkspace(props) {
                     </span>
                 </button>
 
-                <div className="relative hidden w-full sm:block">
+                <div className="relative hidden w-full max-w-[360px] shrink-0 sm:block">
                     <span
                         className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-[#707070]"
                         style={{fontSize: 18}}

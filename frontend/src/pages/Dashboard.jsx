@@ -9,6 +9,7 @@ import RenameItemModal from "./dashboard/components/RenameItemModal.jsx";
 import ItemDetailsModal from "./dashboard/components/ItemDetailsModal.jsx";
 import DashboardContextMenu from "./dashboard/components/DashboardContextMenu.jsx";
 import DashboardWorkspace from "./dashboard/components/DashboardWorkspace.jsx";
+import StorageAnalyzer from "./dashboard/components/StorageAnalyzer.jsx";
 import UploadJobsTray from "./dashboard/components/UploadJobsTray.jsx";
 import BulkActionConfirmModal from "./dashboard/components/BulkActionConfirmModal.jsx";
 import useDashboardData, {clearDashboardTreeCache} from "./dashboard/hooks/useDashboardData.js";
@@ -128,6 +129,7 @@ export default function DashboardPage({active = true} = {}) {
     if (active) lastDashboardFolderRef.current = currentFolder;
 
     const [sidebarOpen, setSidebarOpen] = useState(false);
+    const [showStorageAnalyzer, setShowStorageAnalyzer] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
 
     const {
@@ -2454,6 +2456,7 @@ export default function DashboardPage({active = true} = {}) {
                 onLogout={handleLogout}
                 onUploadClick={() => setShowUploadModal(true)}
                 onCreateFolderClick={() => setShowFolderModal(true)}
+                onStorageClick={() => setShowStorageAnalyzer(true)}
                 storageUsed={storageUsed}
             />
         </div>
@@ -2474,6 +2477,10 @@ export default function DashboardPage({active = true} = {}) {
                     }}
                     onCreateFolderClick={() => {
                         setShowFolderModal(true);
+                        setSidebarOpen(false);
+                    }}
+                    onStorageClick={() => {
+                        setShowStorageAnalyzer(true);
                         setSidebarOpen(false);
                     }}
                     storageUsed={storageUsed}
@@ -2778,6 +2785,13 @@ export default function DashboardPage({active = true} = {}) {
             onClose={() => setMoveDialogItems(null)}
             onMove={(items, destinationPath) => moveItemsToDirectory(items, destinationPath)}
         />)}
+        {showStorageAnalyzer && <StorageAnalyzer
+            files={files}
+            folders={folders}
+            storageUsed={storageUsed}
+            loading={loadingFiles}
+            onClose={() => setShowStorageAnalyzer(false)}
+        />}
     </div>);
 }
 

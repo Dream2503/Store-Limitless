@@ -443,13 +443,6 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
         const visibleFiles = node.files.filter((file) => fileMatchesFilter(file, filter));
         const visibleChildren = node.children.filter((child) => filter === "all" || bytesFor(child, filter) > 0);
         const hasChildren = visibleChildren.length > 0 || visibleFiles.length > 0;
-        const nestedRows = (
-            <>
-                {visibleChildren.map((child) => folderRow(child, depth + 1))}
-                {visibleFiles.map((file) => fileRow(file, depth + 1))}
-            </>
-        );
-
         if (filter !== "all" && size === 0 && !hasChildren) return null;
 
         return <Fragment key={node.path}>
@@ -477,7 +470,10 @@ export default function StorageAnalyzer({files, folders, storageUsed, loading, o
                     <span>{fileCountFor(node, filter).toLocaleString()} files</span>
                 </div>
             </div>
-            {isExpanded && <div className="storage-tree-children" style={{"--row-indent": String(depth * 17) + "px"}}>{nestedRows}</div>}
+            {isExpanded && <div className="storage-tree-children" style={{"--row-indent": String(depth * 17) + "px"}}>
+                {visibleChildren.map((child) => folderRow(child, depth + 1))}
+                {visibleFiles.map((file) => fileRow(file, depth + 1))}
+            </div>}
         </Fragment>;
     };
 

@@ -145,7 +145,7 @@ export default function Landing() {
            className="sr-only z-[100] rounded-md bg-[#3ecf8e] px-4 py-2 font-medium text-black focus:not-sr-only focus:fixed focus:left-4 focus:top-4">Skip
             to content</a>
         <header className="fixed inset-x-0 top-0 z-50 border-b border-white/[0.07] bg-[#0b0e0c]/85 backdrop-blur-xl">
-            <div className="mx-auto flex h-[72px] max-w-7xl items-center justify-between px-5 sm:px-8 lg:px-10">
+            <div className="mx-auto flex h-[72px] max-w-7xl items-center justify-between px-5 pr-16 sm:px-8 sm:pr-20 lg:px-10 lg:pr-20">
                 <Brand/>
                 <nav className="hidden items-center gap-8 md:flex" aria-label="Main navigation">
                     <a href="#home"
@@ -168,7 +168,7 @@ export default function Landing() {
                         started <span className="material-symbols-outlined text-[17px]" aria-hidden="true">arrow_outward</span></Link>
                 </div>
                 <button type="button"
-                        className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-white/10 text-[#e2e8e4] transition-colors hover:border-white/20 hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3ecf8e] md:hidden"
+                        className="mr-12 inline-flex h-10 w-10 items-center justify-center rounded-lg border border-white/10 text-[#e2e8e4] transition-colors hover:border-white/20 hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3ecf8e] md:hidden"
                         onClick={() => setMobileMenuOpen((open) => !open)}
                         aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"} aria-expanded={mobileMenuOpen}
                         aria-controls="mobile-navigation"><span className="material-symbols-outlined"

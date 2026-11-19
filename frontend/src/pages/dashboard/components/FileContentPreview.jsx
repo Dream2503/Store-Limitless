@@ -878,8 +878,8 @@ function AudioFilePlayer({src, fileName, onError}) {
         if (audioRef.current) audioRef.current.playbackRate = nextRate;
     }, []);
 
-    return <div className="w-full max-w-3xl overflow-hidden rounded-2xl border border-[#29392f] bg-[#151c17] shadow-[0_16px_48px_rgba(0,0,0,0.3)]">
-        <div className="flex items-center gap-4 border-b border-[#29392f] bg-gradient-to-r from-[#17231b] to-[#151c17] px-5 py-5 sm:px-7">
+    return <div className="audio-preview-card w-full max-w-3xl overflow-hidden rounded-2xl border border-[#29392f] bg-[#151c17] shadow-[0_16px_48px_rgba(0,0,0,0.3)]">
+        <div className="audio-preview-header flex items-center gap-4 border-b border-[#29392f] bg-gradient-to-r from-[#17231b] to-[#151c17] px-5 py-5 sm:px-7">
             <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-[#3ecf8e]/25 bg-[#3ecf8e]/10 text-[#3ecf8e]">
                 <span className="material-symbols-outlined text-[30px]" aria-hidden="true">graphic_eq</span>
             </div>
@@ -890,7 +890,7 @@ function AudioFilePlayer({src, fileName, onError}) {
             </div>
         </div>
 
-        <div className="px-5 py-5 sm:px-7">
+        <div className="audio-preview-body px-5 py-5 sm:px-7">
             <audio
                 ref={audioRef}
                 src={src}
@@ -929,7 +929,7 @@ function AudioFilePlayer({src, fileName, onError}) {
                 onChange={handleSeek}
                 disabled={!duration}
                 aria-label="Audio progress"
-                style={{background: `linear-gradient(to right, #3ecf8e ${progress}%, #344238 ${progress}%)`}}
+                style={{background: `linear-gradient(to right, #3ecf8e ${progress}%, var(--sl-audio-track, #344238) ${progress}%)`}}
                 className="mb-5 h-1.5 w-full cursor-pointer appearance-none rounded-full accent-[#3ecf8e] disabled:cursor-wait"
             />
 
@@ -942,7 +942,7 @@ function AudioFilePlayer({src, fileName, onError}) {
 
                 <div className="flex items-center gap-2">
                     <button type="button" onClick={toggleMute} aria-label={muted || volume === 0 ? "Unmute audio" : "Mute audio"}
-                            className="flex h-9 w-9 items-center justify-center rounded-lg text-[#aebbb2] transition-colors hover:bg-white/5 hover:text-white">
+                            className="audio-volume-button flex h-9 w-9 items-center justify-center rounded-lg text-[#aebbb2] transition-colors hover:bg-white/5 hover:text-white">
                         <span className="material-symbols-outlined text-[20px]" aria-hidden="true">{muted || volume === 0 ? "volume_off" : "volume_up"}</span>
                     </button>
                     <input
@@ -960,13 +960,13 @@ function AudioFilePlayer({src, fileName, onError}) {
                 <label className="flex items-center gap-2 text-[11px] text-[#9ba99f]">
                     <span>Speed</span>
                     <select value={playbackRate} onChange={changePlaybackRate}
-                            className="h-8 rounded-md border border-[#35473b] bg-[#101712] px-2 text-xs text-[#e7eee9] outline-none focus:border-[#3ecf8e]">
+                            className="audio-playback-rate h-8 rounded-md border border-[#35473b] bg-[#101712] px-2 text-xs text-[#e7eee9] outline-none focus:border-[#3ecf8e]">
                         {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => <option key={rate} value={rate}>{rate}×</option>)}
                     </select>
                 </label>
             </div>
         </div>
-        <div className="border-t border-[#29392f] bg-[#111813] px-5 py-2.5 text-center text-[11px] text-[#849188] sm:px-7">
+        <div className="audio-preview-footer border-t border-[#29392f] bg-[#111813] px-5 py-2.5 text-center text-[11px] text-[#849188] sm:px-7">
             Playback depends on the audio codec supported by your browser.
         </div>
     </div>;

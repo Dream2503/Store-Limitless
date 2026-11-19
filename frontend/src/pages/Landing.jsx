@@ -1,5 +1,6 @@
 import {useState} from "react";
 import {Link} from "react-router-dom";
+import {ThemeToggle} from "../ThemeContext.jsx";
 
 const features = [{
     icon: "upload_file",
@@ -49,7 +50,7 @@ function ProductPreview() {
             className="pointer-events-none absolute -inset-8 rounded-[2.5rem] bg-[radial-gradient(ellipse_at_center,rgba(62,207,142,0.16),transparent_68%)] blur-2xl"
             aria-hidden="true"/>
         <div
-            className="relative rotate-0 overflow-hidden rounded-2xl border border-white/10 bg-[#101413] shadow-[0_30px_100px_rgba(0,0,0,0.42)] sm:rotate-[0.5deg]">
+            className="relative rotate-0 overflow-hidden rounded-2xl border border-white/10 bg-[#101413] light-theme-card shadow-[0_30px_100px_rgba(0,0,0,0.42)] sm:rotate-[0.5deg]">
             <div className="flex items-center justify-between border-b border-white/[0.08] bg-white/[0.025] px-4 py-3 sm:px-5">
                 <div className="flex items-center gap-2.5">
                     <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#3ecf8e]/10 text-[#3ecf8e]"><span
@@ -145,7 +146,7 @@ export default function Landing() {
            className="sr-only z-[100] rounded-md bg-[#3ecf8e] px-4 py-2 font-medium text-black focus:not-sr-only focus:fixed focus:left-4 focus:top-4">Skip
             to content</a>
         <header className="fixed inset-x-0 top-0 z-50 border-b border-white/[0.07] bg-[#0b0e0c]/85 backdrop-blur-xl">
-            <div className="mx-auto flex h-[72px] max-w-7xl items-center justify-between px-5 pr-16 sm:px-8 sm:pr-20 lg:px-10 lg:pr-20">
+            <div className="mx-auto flex h-[72px] max-w-7xl items-center justify-between px-5 sm:px-8 lg:px-10">
                 <Brand/>
                 <nav className="hidden items-center gap-8 md:flex" aria-label="Main navigation">
                     <a href="#home"
@@ -166,13 +167,17 @@ export default function Landing() {
                     <Link to="/signup"
                           className="inline-flex items-center gap-2 rounded-lg bg-[#3ecf8e] px-4 py-2.5 text-sm font-semibold text-[#07130d] shadow-[0_0_24px_rgba(62,207,142,0.10)] transition hover:bg-[#63dba6] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3ecf8e]">Get
                         started <span className="material-symbols-outlined text-[17px]" aria-hidden="true">arrow_outward</span></Link>
+                    <ThemeToggle/>
                 </div>
-                <button type="button"
-                        className="mr-12 inline-flex h-10 w-10 items-center justify-center rounded-lg border border-white/10 text-[#e2e8e4] transition-colors hover:border-white/20 hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3ecf8e] md:hidden"
-                        onClick={() => setMobileMenuOpen((open) => !open)}
-                        aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"} aria-expanded={mobileMenuOpen}
-                        aria-controls="mobile-navigation"><span className="material-symbols-outlined"
-                                                                aria-hidden="true">{mobileMenuOpen ? "close" : "menu"}</span></button>
+                <div className="flex items-center gap-2 md:hidden">
+                    <ThemeToggle/>
+                    <button type="button"
+                            className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-white/10 text-[#e2e8e4] transition-colors hover:border-white/20 hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#3ecf8e]"
+                            onClick={() => setMobileMenuOpen((open) => !open)}
+                            aria-label={mobileMenuOpen ? "Close navigation menu" : "Open navigation menu"} aria-expanded={mobileMenuOpen}
+                            aria-controls="mobile-navigation"><span className="material-symbols-outlined"
+                                                                    aria-hidden="true">{mobileMenuOpen ? "close" : "menu"}</span></button>
+                </div>
             </div>
             {mobileMenuOpen && <nav id="mobile-navigation" className="border-t border-white/[0.07] bg-[#101411] px-5 py-4 md:hidden"
                                     aria-label="Mobile navigation">
@@ -260,7 +265,7 @@ export default function Landing() {
                         obstacles between you and the files you need.</p></div>
                     <div className="mt-12 grid gap-3 sm:grid-cols-2 lg:mt-16 lg:grid-cols-3">
                         {features.map((feature) => <article key={feature.title}
-                                                            className="group relative overflow-hidden rounded-2xl border border-[#26332b] bg-[#101512] p-6 shadow-[0_12px_36px_rgba(0,0,0,0.12)] transition duration-200 hover:-translate-y-1 hover:border-[#3ecf8e]/30 hover:bg-[#131a16] hover:shadow-[0_18px_44px_rgba(0,0,0,0.20)] sm:p-7 motion-reduce:transform-none motion-reduce:transition-none">
+                                                            className="group relative overflow-hidden rounded-2xl border border-[#26332b] bg-[#101512] light-theme-card p-6 shadow-[0_12px_36px_rgba(0,0,0,0.12)] transition duration-200 hover:-translate-y-1 hover:border-[#3ecf8e]/30 hover:bg-[#131a16] hover:shadow-[0_18px_44px_rgba(0,0,0,0.20)] sm:p-7 motion-reduce:transform-none motion-reduce:transition-none">
                             <div
                                 className="absolute right-0 top-0 h-24 w-24 rounded-full bg-[#3ecf8e]/[0.035] blur-2xl transition group-hover:bg-[#3ecf8e]/[0.09]"
                                 aria-hidden="true"/>
@@ -277,7 +282,7 @@ export default function Landing() {
             </section>
 
             <section id="how-it-works"
-                     className="scroll-mt-24 border-y border-white/[0.07] bg-[#0f1310] px-5 py-20 sm:px-8 sm:py-24 lg:px-10 lg:py-28">
+                     className="light-theme-section scroll-mt-24 border-y border-white/[0.07] bg-[#0f1310] px-5 py-20 sm:px-8 sm:py-24 lg:px-10 lg:py-28">
                 <div className="mx-auto max-w-7xl">
                     <div className="max-w-2xl"><p className="text-xs font-semibold uppercase tracking-[0.2em] text-[#3ecf8e]">How it works</p><h2
                         className="mt-4 text-3xl font-semibold tracking-[-0.04em] text-white sm:text-4xl">Up and running in a few steps.</h2><p
@@ -302,7 +307,7 @@ export default function Landing() {
 
             <section className="px-5 py-20 sm:px-8 sm:py-24 lg:px-10 lg:py-28">
                 <div
-                    className="relative mx-auto max-w-7xl overflow-hidden rounded-3xl border border-[#3ecf8e]/20 bg-[#101813] px-6 py-12 text-center sm:px-12 sm:py-16 lg:px-20">
+                    className="light-theme-card relative mx-auto max-w-7xl overflow-hidden rounded-3xl border border-[#3ecf8e]/20 bg-[#101813] px-6 py-12 text-center sm:px-12 sm:py-16 lg:px-20">
                     <div
                         className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(62,207,142,0.13),transparent_60%)]"
                         aria-hidden="true"/>

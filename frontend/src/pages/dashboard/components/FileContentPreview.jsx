@@ -320,6 +320,131 @@ function MarkdownPreview({content}) {
  * The document is loaded through the existing signed URL and supports the backend's byte ranges.
  * @param {{streamUrl: string, fileName?: string}} props
  */
+/**
+ * Render an individual PDF page only while it is near the scroll viewport.
+ * Page placeholders keep the document's continuous vertical layout stable,
+ * while releasing canvases outside the viewport to limit memory use.
+ */
+function PDFPageCanvas({documentProxy, pageNumber, containerWidth, fitToWidth, zoom, scrollRoot, onError}) {
+    const wrapperRef = useRef(null);
+    const canvasRef = useRef(null);
+    const [nearViewport, setNearViewport] = useState(pageNumber === 1);
+    const [pageSize, setPageSize] = useState(null);
+
+    useEffect(() => {
+        const element = wrapperRef.current;
+        if (!element) return undefined;
+
+        if (typeof IntersectionObserver === "undefined") {
+            setNearViewport(true);
+            return undefined;
+        }
+
+        const observer = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                if (entry.target === element) setNearViewport(entry.isIntersecting);
+            }
+        }, {
+            root: scrollRoot || null,
+            rootMargin: "1000px 0px",
+            threshold: 0,
+        });
+
+        observer.observe(element);
+        return () => observer.disconnect();
+    }, [scrollRoot]);
+
+    useEffect(() => {
+        if (!nearViewport || !documentProxy) return undefined;
+
+        let cancelled = false;
+        let renderTask = null;
+
+        (async () => {
+            try {
+                const page = await documentProxy.getPage(pageNumber);
+                if (cancelled) return;
+
+                const baseViewport = page.getViewport({scale: 1});
+                const fittedScale = containerWidth > 0
+                    ? Math.min(2.5, Math.max(0.25, (containerWidth - 48) / baseViewport.width))
+                    : 1;
+                const scale = fitToWidth ? fittedScale : zoom;
+                const viewport = page.getViewport({scale});
+                const canvas = canvasRef.current;
+                const context = canvas?.getContext("2d", {alpha: false});
+
+                if (!canvas || !context) {
+                    throw new Error("Your browser could not create a PDF rendering surface.");
+                }
+
+                setPageSize({width: viewport.width, height: viewport.height});
+                const outputScale = Math.min(window.devicePixelRatio || 1, 2);
+                canvas.width = Math.max(1, Math.floor(viewport.width * outputScale));
+                canvas.height = Math.max(1, Math.floor(viewport.height * outputScale));
+                canvas.style.width = Math.floor(viewport.width) + "px";
+                canvas.style.height = Math.floor(viewport.height) + "px";
+
+                renderTask = page.render({
+                    canvasContext: context,
+                    viewport,
+                    transform: outputScale !== 1
+                        ? [outputScale, 0, 0, outputScale, 0, 0]
+                        : null,
+                });
+                await renderTask.promise;
+            } catch (error) {
+                if (!cancelled && (!error || error.name !== "RenderingCancelledException")) {
+                    onError((error && error.message) || "Could not render this PDF page.");
+                }
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+            if (renderTask) {
+                try {
+                    renderTask.cancel();
+                } catch {
+                    // A finished render task does not need further cancellation.
+                }
+            }
+            // Release the backing bitmap when a page leaves the preload window.
+            const canvas = canvasRef.current;
+            if (canvas) {
+                canvas.width = 0;
+                canvas.height = 0;
+            }
+        };
+    }, [documentProxy, pageNumber, containerWidth, fitToWidth, zoom, nearViewport, onError]);
+
+    const estimatedWidth = fitToWidth
+        ? Math.max(200, containerWidth - 48)
+        : Math.max(200, 612 * zoom);
+    const pageWidth = pageSize?.width || estimatedWidth;
+    const pageAspectRatio = pageSize
+        ? `${pageSize.width} / ${pageSize.height}`
+        : "0.707 / 1";
+
+    return <div
+        ref={wrapperRef}
+        data-pdf-page={pageNumber}
+        className="relative mx-auto flex shrink-0 justify-center bg-white shadow-[0_8px_32px_rgba(0,0,0,0.24)]"
+        style={{
+            width: `${pageWidth}px`,
+            maxWidth: fitToWidth ? "100%" : undefined,
+            aspectRatio: pageAspectRatio,
+        }}
+    >
+        <canvas
+            ref={canvasRef}
+            role="img"
+            aria-label={`PDF page ${pageNumber}`}
+            className="block bg-white"
+        />
+    </div>;
+}
+
 function PDFDocumentViewer({streamUrl, fileName}) {
     const [documentProxy, setDocumentProxy] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -331,12 +456,9 @@ function PDFDocumentViewer({streamUrl, fileName}) {
     const [zoom, setZoom] = useState(1);
     const [fitToWidth, setFitToWidth] = useState(true);
     const [containerWidth, setContainerWidth] = useState(0);
-    const [rendering, setRendering] = useState(false);
     const containerRef = useRef(null);
-    const canvasRef = useRef(null);
     const documentRef = useRef(null);
-    const renderTaskRef = useRef(null);
-    const renderedScaleRef = useRef(1);
+    const scrollFrameRef = useRef(null);
 
     useEffect(() => {
         let cancelled = false;
@@ -381,14 +503,6 @@ function PDFDocumentViewer({streamUrl, fileName}) {
 
         return () => {
             cancelled = true;
-            if (renderTaskRef.current) {
-                try {
-                    renderTaskRef.current.cancel();
-                } catch {
-                    // A finished render task does not need further cancellation.
-                }
-                renderTaskRef.current = null;
-            }
             const loadedDocument = documentRef.current;
             documentRef.current = null;
             if (loadedDocument) void loadedDocument.destroy();
@@ -415,69 +529,53 @@ function PDFDocumentViewer({streamUrl, fileName}) {
 
     useEffect(() => {
         setPageInput(String(pageNumber));
-        if (containerRef.current) containerRef.current.scrollTo({top: 0, behavior: "auto"});
     }, [pageNumber]);
 
-    useEffect(() => {
-        if (!documentProxy || !canvasRef.current) return undefined;
+    useEffect(() => () => {
+        if (scrollFrameRef.current !== null) {
+            window.cancelAnimationFrame(scrollFrameRef.current);
+        }
+    }, []);
 
-        let cancelled = false;
-        let activeRenderTask = null;
-        setRendering(true);
-        setPageError("");
+    const updateCurrentPage = useCallback(() => {
+        const container = containerRef.current;
+        if (!container) return;
 
-        (async () => {
-            try {
-                const page = await documentProxy.getPage(pageNumber);
-                if (cancelled) return;
+        const marker = container.getBoundingClientRect().top + Math.min(180, container.clientHeight * 0.35);
+        const pages = container.querySelectorAll("[data-pdf-page]");
+        let selectedPage = 1;
+        let bestDistance = Number.POSITIVE_INFINITY;
 
-                const baseViewport = page.getViewport({scale: 1});
-                const fittedScale = containerWidth > 0
-                    ? Math.min(2.5, Math.max(0.25, (containerWidth - 48) / baseViewport.width))
-                    : 1;
-                const scale = fitToWidth ? fittedScale : zoom;
-                const viewport = page.getViewport({scale});
-                renderedScaleRef.current = scale;
-                const canvas = canvasRef.current;
-                const context = canvas && canvas.getContext("2d", {alpha: false});
-                if (!canvas || !context) throw new Error("Your browser could not create a PDF rendering surface.");
+        for (const page of pages) {
+            const rect = page.getBoundingClientRect();
+            const pageNumberValue = Number(page.getAttribute("data-pdf-page"));
+            if (!Number.isFinite(pageNumberValue)) continue;
 
-                const outputScale = Math.min(window.devicePixelRatio || 1, 2);
-                canvas.width = Math.max(1, Math.floor(viewport.width * outputScale));
-                canvas.height = Math.max(1, Math.floor(viewport.height * outputScale));
-                canvas.style.width = Math.floor(viewport.width) + "px";
-                canvas.style.height = Math.floor(viewport.height) + "px";
-
-                activeRenderTask = page.render({
-                    canvasContext: context,
-                    viewport,
-                    transform: outputScale !== 1
-                        ? [outputScale, 0, 0, outputScale, 0, 0]
-                        : null,
-                });
-                renderTaskRef.current = activeRenderTask;
-                await activeRenderTask.promise;
-            } catch (error) {
-                if (!cancelled && (!error || error.name !== "RenderingCancelledException")) {
-                    setPageError((error && error.message) || "Could not render this PDF page.");
-                }
-            } finally {
-                if (!cancelled) setRendering(false);
-                if (renderTaskRef.current === activeRenderTask) renderTaskRef.current = null;
+            if (rect.top <= marker && rect.bottom >= marker) {
+                selectedPage = pageNumberValue;
+                bestDistance = 0;
+                break;
             }
-        })();
 
-        return () => {
-            cancelled = true;
-            if (activeRenderTask) {
-                try {
-                    activeRenderTask.cancel();
-                } catch {
-                    // The task may already have completed.
-                }
+            const distance = marker < rect.top ? rect.top - marker : marker - rect.bottom;
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                selectedPage = pageNumberValue;
             }
-        };
-    }, [documentProxy, pageNumber, zoom, fitToWidth, containerWidth]);
+        }
+
+        setPageNumber((current) => current === selectedPage ? current : selectedPage);
+    }, []);
+
+    const handleViewerScroll = useCallback(() => {
+        if (scrollFrameRef.current !== null) {
+            window.cancelAnimationFrame(scrollFrameRef.current);
+        }
+        scrollFrameRef.current = window.requestAnimationFrame(() => {
+            scrollFrameRef.current = null;
+            updateCurrentPage();
+        });
+    }, [updateCurrentPage]);
 
     const goToPage = useCallback((value) => {
         const parsed = Number.parseInt(String(value), 10);
@@ -485,18 +583,22 @@ function PDFDocumentViewer({streamUrl, fileName}) {
             setPageInput(String(pageNumber));
             return;
         }
+
         const nextPage = Math.max(1, Math.min(pageCount, parsed));
+        const target = containerRef.current?.querySelector(`[data-pdf-page="${nextPage}"]`);
+        target?.scrollIntoView({behavior: "auto", block: "start"});
         setPageNumber(nextPage);
         setPageInput(String(nextPage));
     }, [pageCount, pageNumber]);
 
     const changeZoom = useCallback((amount) => {
         setFitToWidth(false);
-        setZoom((current) => {
-            const base = fitToWidth ? renderedScaleRef.current : current;
-            return Math.max(0.5, Math.min(3, Math.round((base + amount) * 100) / 100));
-        });
-    }, [fitToWidth]);
+        setZoom((current) => Math.max(0.5, Math.min(3, Math.round((current + amount) * 100) / 100)));
+    }, []);
+
+    const handlePageError = useCallback((message) => {
+        setPageError(message);
+    }, []);
 
     const buttonClass = "inline-flex h-8 min-w-8 items-center justify-center gap-1 rounded-md border border-[#3a493f] px-2 text-xs text-[#e7eee9] transition-colors hover:border-[#3ecf8e]/50 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-35 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]";
     const iconButtonClass = "inline-flex h-8 w-8 items-center justify-center rounded-md border border-[#3a493f] text-[#e7eee9] transition-colors hover:border-[#3ecf8e]/50 hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-35 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#3ecf8e]";
@@ -552,28 +654,34 @@ function PDFDocumentViewer({streamUrl, fileName}) {
             </div>
         </div>
 
-        <div ref={containerRef} className="relative min-h-0 flex-1 overflow-auto bg-[#0d100e] px-3 py-4 sm:px-6 sm:py-6">
+        <div
+            ref={containerRef}
+            onScroll={handleViewerScroll}
+            className="relative min-h-0 flex-1 overflow-auto bg-[#0d100e] px-3 py-4 sm:px-6 sm:py-6"
+        >
             {loading && <PreviewMessage message="Loading PDF…"/>}
             {!loading && loadError && <PreviewMessage message={loadError}/>}
-            {!loading && !loadError && <>
-                <div className="mx-auto flex w-max max-w-full justify-center">
-                    <canvas
-                        ref={canvasRef}
-                        role="img"
-                        aria-label={(fileName || "PDF") + " page " + pageNumber + " of " + pageCount}
-                        className="block max-w-full bg-white shadow-[0_8px_32px_rgba(0,0,0,0.45)]"
-                    />
+            {!loading && !loadError && documentProxy && (
+                <div className="flex min-w-0 flex-col gap-6 pb-8">
+                    {Array.from({length: pageCount}, (_, index) => (
+                        <PDFPageCanvas
+                            key={index + 1}
+                            documentProxy={documentProxy}
+                            pageNumber={index + 1}
+                            containerWidth={containerWidth}
+                            fitToWidth={fitToWidth}
+                            zoom={zoom}
+                            scrollRoot={containerRef.current}
+                            onError={handlePageError}
+                        />
+                    ))}
                 </div>
-                {rendering && <div className="pointer-events-none absolute right-4 top-4 flex items-center gap-2 rounded-md border border-[#3a493f] bg-[#171d19]/95 px-3 py-2 text-xs text-[#b5c1b9] shadow-lg">
-                    <span className="material-symbols-outlined animate-spin text-[15px]" aria-hidden="true">progress_activity</span>
-                    Rendering page…
-                </div>}
-                {pageError && <div role="alert" className="mx-auto mt-4 max-w-xl rounded-lg border border-[#784448] bg-[#301d20] px-4 py-3 text-sm text-[#ffb8bc]">{pageError}</div>}
-            </>}
+            )}
+            {pageError && <div role="alert" className="sticky bottom-3 mx-auto mt-3 max-w-xl rounded-lg border border-[#784448] bg-[#301d20] px-4 py-3 text-sm text-[#ffb8bc]">{pageError}</div>}
         </div>
         <div className="flex shrink-0 items-center justify-between gap-2 border-t border-[#2e3a32] bg-[#171d19] px-3 py-1.5 text-[11px] text-[#849188]">
             <span className="min-w-0 truncate" title={fileName}>{fileName || "PDF document"}</span>
-            <span className="shrink-0">{pageCount ? pageCount.toLocaleString() + " pages" : "PDF viewer"}</span>
+            <span className="shrink-0">{pageCount ? `Page ${pageNumber} of ${pageCount}` : "PDF viewer"}</span>
         </div>
     </div>;
 }

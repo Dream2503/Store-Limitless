@@ -143,6 +143,7 @@ body {
     --sl-text: #fafafa;
     --sl-text-muted: #898989;
     --sl-accent: #3ecf8e;
+    --sl-audio-track: #344238;
 }
 
 :root[data-theme="light"] {
@@ -155,6 +156,7 @@ body {
     --sl-text: #111827;
     --sl-text-muted: #64748b;
     --sl-accent: #15845b;
+    --sl-audio-track: #cbd5e1;
 }
 
 html[data-theme="light"],
@@ -577,12 +579,27 @@ html[data-theme="light"] .ytp-player {
     color: #1f2937;
 }
 
+/* Video pixels stay black in letterboxed areas, and the control chrome stays
+   a dark overlay in both themes. A light gradient here bleeds into the video
+   and creates the pale blur visible along its bottom edge. */
 html[data-theme="light"] .ytp-controls {
-    background: linear-gradient(0deg, rgba(248, 250, 252, 0.98), rgba(248, 250, 252, 0.84) 42%, transparent);
+    background: linear-gradient(0deg, rgba(0, 0, 0, 0.94), rgba(0, 0, 0, 0.66) 42%, transparent) !important;
 }
 
 html[data-theme="light"] .ytp-button {
-    color: #334155;
+    color: #ffffff;
+}
+
+html[data-theme="light"] .ytp-time {
+    color: #eeeeee;
+}
+
+html[data-theme="light"] .ytp-track {
+    background: rgba(255, 255, 255, 0.28);
+}
+
+html[data-theme="light"] .ytp-buffered {
+    background: rgba(255, 255, 255, 0.52);
 }
 
 html[data-theme="light"] .ytp-button:hover {
@@ -629,4 +646,71 @@ html[data-theme="light"] .ytp-tooltip {
     background: #ffffff;
     color: #334155;
     box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+}
+
+
+/* Audio player: use one consistent Supabase-like surface in light mode.
+   The header intentionally changes with the theme instead of retaining its
+   dark green gradient behind foreground text that has become dark. */
+html[data-theme="light"] .audio-preview-card {
+    border-color: #e2e8f0 !important;
+    background: #ffffff !important;
+    box-shadow: 0 12px 36px rgba(15, 23, 42, 0.10) !important;
+}
+
+html[data-theme="light"] .audio-preview-header {
+    border-color: #e2e8f0 !important;
+    background: linear-gradient(110deg, #ffffff 0%, #f8fafc 100%) !important;
+}
+
+html[data-theme="light"] .audio-preview-header h2 {
+    color: #1f2937 !important;
+}
+
+html[data-theme="light"] .audio-preview-header p {
+    color: #64748b !important;
+}
+
+html[data-theme="light"] .audio-preview-header p:first-child {
+    color: #15845b !important;
+}
+
+html[data-theme="light"] .audio-preview-header > div:first-child {
+    border-color: #b9e7d1 !important;
+    background: #edf7f1 !important;
+    color: #15845b !important;
+}
+
+html[data-theme="light"] .audio-preview-body {
+    background: #ffffff !important;
+    color: #334155 !important;
+}
+
+html[data-theme="light"] .audio-preview-body input[type="range"] {
+    accent-color: #15845b;
+}
+
+html[data-theme="light"] .audio-volume-button {
+    color: #475569 !important;
+}
+
+html[data-theme="light"] .audio-volume-button:hover {
+    background: #f1f5f9 !important;
+    color: #15845b !important;
+}
+
+html[data-theme="light"] .audio-playback-rate {
+    border-color: #dbe3eb !important;
+    background: #ffffff !important;
+    color: #334155 !important;
+}
+
+html[data-theme="light"] .audio-preview-footer {
+    border-color: #e2e8f0 !important;
+    background: #f8fafc !important;
+    color: #64748b !important;
+}
+
+html[data-theme="light"] .audio-preview-body input[type="range"]:first-of-type {
+    --audio-progress-track: var(--sl-audio-track);
 }

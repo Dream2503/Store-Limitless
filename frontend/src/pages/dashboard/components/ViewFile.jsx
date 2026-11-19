@@ -1050,7 +1050,7 @@ export default function ViewFile({active = true} = {}) {
                      visibility: active ? "visible" : "hidden",
                      pointerEvents: active ? "auto" : "none",
                  }}>
-        <header className="relative z-30 flex min-h-14 shrink-0 items-center gap-3 border-b border-[#243229] bg-[#0b0f0c] px-4 py-2.5 sm:px-5">
+        <header className="relative z-30 flex min-h-14 shrink-0 items-center gap-3 border-b border-[#243229] bg-[#0b0f0c] px-4 pr-16 py-2.5 sm:px-5 sm:pr-20">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[#3ecf8e]/20 bg-[#3ecf8e]/10 text-[#3ecf8e]">
                 <span className="material-symbols-outlined text-[19px]"
                       aria-hidden="true">{kind === "pdf" ? "picture_as_pdf" : kind === "image" ? "image" : kind === "text" ? "code" : kind === "markdown" ? "article" : kind === "audio" ? "audio_file" : "movie"}</span>

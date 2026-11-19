@@ -404,3 +404,62 @@ html[data-theme="light"] [class*="bg-[#17643d]"][class*="text-[#fafafa]"],
 html[data-theme="light"] [class*="bg-[#007a46]"][class*="text-[#fafafa]"] {
     color: #ffffff !important;
 }
+
+
+/* Fine-grained colors used by nested preview controls and upload dialogs. */
+html[data-theme="light"] [class*="bg-[#101712]"],
+html[data-theme="light"] [class*="bg-[#111813]"],
+html[data-theme="light"] [class*="bg-[#121a15]"],
+html[data-theme="light"] [class*="bg-[#151c17]"],
+html[data-theme="light"] [class*="bg-[#1b1b1b]"] {
+    background-color: #ffffff !important;
+}
+
+html[data-theme="light"] [class*="bg-[#7f8f84]"] {
+    background-color: #e2e8f0 !important;
+}
+
+html[data-theme="light"] [class*="bg-[#301d20]"] {
+    background-color: #fef2f2 !important;
+}
+
+html[data-theme="light"] [class*="border-[#29392f]"],
+html[data-theme="light"] [class*="border-[#2e3a32]"],
+html[data-theme="light"] [class*="border-[#304236]"],
+html[data-theme="light"] [class*="border-[#35473b]"] {
+    border-color: var(--sl-border) !important;
+}
+
+html[data-theme="light"] [class*="border-[#784448]"] {
+    border-color: #fecaca !important;
+}
+
+html[data-theme="light"] [class*="text-[#70a88b]"],
+html[data-theme="light"] [class*="text-[#7ed6a8]"],
+html[data-theme="light"] [class*="text-[#a7e3c6]"] {
+    color: #15845b !important;
+}
+
+html[data-theme="light"] [class*="text-[#89988e]"],
+html[data-theme="light"] [class*="text-[#9ba99f]"],
+html[data-theme="light"] [class*="text-[#a3a3a3]"],
+html[data-theme="light"] [class*="text-[#aebbb2]"],
+html[data-theme="light"] [class*="text-[#bdbdbd]"],
+html[data-theme="light"] [class*="text-[#c2cec6]"],
+html[data-theme="light"] [class*="text-[#c5d0c8]"] {
+    color: #64748b !important;
+}
+
+html[data-theme="light"] [class*="text-[#e5e5e5]"],
+html[data-theme="light"] [class*="text-[#f5f5f5]"] {
+    color: #1f2937 !important;
+}
+
+html[data-theme="light"] [class*="text-[#ffb8bc]"] {
+    color: #b42318 !important;
+}
+
+html[data-theme="light"] [class*="bg-[#168452]"][class*="text-[#fafafa]"],
+html[data-theme="light"] [class*="bg-[#168452]"][class*="text-white"] {
+    color: #ffffff !important;
+}

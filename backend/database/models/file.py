@@ -15,7 +15,7 @@ from core.data_center import Database
 from core.utils import write_log
 
 
-SYSTEM_CLIPBOARD_FILE_NAME = ".storelimitless-clipboard.json"
+SYSTEM_CLIPBOARD_FILE_NAME = ".clipboard.json"
 
 
 class File(BaseModel):

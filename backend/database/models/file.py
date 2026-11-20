@@ -15,6 +15,9 @@ from core.data_center import Database
 from core.utils import write_log
 
 
+SYSTEM_CLIPBOARD_FILE_NAME = ".storelimitless-clipboard.json"
+
+
 class File(BaseModel):
     """Represent a stored file, including its parent directory, content metadata, data-center links, owner, and trash state."""
     model_config = ConfigDict(from_attributes=True)
@@ -184,6 +187,11 @@ class File(BaseModel):
         result: list[File] = []
 
         for file in files:
+            # The account clipboard is an internal file-backed system record, not a
+            # user-visible file and should not inflate normal storage summaries.
+            if file.name == SYSTEM_CLIPBOARD_FILE_NAME:
+                continue
+
             if trash != (file.deleted_at is not None):
                 continue
 

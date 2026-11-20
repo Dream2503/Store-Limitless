@@ -6,6 +6,7 @@ import DashboardPage from "./pages/Dashboard.jsx";
 import UploadPage from "./pages/dashboard/components/UploadModal.jsx";
 import ViewFile from "./pages/dashboard/components/ViewFile.jsx";
 import UploadTrayPage from "./pages/dashboard/components/UploadTrayPage.jsx";
+import ClipboardPage from "./pages/dashboard/components/ClipboardPage.jsx";
 import {AUTH_SESSION_END_EVENT, AUTH_SESSION_START_EVENT} from "./pages/dashboard/utils.js";
 import {ThemeProvider} from "./ThemeContext.jsx";
 
@@ -205,6 +206,7 @@ function PersistentRoutePages() {
             <Route path="/login" element={<Auth initialMode="login"/>}/>
             <Route path="/signup" element={<Auth initialMode="signup"/>}/>
             <Route path="/upload-tray" element={hasStoredSession ? <UploadTrayPage/> : <Navigate to="/" replace/>}/>
+            <Route path="/clipboard" element={hasStoredSession ? <ClipboardPage/> : <Navigate to="/login" replace/>}/>
             <Route path="/dashboard" element={<LegacyDashboardRedirect/>}/>
             <Route path="/upload" element={hasStoredSession ? <UploadPage/> : <Navigate to="/" replace/>}/>
             <Route path="/home/*" element={hasStoredSession ? null : <Navigate to="/" replace/>}/>

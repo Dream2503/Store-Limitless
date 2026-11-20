@@ -49,6 +49,26 @@ async def register(user: User) -> JSONResponse:
 
     user.password = hash_password(user.password)
     await user.save()
+
+    # New accounts receive their hidden clipboard file during registration.
+    # The first-open fallback below remains temporarily for accounts created
+    # before this initialization was added.
+    try:
+        async with _clipboard_lock(user.username):
+            existing_clipboard = await to_thread(_get_clipboard_file_sync, user.username)
+            if existing_clipboard is None:
+                await _write_clipboard_document(user.username, [], None)
+    except Exception as error:
+        # Do not leave a valid account unusable if the external storage provider
+        # is temporarily unavailable. Opening Clipboard later retries creation.
+        write_log(
+            "ERROR",
+            Database,
+            "CLIPBOARD INIT",
+            user.username,
+            f"Could not initialize clipboard during registration: {type(error).__name__}: {error}",
+        )
+
     write_log("INFO", Database, "AUTH", user.username, "Account registration completed")
     return JSONResponse({"message": "User registered successfully"})
 

@@ -171,6 +171,7 @@ def _get_clipboard_home_sync(username: str) -> tuple[int, str]:
             WHERE username = %s
               AND deleted_at IS NULL
               AND name <> %s
+              AND data_center IN ('Discord', 'Telegram')
             ORDER BY modified_at DESC, id DESC
             LIMIT 1;
             """,

@@ -1,12 +1,14 @@
 import {iconBtn} from "../constants.js";
 import {formatDate, formatFileSize, getFileIcon} from "../utils.js";
 import {ThemeToggle} from "../../../ThemeContext.jsx";
+import {useNavigate} from "react-router-dom";
 
 /**
  * Main dashboard workspace: search, breadcrumbs, folder cards, and file rows.
  * State and interaction handlers remain owned by DashboardPage.
  */
 export default function DashboardWorkspace(props) {
+    const navigate = useNavigate();
     const {
         sidebarOpen,
         setSidebarOpen,
@@ -78,7 +80,14 @@ export default function DashboardWorkspace(props) {
                     />
                 </div>
             </div>
-            <ThemeToggle className="ml-4"/>
+            <div className="ml-4 flex shrink-0 items-center gap-2">
+                <button type="button" onClick={() => navigate("/clipboard")}
+                        className="clipboard-nav-button" aria-label="Open cross-device clipboard"
+                        title="Cross-device clipboard">
+                    <span className="material-symbols-outlined text-[19px]" aria-hidden="true">content_paste</span>
+                </button>
+                <ThemeToggle/>
+            </div>
         </header>
 
         {/* Main View Area */}

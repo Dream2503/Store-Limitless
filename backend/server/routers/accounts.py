@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from asyncio import to_thread
+from contextlib import aclosing
+from datetime import datetime, timezone
 from hashlib import sha256
+from pathlib import Path
+from uuid import UUID, uuid4
+
+import aiofiles
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -11,10 +18,13 @@ from pydantic import BaseModel
 
 from backend.database.connection import POOL
 from backend.database.models import Directory, File, User
+from backend.database.models.file import SYSTEM_CLIPBOARD_FILE_NAME
 from backend.database.redis_server import Redis
 from backend.server.jwt_handler import OAuth2_scheme, create_access_token, get_current_user, verify_token
 from backend.server.security import hash_password, verify_password
-from core.data_center import Database
+from core.config import TRANSFER_PATH
+from core.data_center import DataCenter, Database
+from core.transfer import file_upload
 from core.utils import write_log
 
 router: APIRouter = APIRouter()
@@ -103,82 +113,218 @@ async def get_metadata(user: User = Depends(get_current_user)) -> JSONResponse:
 
 
 
+# The clipboard is one hidden JSON text file per account in /home. Each
+# entry is an object with its own UUID and timestamp, so create/copy/delete
+# operations rewrite the same stored file instead of creating database rows.
+CLIPBOARD_MAX_ENTRY_SIZE = 1_000_000
+CLIPBOARD_MAX_FILE_SIZE = 5_000_000
+CLIPBOARD_DATA_CENTER = "Discord"
+
+
 class ClipboardCreateRequest(BaseModel):
-    """Plain text saved to the authenticated account's cross-device clipboard."""
+    """Plain text saved to the authenticated account's single clipboard file."""
 
     content: str
 
 
-def _list_clipboard_items(username: str) -> list[dict[str, object]]:
-    """Read only the authenticated user's clipboard entries from PostgreSQL."""
+def _get_clipboard_file_sync(username: str) -> File | None:
+    """Read the single active clipboard file's metadata from the existing files table."""
 
     with POOL.connection() as connection:
-        rows = connection.execute(
+        row = connection.execute(
             """
-            SELECT id, content, created_at
-            FROM clipboard_items
-            WHERE username = %s
-            ORDER BY created_at DESC, id DESC;
+            SELECT f.id, f.directory_id, f.name, f.type, f.size, f.modified_at,
+                   f.deleted_at, f.data_center, f.links, f.username, f.public_slug
+            FROM files AS f
+            INNER JOIN directories AS d
+                ON d.id = f.directory_id AND d.username = f.username
+            WHERE f.username = %s
+              AND d.path = '/home'
+              AND f.name = %s
+              AND f.deleted_at IS NULL
+            ORDER BY f.id DESC
+            LIMIT 1;
+            """,
+            (username, SYSTEM_CLIPBOARD_FILE_NAME),
+        ).fetchone()
+
+    return File(**row) if row is not None else None
+
+
+def _get_clipboard_home_sync(username: str) -> tuple[int, str]:
+    """Return the user's home directory ID and preferred existing storage provider."""
+
+    with POOL.connection() as connection:
+        directory = connection.execute(
+            """
+            SELECT id
+            FROM directories
+            WHERE username = %s AND path = '/home' AND deleted_at IS NULL
+            LIMIT 1;
             """,
             (username,),
-        ).fetchall()
-
-    return [
-        {
-            "id": int(row["id"]),
-            "content": str(row["content"]),
-            "created_at": row["created_at"].isoformat(),
-        }
-        for row in rows
-    ]
-
-
-def _create_clipboard_item(username: str, content: str) -> dict[str, object]:
-    """Insert one clipboard entry and return the saved database record."""
-
-    with POOL.connection() as connection:
-        row = connection.execute(
-            """
-            INSERT INTO clipboard_items (username, content)
-            VALUES (%s, %s)
-            RETURNING id, content, created_at;
-            """,
-            (username, content),
         ).fetchone()
-        connection.commit()
-
-    if row is None:
-        raise RuntimeError("PostgreSQL did not return the created clipboard entry")
-
-    return {
-        "id": int(row["id"]),
-        "content": str(row["content"]),
-        "created_at": row["created_at"].isoformat(),
-    }
-
-
-def _delete_clipboard_item(username: str, item_id: int) -> bool:
-    """Delete one clipboard item only when it belongs to the authenticated user."""
-
-    with POOL.connection() as connection:
-        row = connection.execute(
+        provider = connection.execute(
             """
-            DELETE FROM clipboard_items
-            WHERE id = %s AND username = %s
-            RETURNING id;
+            SELECT data_center
+            FROM files
+            WHERE username = %s
+              AND deleted_at IS NULL
+              AND name <> %s
+            ORDER BY modified_at DESC, id DESC
+            LIMIT 1;
             """,
-            (item_id, username),
+            (username, SYSTEM_CLIPBOARD_FILE_NAME),
         ).fetchone()
-        connection.commit()
 
-    return row is not None
+    if directory is None:
+        raise RuntimeError("The user's home directory could not be found")
+
+    return int(directory["id"]), str(provider["data_center"]) if provider else CLIPBOARD_DATA_CENTER
+
+
+async def _read_clipboard_document(file: File) -> list[dict[str, str]]:
+    """Download and decode the one JSON clipboard file from its configured storage provider."""
+
+    provider = DataCenter(file.data_center)
+    if provider is None:
+        raise RuntimeError("The clipboard file uses an unavailable storage provider")
+
+    parts: list[bytes] = []
+    for link in file.links:
+        parts.append(await provider.download(str(link)))
+    raw = b"".join(parts)
+
+    if len(raw) != int(file.size or 0):
+        raise ValueError("The clipboard file is incomplete")
+
+    document = json.loads(raw.decode("utf-8"))
+    if not isinstance(document, dict) or document.get("version") != 1:
+        raise ValueError("The clipboard file has an unsupported format")
+
+    raw_items = document.get("items")
+    if not isinstance(raw_items, list):
+        raise ValueError("The clipboard file does not contain a valid entries list")
+
+    items: list[dict[str, str]] = []
+    for value in raw_items:
+        if not isinstance(value, dict):
+            continue
+        item_id = value.get("id")
+        content = value.get("content")
+        created_at = value.get("created_at")
+        if not isinstance(item_id, str) or not isinstance(content, str) or not isinstance(created_at, str):
+            continue
+        items.append({"id": item_id, "content": content, "created_at": created_at})
+
+    return items
+
+
+async def _write_clipboard_document(username: str, items: list[dict[str, str]], file: File | None) -> File:
+    """Create the account's clipboard file once, then replace its contents on later edits."""
+
+    payload = json.dumps(
+        {"version": 1, "username": username, "items": items},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    if len(payload) > CLIPBOARD_MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="Your clipboard file is full. Delete older entries before saving more text.",
+        )
+
+    file_path = TRANSFER_PATH / username / "clipboard" / uuid4().hex / SYSTEM_CLIPBOARD_FILE_NAME
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        async with aiofiles.open(file_path, "wb") as output:
+            await output.write(payload)
+
+        if file is None:
+            directory_id, data_center = await to_thread(_get_clipboard_home_sync, username)
+            file = File(
+                directory_id=directory_id,
+                name=SYSTEM_CLIPBOARD_FILE_NAME,
+                type="application/json",
+                size=0,
+                modified_at=datetime.now(timezone.utc),
+                links=[],
+                data_center=data_center,
+                username=username,
+            )
+            async with aclosing(file_upload(
+                    file,
+                    file_path,
+                    bypass_queue=True,
+                    total_size=len(payload),
+            )) as upload_stream:
+                async for _ in upload_stream:
+                    pass
+        else:
+            previous_links = list(file.links)
+            previous_size = int(file.size or 0)
+            previous_modified_at = file.modified_at
+            file.links = []
+            file.size = 0
+            try:
+                async with aclosing(file_upload(
+                        file,
+                        file_path,
+                        intermediate=True,
+                        bypass_queue=True,
+                        total_size=len(payload),
+                )) as upload_stream:
+                    async for _ in upload_stream:
+                        pass
+
+                file.modified_at = datetime.now(timezone.utc)
+                await file.update()
+            except Exception:
+                file.links = previous_links
+                file.size = previous_size
+                file.modified_at = previous_modified_at
+                raise
+
+        return file
+    finally:
+        file_path.unlink(missing_ok=True)
+        try:
+            file_path.parent.rmdir()
+        except OSError:
+            pass
+
+
+def _clipboard_lock(username: str):
+    """Return a Redis-backed lock so multiple devices cannot overwrite each other's changes."""
+
+    return Redis.redis.lock(
+        "clipboard:file:" + username,
+        timeout=300,
+        blocking_timeout=300,
+    )
 
 
 @router.get("/clipboard")
-async def list_clipboard_items(user: User = Depends(get_current_user)) -> dict[str, list[dict[str, object]]]:
-    """Return the signed-in user's clipboard entries for cross-device access."""
+async def list_clipboard_items(user: User = Depends(get_current_user)) -> dict[str, list[dict[str, str]]]:
+    """Read entries from one account-owned file; initialize that file empty on first use."""
 
-    items = await to_thread(_list_clipboard_items, user.username)
+    async with _clipboard_lock(user.username):
+        file = await to_thread(_get_clipboard_file_sync, user.username)
+        if file is None:
+            await _write_clipboard_document(user.username, [], None)
+            file = await to_thread(_get_clipboard_file_sync, user.username)
+
+        if file is None:
+            raise HTTPException(status_code=502, detail="The clipboard file could not be initialized")
+
+        try:
+            items = await _read_clipboard_document(file)
+        except Exception as error:
+            write_log("ERROR", Database, "CLIPBOARD", user.username, f"Could not read clipboard file: {type(error).__name__}: {error}")
+            raise HTTPException(status_code=502, detail="The stored clipboard file could not be read") from error
+
     return {"items": items}
 
 
@@ -186,29 +332,49 @@ async def list_clipboard_items(user: User = Depends(get_current_user)) -> dict[s
 async def create_clipboard_item(
         request: ClipboardCreateRequest,
         user: User = Depends(get_current_user),
-) -> dict[str, object]:
-    """Save one plain-text clipboard entry for the authenticated account."""
+) -> dict[str, str]:
+    """Append one metadata-tagged text entry by rewriting the user's single clipboard file."""
 
     if not request.content.strip():
         raise HTTPException(status_code=400, detail="Clipboard text cannot be empty")
-    if len(request.content) > 1_000_000:
+    if len(request.content.encode("utf-8")) > CLIPBOARD_MAX_ENTRY_SIZE:
         raise HTTPException(status_code=413, detail="Clipboard text cannot exceed 1 MB")
 
-    return await to_thread(_create_clipboard_item, user.username, request.content)
+    async with _clipboard_lock(user.username):
+        file = await to_thread(_get_clipboard_file_sync, user.username)
+        items = await _read_clipboard_document(file) if file is not None else []
+        item = {
+            "id": str(uuid4()),
+            "content": request.content,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await _write_clipboard_document(user.username, [item, *items], file)
+
+    return item
 
 
 @router.delete("/clipboard/{item_id}")
 async def delete_clipboard_item(
-        item_id: int,
+        item_id: str,
         user: User = Depends(get_current_user),
 ) -> dict[str, bool]:
-    """Delete one of the authenticated user's clipboard entries."""
+    """Remove one metadata-tagged entry by rewriting the same clipboard file."""
 
-    if item_id <= 0:
-        raise HTTPException(status_code=400, detail="Invalid clipboard entry ID")
+    try:
+        normalized_id = str(UUID(item_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise HTTPException(status_code=404, detail="Clipboard entry not found") from error
 
-    deleted = await to_thread(_delete_clipboard_item, user.username, item_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Clipboard entry not found")
+    async with _clipboard_lock(user.username):
+        file = await to_thread(_get_clipboard_file_sync, user.username)
+        if file is None:
+            raise HTTPException(status_code=404, detail="Clipboard entry not found")
+
+        items = await _read_clipboard_document(file)
+        remaining = [item for item in items if item["id"] != normalized_id]
+        if len(remaining) == len(items):
+            raise HTTPException(status_code=404, detail="Clipboard entry not found")
+
+        await _write_clipboard_document(user.username, remaining, file)
 
     return {"deleted": True}
